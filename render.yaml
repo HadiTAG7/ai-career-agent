@@ -42,6 +42,8 @@ services:
         sync: false
       - key: AI_MODEL
         value: mistral-small-2603
+      - key: RESUME_AI_MAX_OUTPUT_TOKENS
+        value: "4000"
       - key: AI_SAFETY_SALT
         generateValue: true
 

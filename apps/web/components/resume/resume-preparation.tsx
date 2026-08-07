@@ -20,15 +20,16 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   GuidedResumeInterview,
-  ResumePreview,
   type GuidedResumeAnswers,
 } from "@/components/resume/guided-resume-interview";
+import { ResumeAiWorkspace } from "@/components/resume/resume-ai-workspace";
 import {
   apiConfiguration,
   apiErrorMessage,
   ApiHttpError,
   createCareerProfile,
   createResumeDraft,
+  getCareerFacts,
   getCareerPathWorkspace,
   getCareerProfile,
   importCareerFile,
@@ -93,6 +94,7 @@ export function ResumePreparation() {
   const [retryKey, setRetryKey] = useState(0);
   const [profile, setProfile] = useState<ApiCareerProfile | null>(null);
   const [workspace, setWorkspace] = useState<CareerPathWorkspace | null>(null);
+  const [facts, setFacts] = useState<ApiCareerFact[]>([]);
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [profileError, setProfileError] = useState<unknown>(null);
   const [mode, setMode] = useState<StartMode>("upload");
@@ -115,9 +117,13 @@ export function ResumePreparation() {
         if (!active) return;
         setProfile(existingProfile);
         if (existingProfile) {
-          const providerWorkspace = await getCareerPathWorkspace();
+          const [providerWorkspace, profileFacts] = await Promise.all([
+            getCareerPathWorkspace(),
+            getCareerFacts(existingProfile.id),
+          ]);
           if (!active) return;
           setWorkspace(providerWorkspace);
+          setFacts(profileFacts);
         }
         setLoadState("ready");
       } catch (error) {
@@ -154,6 +160,7 @@ export function ResumePreparation() {
         preferredLanguage: locale,
       });
       setProfile(createdProfile);
+      setFacts([]);
       try {
         setWorkspace(await getCareerPathWorkspace());
       } catch (error) {
@@ -235,6 +242,7 @@ export function ResumePreparation() {
           dataSharingAcknowledged: true,
         });
       setResult(nextResult);
+      setFacts(await getCareerFacts(profile.id));
       setConsentAcknowledged(false);
       if (mode === "upload") {
         setFile(null);
@@ -252,8 +260,8 @@ export function ResumePreparation() {
       <h1 className="page-title">{locale === "ar" ? "ابدأ بسيرتك، ثم حدّد مسارك" : "Start with your resume, then choose your path"}</h1>
       <p className="mt-2 max-w-3xl text-base text-muted">
         {locale === "ar"
-          ? "ارفع سيرتك الحالية أو اكتب معلوماتك من الصفر. يحوّل المساعد النص المنقّح إلى حقائق مهنية منظّمة، وأنت تراجعها وتؤكد الصحيح قبل أن يستخدمها مستشار المسار."
-          : "Upload your current resume or describe your background from scratch. The assistant turns redacted text into structured career facts for you to review before the path adviser can use them."}
+          ? "ارفع سيرتك الحالية أو اكتب معلوماتك من الصفر. يفهم المساعد معلوماتك، يسألك عن النواقص، ثم يكتب سيرة احترافية قابلة للتعديل والتنزيل بصيغة PDF."
+          : "Upload your current resume or describe your background from scratch. The assistant understands your information, asks about gaps, then writes an editable professional resume you can download as a PDF."}
       </p>
     </header>
   );
@@ -351,7 +359,7 @@ export function ResumePreparation() {
           </span>
           <div className="min-w-0 flex-1">
             <h2 id="resume-provider-title" className="font-bold">{providerReady ? (locale === "ar" ? "مساعد السيرة الذكي جاهز" : "AI resume assistant is ready") : (locale === "ar" ? "مساعد السيرة الذكي غير مفعّل" : "AI resume assistant is not enabled")}</h2>
-            <p className="mt-1 text-sm text-muted">{providerReady ? (locale === "ar" ? "يحوّل النص المنقّح الذي يجهزه الخادم إلى حقائق مهنية قابلة للمراجعة." : "It turns redacted text prepared by the server into career facts for review.") : (locale === "ar" ? "لن نحلل أي مصدر ولن ننشئ نتيجة تجريبية حتى يُفعّل المزود على الخادم." : "No source will be analyzed and no demo result will be created until the server provider is enabled.")}</p>
+            <p className="mt-1 text-sm text-muted">{providerReady ? (locale === "ar" ? "يحلل معلوماتك، يولّد أسئلة متابعة، ويكتب الملخص والنقاط المهنية حتى تصبح السيرة جاهزة للمراجعة والتنزيل." : "It analyzes your information, generates follow-up questions, and writes the professional summary and bullets until your resume is ready to review and download.") : (locale === "ar" ? "لن نحلل أي مصدر ولن ننشئ نتيجة تجريبية حتى يُفعّل المزود على الخادم." : "No source will be analyzed and no demo result will be created until the server provider is enabled.")}</p>
           </div>
           <p className="shrink-0 text-xs font-semibold text-muted" aria-label={locale === "ar" ? "مزود ونموذج الذكاء الاصطناعي" : "AI provider and model"}>
             {workspace?.model ? `${workspace.provider} · ${workspace.model}` : (workspace?.provider ?? (locale === "ar" ? "غير متاح" : "Unavailable"))}
@@ -476,9 +484,7 @@ export function ResumePreparation() {
             </div>
           </form>
 
-          {result && mode === "create" && guidedAnswers ? (
-            <ResumePreview locale={locale} profile={profile} answers={guidedAnswers} facts={result.facts} />
-          ) : result ? (
+          {result ? (
             <section className="mt-7 rounded-xl border border-emerald bg-white p-5" aria-labelledby="resume-result-title" aria-live="polite">
               <div className="flex items-start gap-3">
                 <CheckCircle2 className="mt-0.5 h-6 w-6 shrink-0 text-emerald" aria-hidden="true" />
@@ -503,10 +509,16 @@ export function ResumePreparation() {
               </div>
               {resultAnalysisStatus !== "already_ai_analyzed" && result.facts.length > 0 ? <ul className="mt-4 border-y border-border">{result.facts.map((fact) => <FactReviewItem key={fact.id} fact={fact} locale={locale} />)}</ul> : null}
               {resultAnalysisStatus === "created" && result.facts.length === 0 ? <p className="mt-4 rounded-lg bg-amber-pale p-3 text-sm text-muted">{locale === "ar" ? "لم نجد حقائق واضحة كفاية. أضف تفاصيل أكثر ثم أعد المحاولة." : "We did not find enough clear facts. Add more detail and try again."}</p> : null}
-              <Link href={factsLinkHref} className="mt-5 inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald px-5 text-sm font-semibold text-white hover:bg-emerald-dark">
-                {locale === "ar" ? "افتح الحقائق وعدّلها" : "Open and edit facts"}
-                <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
-              </Link>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <a href="#resume-ai-workspace-title" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald px-5 text-sm font-semibold text-white hover:bg-emerald-dark">
+                  <Sparkles className="h-4 w-4" aria-hidden="true" />
+                  {locale === "ar" ? "كمّل كتابة السيرة بالذكاء" : "Continue writing with AI"}
+                </a>
+                <Link href={factsLinkHref} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-border bg-white px-5 text-sm font-semibold text-ink hover:border-emerald">
+                  {locale === "ar" ? "افتح الحقائق وعدّلها" : "Open and edit facts"}
+                  <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
+                </Link>
+              </div>
             </section>
           ) : null}
         </section>
@@ -517,8 +529,9 @@ export function ResumePreparation() {
             <h2 id="resume-process-title" className="mt-3 font-bold">{locale === "ar" ? "وش يصير بعد التحليل؟" : "What happens after analysis?"}</h2>
             <ol className="mt-4 space-y-4 text-sm text-muted">
               <li className="flex gap-3"><span className="font-bold text-emerald">1</span><span>{locale === "ar" ? "عند الرفع، يستخرج الخادم النص محليًا وينقّح البريد والهاتف والهوية وIBAN قبل إرساله للمساعد." : "For uploads, the server extracts text locally and redacts emails, phone numbers, national IDs, and IBANs before sending it to the assistant."}</span></li>
-              <li className="flex gap-3"><span className="font-bold text-emerald">2</span><span>{locale === "ar" ? "تراجع كل حقيقة وتصححها أو تؤكدها بنفسك." : "You review, correct, or confirm every fact yourself."}</span></li>
-              <li className="flex gap-3"><span className="font-bold text-emerald">3</span><span>{locale === "ar" ? "يستخدم مستشار المسار الحقائق المؤكدة فقط." : "The path adviser uses confirmed facts only."}</span></li>
+              <li className="flex gap-3"><span className="font-bold text-emerald">2</span><span>{locale === "ar" ? "يقرأ Mistral الحقائق المهنية ويسألك أسئلة مخصصة عن المعلومات الناقصة." : "Mistral reads the professional facts and asks tailored questions about missing information."}</span></li>
+              <li className="flex gap-3"><span className="font-bold text-emerald">3</span><span>{locale === "ar" ? "يكتب الملخص والأقسام والنقاط المهنية، ثم تعدّل أي كلمة داخل المحرر." : "It writes the summary, sections, and professional bullets, and you can edit every word."}</span></li>
+              <li className="flex gap-3"><span className="font-bold text-emerald">4</span><span>{locale === "ar" ? "تراجع النسخة النهائية وتحمّلها PDF، وبعدها تنتقل لتحديد المسار." : "Review the final version, download the PDF, then continue to path selection."}</span></li>
             </ol>
           </section>
 
@@ -532,6 +545,10 @@ export function ResumePreparation() {
           </section>
         </aside>
       </div>
+
+      {facts.length > 0 ? (
+        <ResumeAiWorkspace locale={locale} profile={profile} facts={facts} />
+      ) : null}
     </div>
   );
 }

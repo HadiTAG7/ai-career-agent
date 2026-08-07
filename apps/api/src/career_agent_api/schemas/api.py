@@ -190,6 +190,134 @@ class ResumeNarrativeCreate(BaseModel):
     data_sharing_acknowledged: bool = False
 
 
+class ResumeQuestionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language: PreferredLanguage
+    target_role: str | None = Field(default=None, max_length=300)
+    data_sharing_acknowledged: bool = False
+
+
+class ResumeQuestionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9_]+$")
+    category: FactCategory
+    question: str = Field(min_length=3, max_length=600)
+    why_it_matters: str = Field(min_length=3, max_length=500)
+    placeholder: str = Field(min_length=3, max_length=800)
+    required: bool = False
+
+
+class ResumeQuestionsRead(BaseModel):
+    provider: str
+    model: str
+    questions: list[ResumeQuestionRead] = Field(max_length=8)
+    covered_categories: list[FactCategory] = Field(max_length=10)
+
+
+class ResumeInterviewAnswerCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9_]+$")
+    category: FactCategory
+    question: str = Field(min_length=3, max_length=600)
+    answer: str = Field(default="", max_length=4_000)
+    skipped: bool = False
+
+    @model_validator(mode="after")
+    def answer_or_skip(self) -> "ResumeInterviewAnswerCreate":
+        self.answer = self.answer.strip()
+        if not self.skipped and not self.answer:
+            raise ValueError("answer cannot be blank unless the question is skipped")
+        return self
+
+
+ResumeSectionKey = Literal[
+    "experience",
+    "education",
+    "project",
+    "skill",
+    "certification",
+    "language",
+    "achievement",
+]
+
+
+class ResumeDraftItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9_]+$")
+    title: str = Field(min_length=1, max_length=500)
+    organization: str | None = Field(default=None, max_length=500)
+    date_range: str | None = Field(default=None, max_length=160)
+    location: str | None = Field(default=None, max_length=200)
+    bullets: list[str] = Field(default_factory=list, max_length=8)
+    evidence_handles: list[str] = Field(min_length=1, max_length=12)
+
+    @field_validator("bullets")
+    @classmethod
+    def clean_bullets(cls, value: list[str]) -> list[str]:
+        return [item.strip()[:1_000] for item in value if item.strip()]
+
+
+class ResumeDraftSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: ResumeSectionKey
+    title: str = Field(min_length=1, max_length=160)
+    items: list[ResumeDraftItem] = Field(min_length=1, max_length=30)
+
+
+class ResumeDraftContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    headline: str = Field(min_length=1, max_length=300)
+    professional_summary: str = Field(min_length=20, max_length=2_500)
+    summary_evidence_handles: list[str] = Field(min_length=1, max_length=15)
+    sections: list[ResumeDraftSection] = Field(min_length=1, max_length=7)
+
+    @field_validator("sections")
+    @classmethod
+    def unique_sections(cls, value: list[ResumeDraftSection]) -> list[ResumeDraftSection]:
+        keys = [section.key for section in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("resume section keys must be unique")
+        return value
+
+
+class ResumeDraftGenerateCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language: PreferredLanguage
+    target_role: str | None = Field(default=None, max_length=300)
+    answers: list[ResumeInterviewAnswerCreate] = Field(default_factory=list, max_length=20)
+    data_sharing_acknowledged: bool = False
+
+
+class ResumeDraftRead(ResumeDraftContent):
+    provider: str
+    model: str
+    fact_count: int = Field(ge=0, le=120)
+
+
+class ResumeExportContact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str | None = Field(default=None, max_length=320)
+    phone: str | None = Field(default=None, max_length=80)
+    linkedin: str | None = Field(default=None, max_length=500)
+
+
+class ResumeDraftExportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language: PreferredLanguage
+    draft: ResumeDraftContent
+    contact: ResumeExportContact = Field(default_factory=ResumeExportContact)
+    review_acknowledged: bool = False
+
+
 class CareerFactCreate(BaseModel):
     source_id: UUID
     category: FactCategory

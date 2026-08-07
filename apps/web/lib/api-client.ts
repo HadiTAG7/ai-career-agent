@@ -43,6 +43,12 @@ export function apiErrorMessage(error: unknown, locale: "ar" | "en") {
     if (error.code === "resume_ai_unavailable") return locale === "ar" ? "تعذر تحليل السيرة مؤقتًا. احتفظنا بمدخلاتك ويمكنك إعادة المحاولة." : "Resume analysis is temporarily unavailable. Your input is preserved so you can retry.";
     if (error.code === "resume_text_unreadable") return locale === "ar" ? "لم نجد نصًا مقروءًا في الملف. استخدم PDF نصيًا أو ملف DOCX؛ صور السيرة الممسوحة تحتاج دعم OCR لاحقًا." : "No readable text was found. Use a text-based PDF or DOCX; scanned resumes require OCR support later.";
     if (error.code === "resume_content_duplicate") return locale === "ar" ? "سبق استيراد الملف ولم يُحلل بالذكاء بعد." : "This file was imported before but has not been analyzed by AI yet.";
+    if (error.code === "resume_writer_consent_required") return locale === "ar" ? "وافق على استخدام الحقائق المهنية مع كاتب السيرة الذكي قبل المتابعة." : "Acknowledge sharing professional evidence with the AI resume writer before continuing.";
+    if (error.code === "resume_writer_not_configured") return locale === "ar" ? "كاتب السيرة الذكي غير مفعّل على الخادم." : "The AI resume writer is not enabled on the server.";
+    if (error.code === "resume_writer_unavailable") return locale === "ar" ? "تعذر تشغيل كاتب السيرة مؤقتًا. إجاباتك محفوظة في الصفحة ويمكنك إعادة المحاولة." : "The AI resume writer is temporarily unavailable. Your answers remain on the page so you can retry.";
+    if (error.code === "resume_writer_evidence_required") return locale === "ar" ? "حلّل سيرتك أو أكمل المقابلة المنظمة أولًا، ثم ابدأ الأسئلة الذكية." : "Analyze a resume or complete the guided interview before starting smart questions.";
+    if (error.code === "resume_review_required") return locale === "ar" ? "راجع نص السيرة ووافق عليه قبل تنزيل PDF." : "Review and approve the resume text before downloading the PDF.";
+    if (error.code === "resume_export_failed") return locale === "ar" ? "تعذر إنشاء ملف PDF مؤقتًا. حاول مرة أخرى." : "The PDF could not be generated. Please try again.";
     if (error.code === "career_profile_evidence_required") return locale === "ar" ? "جهّز سيرتك وراجع حقيقة مهنية واحدة على الأقل قبل تحديد المسار." : "Prepare your resume and confirm at least one career fact before discovering your path.";
     if (error.status === 401) return locale === "ar" ? "انتهت جلسة الدخول أو لم تعد صالحة. سجّل الدخول مجددًا." : "Your sign-in session is missing or expired. Please sign in again.";
     if (error.status === 422) return locale === "ar" ? `تعذر قبول البيانات: ${error.detail}` : `The submitted data was rejected: ${error.detail}`;
@@ -175,6 +181,70 @@ export type ApiImportResult = {
   facts: ApiCareerFact[];
   requires_user_review: boolean;
   analysis_status: "created" | "ai_upgraded" | "already_ai_analyzed";
+};
+
+export type ApiResumeFactCategory =
+  | "identity"
+  | "experience"
+  | "education"
+  | "skill"
+  | "project"
+  | "certification"
+  | "language"
+  | "achievement"
+  | "preference"
+  | "eligibility";
+
+export type ApiResumeSectionKey = Exclude<ApiResumeFactCategory, "identity" | "preference" | "eligibility">;
+
+export type ApiResumeQuestion = {
+  id: string;
+  category: ApiResumeFactCategory;
+  question: string;
+  why_it_matters: string;
+  placeholder: string;
+  required: boolean;
+};
+
+export type ApiResumeQuestionsResult = {
+  provider: string;
+  model: string;
+  questions: ApiResumeQuestion[];
+  covered_categories: ApiResumeFactCategory[];
+};
+
+export type ApiResumeInterviewAnswer = {
+  question_id: string;
+  category: ApiResumeFactCategory;
+  question: string;
+  answer: string;
+  skipped: boolean;
+};
+
+export type ApiResumeDraftItem = {
+  id: string;
+  title: string;
+  organization: string | null;
+  date_range: string | null;
+  location: string | null;
+  bullets: string[];
+  evidence_handles: string[];
+};
+
+export type ApiResumeDraftSection = {
+  key: ApiResumeSectionKey;
+  title: string;
+  items: ApiResumeDraftItem[];
+};
+
+export type ApiResumeDraft = {
+  headline: string;
+  professional_summary: string;
+  summary_evidence_handles: string[];
+  sections: ApiResumeDraftSection[];
+  provider: string;
+  model: string;
+  fact_count: number;
 };
 
 type BackendMatch = {
@@ -571,6 +641,82 @@ export async function createResumeDraft(
     }),
     timeoutMs: 60_000,
   });
+}
+
+export async function createResumeQuestions(
+  profileId: string,
+  input: { language: "ar" | "en"; targetRole?: string; dataSharingAcknowledged: boolean },
+) {
+  return apiRequest<ApiResumeQuestionsResult>(
+    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/questions`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        language: input.language,
+        target_role: input.targetRole?.trim() || null,
+        data_sharing_acknowledged: input.dataSharingAcknowledged,
+      }),
+      timeoutMs: 90_000,
+    },
+  );
+}
+
+export async function generateProfessionalResume(
+  profileId: string,
+  input: {
+    language: "ar" | "en";
+    targetRole?: string;
+    answers: ApiResumeInterviewAnswer[];
+    dataSharingAcknowledged: boolean;
+  },
+) {
+  return apiRequest<ApiResumeDraft>(
+    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/generate`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        language: input.language,
+        target_role: input.targetRole?.trim() || null,
+        answers: input.answers,
+        data_sharing_acknowledged: input.dataSharingAcknowledged,
+      }),
+      timeoutMs: 120_000,
+    },
+  );
+}
+
+export async function exportProfessionalResumePdf(
+  profileId: string,
+  input: {
+    language: "ar" | "en";
+    draft: ApiResumeDraft;
+    contact: { email?: string; phone?: string; linkedin?: string };
+    reviewAcknowledged: boolean;
+  },
+) {
+  const response = await apiResponse(
+    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/export`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        language: input.language,
+        draft: {
+          headline: input.draft.headline,
+          professional_summary: input.draft.professional_summary,
+          summary_evidence_handles: input.draft.summary_evidence_handles,
+          sections: input.draft.sections,
+        },
+        contact: {
+          email: input.contact.email?.trim() || null,
+          phone: input.contact.phone?.trim() || null,
+          linkedin: input.contact.linkedin?.trim() || null,
+        },
+        review_acknowledged: input.reviewAcknowledged,
+      }),
+      timeoutMs: 90_000,
+    },
+  );
+  return response.blob();
 }
 
 export async function confirmCareerFact(profileId: string, factId: string) {

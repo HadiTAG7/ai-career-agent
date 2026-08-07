@@ -48,6 +48,7 @@ coverage/
 test-results/
 playwright-report/
 .cache/
+/tmp/
 *.log
 
 # Editors and operating systems

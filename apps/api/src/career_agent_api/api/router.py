@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from career_agent_api.api.career_path import router as career_path_router
+from career_agent_api.api.resume import router as resume_router
 from career_agent_api.core.auth import CurrentUser
 from career_agent_api.core.config import Settings, get_settings
 from career_agent_api.db.session import get_db
@@ -106,6 +107,7 @@ from career_agent_api.services.resume_intake import (
 
 router = APIRouter(prefix="/v1")
 router.include_router(career_path_router)
+router.include_router(resume_router)
 
 POST_SUBMISSION_STATUSES = {
     ApplicationStatus.SUBMITTED,

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 
 const apiMocks = vi.hoisted(() => ({
   getCareerProfile: vi.fn(),
+  getCareerFacts: vi.fn(),
   createCareerProfile: vi.fn(),
   getCareerPathWorkspace: vi.fn(),
   importCareerFile: vi.fn(),
@@ -145,6 +146,7 @@ describe("AI resume preparation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     apiMocks.getCareerProfile.mockResolvedValue(profile);
+    apiMocks.getCareerFacts.mockResolvedValue([]);
     apiMocks.getCareerPathWorkspace.mockResolvedValue(readyWorkspace);
     apiMocks.importCareerFile.mockResolvedValue(importResult);
     apiMocks.createResumeDraft.mockResolvedValue(importResult);
@@ -520,25 +522,29 @@ describe("AI resume preparation", () => {
     expect(payload.content).not.toContain("المعدل:");
   }, 15_000);
 
-  it("renders a full review-only resume preview without claiming a final PDF", async () => {
+  it("hands extracted facts to the AI writer instead of treating them as a final resume", async () => {
+    const generatedFacts = [
+      {
+        ...extractedFact,
+        detail: null,
+        source_excerpt: "Evidence — Skills / المهارات: استخدام Excel لبناء تقارير أسبوعية",
+      },
+      {
+        ...extractedFact,
+        id: "fact-2",
+        category: "achievement",
+        label: "خفض وقت إعداد التقرير إلى النصف",
+        detail: null,
+        source_excerpt: "Evidence — Achievements / الإنجازات: خفض وقت إعداد التقرير إلى النصف",
+      },
+    ];
     apiMocks.createResumeDraft.mockResolvedValue({
       ...importResult,
-      facts: [
-        {
-          ...extractedFact,
-          detail: null,
-          source_excerpt: "Evidence — Skills / المهارات: استخدام Excel لبناء تقارير أسبوعية",
-        },
-        {
-          ...extractedFact,
-          id: "fact-2",
-          category: "achievement",
-          label: "خفض وقت إعداد التقرير إلى النصف",
-          detail: null,
-          source_excerpt: "Evidence — Achievements / الإنجازات: خفض وقت إعداد التقرير إلى النصف",
-        },
-      ],
+      facts: generatedFacts,
     });
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(generatedFacts);
     const user = userEvent.setup();
     await renderResumePage();
     await completeMinimalInterview(user, { field: "التقنية المالية" });
@@ -546,24 +552,12 @@ describe("AI resume preparation", () => {
     await user.click(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ }));
     await user.click(screen.getByRole("button", { name: "ابنِ مسودة السيرة" }));
 
-    expect(await screen.findByText("معاينة مسودة السيرة")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "من المعلومات الخام إلى سيرة جاهزة للتحميل" })).toBeVisible();
     const [, payload] = apiMocks.createResumeDraft.mock.calls[0];
     expect(payload.content).toContain("Context — Target role / الهدف المهني: التقنية المالية");
-    expect(screen.getByRole("heading", { name: "هادي الغانم" })).toBeVisible();
-    expect(screen.getByText("الرياض")).toBeVisible();
-    expect(screen.getAllByText("التقنية المالية").length).toBeGreaterThan(0);
-    expect(screen.getByText("hadi@example.com")).toBeVisible();
-    expect(screen.getByText("مسودة تحتاج مراجعة")).toBeVisible();
-    expect(screen.getByText("استخدام Excel لبناء تقارير أسبوعية")).toBeVisible();
-    expect(screen.queryByText("Evidence — Skills / المهارات: استخدام Excel لبناء تقارير أسبوعية")).not.toBeInTheDocument();
-    expect(screen.getAllByText("خفض وقت إعداد التقرير إلى النصف")).toHaveLength(1);
-    ["الملخص المهني", "التعليم", "الخبرة العملية", "المشاريع والتطوع", "المهارات", "الشهادات", "اللغات", "الإنجازات"].forEach((section) => {
-      expect(screen.getByRole("heading", { name: section })).toBeVisible();
-    });
-    expect(screen.getByText("هذه ليست سيرة نهائية")).toBeVisible();
-    expect(screen.getByText(/لم نؤكد أي حقيقة ولم ننشئ ملف PDF/)).toBeVisible();
-    expect(screen.queryByRole("button", { name: /تنزيل/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /راجع الحقائق وأكد الصحيح/ })).toHaveAttribute("href", "/profile");
+    expect(screen.getByRole("button", { name: "ابدأ الأسئلة الذكية" })).toBeDisabled();
+    expect(screen.getByText(/تمنع حواجز التحقق الادعاءات غير المدعومة بالحقائق، وتبقى مراجعتك ضرورية قبل التحميل/)).toBeVisible();
+    expect(screen.queryByText("هذه ليست سيرة نهائية")).not.toBeInTheDocument();
   }, 15_000);
 
   it("shows provider readiness and never enables fake generation when AI is disabled", async () => {
