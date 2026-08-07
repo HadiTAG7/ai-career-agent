@@ -16,8 +16,7 @@ services:
     # running idempotent Alembic migrations before Uvicorn is safe for staging.
     startCommand: alembic upgrade head && uvicorn career_agent_api.main:app --app-dir src --host 0.0.0.0 --port $PORT
     healthCheckPath: /health/ready
-    # Keep staging deployable even when external CI runners are unavailable.
-    autoDeployTrigger: commit
+    autoDeployTrigger: checksPass
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.13

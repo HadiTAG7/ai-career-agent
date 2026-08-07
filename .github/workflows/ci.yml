@@ -1,8 +1,9 @@
 name: CI
 
 on:
-  # Temporarily manual while the GitHub-hosted runner is unavailable for this account.
-  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
