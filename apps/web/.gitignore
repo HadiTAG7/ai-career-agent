@@ -1,0 +1,6 @@
+.next
+node_modules
+.node_modules-corrupt
+coverage
+*.log
+.env*.local

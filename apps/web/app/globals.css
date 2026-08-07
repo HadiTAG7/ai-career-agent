@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --ink: #102a43;
+  --muted: #62758a;
+  --border: #d9e2ec;
+  --emerald: #07845c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: #ffffff;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #ffffff;
+  color: var(--ink);
+  font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  text-rendering: optimizeLegibility;
+}
+
+html[lang="en"] body {
+  font-family: "Inter", "Segoe UI", Arial, sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+a,
+button,
+input,
+textarea,
+select,
+[tabindex]:not([tabindex="-1"]) {
+  outline: none;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px var(--emerald);
+}
+
+::selection {
+  background: #cceadd;
+  color: var(--ink);
+}
+
+@layer components {
+  .page-wrap {
+    @apply mx-auto w-full max-w-[1240px] px-5 py-8 md:px-8 lg:py-10;
+  }
+
+  .page-title {
+    @apply text-[28px] font-bold leading-[1.42] tracking-[-0.02em] text-ink md:text-[32px];
+  }
+
+  .section-title {
+    @apply text-xl font-bold leading-[1.5] text-ink;
+  }
+
+  .field-label {
+    @apply mb-2 block text-sm font-semibold text-ink;
+  }
+
+  .field-control {
+    @apply min-h-12 w-full rounded-lg border border-border bg-white px-4 text-[15px] text-ink placeholder:text-slate-400 hover:border-slate-400 focus:border-emerald;
+  }
+
+  .open-section {
+    @apply border-b border-border py-6;
+  }
+
+  .subtle-link {
+    @apply inline-flex min-h-11 items-center gap-2 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-900;
+  }
+}
+
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.page-enter {
+  animation: page-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

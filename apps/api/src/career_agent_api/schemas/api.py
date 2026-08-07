@@ -1,0 +1,546 @@
+from datetime import date, datetime
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from career_agent_api.models.enums import (
+    ApplicationStatus,
+    ApplyDecision,
+    CareerPathMessageRole,
+    ClaimType,
+    ConfidenceBand,
+    DocumentKind,
+    DocumentStatus,
+    FactCategory,
+    IntakeMethod,
+    OutcomeKind,
+    PreferredLanguage,
+    ReadinessBand,
+    RequirementCategory,
+    RequirementImportance,
+    RequirementMatchStatus,
+    SourceKind,
+    VerificationStatus,
+)
+
+
+class ORMModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CareerProfileCreate(BaseModel):
+    full_name: str = Field(min_length=1, max_length=255)
+    headline: str | None = Field(default=None, max_length=500)
+    summary: str | None = Field(default=None, max_length=10_000)
+    preferred_language: PreferredLanguage = PreferredLanguage.AR
+    city: str | None = Field(default=None, max_length=120)
+    years_experience: float | None = Field(default=None, ge=0, le=60)
+    completed_fact_categories: list[FactCategory] = Field(default_factory=list, max_length=10)
+
+
+class CareerProfileUpdate(BaseModel):
+    full_name: str | None = Field(default=None, min_length=1, max_length=255)
+    headline: str | None = Field(default=None, max_length=500)
+    summary: str | None = Field(default=None, max_length=10_000)
+    preferred_language: PreferredLanguage | None = None
+    city: str | None = Field(default=None, max_length=120)
+    years_experience: float | None = Field(default=None, ge=0, le=60)
+    completed_fact_categories: list[FactCategory] | None = Field(default=None, max_length=10)
+
+    @model_validator(mode="after")
+    def non_nullable_profile_fields(self) -> "CareerProfileUpdate":
+        for field_name in ("full_name", "preferred_language", "completed_fact_categories"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
+
+
+class CareerProfileRead(ORMModel):
+    id: UUID
+    owner_id: str
+    full_name: str
+    headline: str | None
+    summary: str | None
+    preferred_language: PreferredLanguage
+    city: str | None
+    years_experience: float | None
+    completed_fact_categories: list[FactCategory]
+    evidence_revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class CareerProfileSummaryRead(BaseModel):
+    profile_id: UUID
+    profile_quality_percent: int
+    confirmed_facts: int
+    total_facts: int
+    extracted_facts: int
+    unconfirmed_facts: int
+    covered_quality_categories: list[FactCategory]
+    total_quality_categories: int
+
+
+class CareerPathEvidenceRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["confirmed_fact", "chat"]
+    reference: str = Field(min_length=1, max_length=500)
+
+
+class CareerPathSuggestionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=2, max_length=160)
+    why_fit: list[str] = Field(min_length=1, max_length=4)
+    unknowns: list[str] = Field(max_length=4)
+    seven_day_experiment: str = Field(min_length=2, max_length=1_000)
+    signal: Literal["strong", "partial", "needs_experiment"]
+    evidence: list[CareerPathEvidenceRead] = Field(max_length=6)
+
+    @field_validator("why_fit", "unknowns")
+    @classmethod
+    def bounded_points(cls, value: list[str]) -> list[str]:
+        return [item.strip()[:500] for item in value if item.strip()]
+
+
+class CareerPathGeneratedReply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=4_000)
+    suggestions: list[CareerPathSuggestionRead] = Field(max_length=3)
+
+
+class CareerPathMessageRead(ORMModel):
+    id: UUID
+    role: CareerPathMessageRole
+    content: str
+    suggestions: list[CareerPathSuggestionRead]
+    model: str | None
+    created_at: datetime
+
+
+class CareerPathConversationRead(ORMModel):
+    id: UUID
+    revision: int
+    last_evidence_revision: int | None
+    consent_version: str | None
+    consented_at: datetime | None
+    messages: list[CareerPathMessageRead]
+
+
+class CareerPathWorkspaceRead(BaseModel):
+    provider_ready: bool
+    provider: str
+    model: str | None
+    profile_id: UUID
+    confirmed_fact_count: int
+    consent_required: bool
+    conversation: CareerPathConversationRead | None
+
+
+class CareerPathMessageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=4_000)
+    client_turn_id: UUID
+    expected_revision: int = Field(ge=0)
+    data_sharing_acknowledged: bool = False
+
+    @field_validator("content")
+    @classmethod
+    def non_blank_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("content cannot be blank")
+        return value
+
+
+class EvidenceSourceCreate(BaseModel):
+    kind: SourceKind
+    label: str = Field(min_length=1, max_length=255)
+    original_filename: str | None = Field(default=None, max_length=500)
+    source_locator: str | None = Field(default=None, max_length=1000)
+    source_metadata: dict[str, Any] = Field(default_factory=dict, max_length=50)
+
+
+class EvidenceSourceRead(ORMModel):
+    id: UUID
+    profile_id: UUID
+    kind: SourceKind
+    label: str
+    original_filename: str | None
+    source_locator: str | None
+    source_metadata: dict[str, Any]
+    created_at: datetime
+
+
+class ImportResultRead(BaseModel):
+    source: EvidenceSourceRead
+    facts: list["CareerFactRead"]
+    requires_user_review: bool = True
+    analysis_status: Literal["created", "ai_upgraded", "already_ai_analyzed"] = "created"
+
+
+class ResumeNarrativeCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=20, max_length=20_000)
+    data_sharing_acknowledged: bool = False
+
+
+class CareerFactCreate(BaseModel):
+    source_id: UUID
+    category: FactCategory
+    label: str = Field(min_length=1, max_length=500)
+    detail: str | None = Field(default=None, max_length=20_000)
+    structured_value: dict[str, Any] = Field(default_factory=dict, max_length=100)
+    source_excerpt: str | None = Field(default=None, max_length=10_000)
+    extraction_confidence: float | None = Field(default=None, ge=0, le=1)
+
+    @field_validator("structured_value")
+    @classmethod
+    def reject_reserved_structured_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if "profile_field" in value or any(key.startswith("_") for key in value):
+            raise ValueError("Reserved structured evidence key")
+        return value
+
+
+class CareerFactUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: FactCategory | None = None
+    label: str | None = Field(default=None, min_length=1, max_length=500)
+    detail: str | None = Field(default=None, max_length=20_000)
+    structured_value: dict[str, Any] | None = Field(default=None, max_length=100)
+    correction_reason: str = Field(min_length=3, max_length=2_000)
+
+    @field_validator("structured_value")
+    @classmethod
+    def reject_reserved_structured_keys(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value and ("profile_field" in value or any(key.startswith("_") for key in value)):
+            raise ValueError("Reserved structured evidence key")
+        return value
+
+    @model_validator(mode="after")
+    def contains_an_edit(self) -> "CareerFactUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one fact field must be supplied")
+        editable = {"category", "label", "detail", "structured_value"}
+        if not (self.model_fields_set & editable):
+            raise ValueError("At least one fact field must be supplied")
+        for field_name in ("category", "label", "structured_value"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
+
+
+class CareerFactRead(ORMModel):
+    id: UUID
+    profile_id: UUID
+    source_id: UUID
+    category: FactCategory
+    label: str
+    detail: str | None
+    structured_value: dict[str, Any]
+    source_excerpt: str | None
+    verification_status: VerificationStatus
+    extraction_confidence: float | None
+    confirmed_at: datetime | None
+    user_correction_reason: str | None
+    user_corrected_at: datetime | None
+    original_extraction: dict[str, Any] | None
+    created_at: datetime
+
+
+class SourcePolicyRead(ORMModel):
+    id: UUID
+    source_key: str
+    display_name: str
+    intake_method: IntakeMethod
+    permission_basis: str
+    terms_reviewed_at: date | None
+    can_search_automatically: bool
+    can_fetch_details: bool
+    can_apply_automatically: bool
+    active: bool
+
+
+class JobRequirementCreate(BaseModel):
+    category: RequirementCategory
+    importance: RequirementImportance
+    text: str = Field(min_length=1, max_length=10_000)
+    normalized_value: str | None = Field(default=None, max_length=500)
+    weight: int = Field(default=1, ge=1, le=10)
+
+
+class JobRequirementRead(ORMModel):
+    id: UUID
+    category: RequirementCategory
+    importance: RequirementImportance
+    text: str
+    normalized_value: str | None
+    weight: int
+    needs_user_review: bool
+    is_active: bool
+    user_added: bool
+    user_correction_reason: str | None
+    user_corrected_at: datetime | None
+    original_extraction: dict[str, Any] | None
+
+
+class JobRequirementUpdate(BaseModel):
+    category: RequirementCategory | None = None
+    importance: RequirementImportance | None = None
+    text: str | None = Field(default=None, min_length=1, max_length=10_000)
+    normalized_value: str | None = Field(default=None, max_length=500)
+    weight: int | None = Field(default=None, ge=1, le=10)
+    correction_reason: str = Field(min_length=3, max_length=2_000)
+
+    @model_validator(mode="after")
+    def contains_a_correction(self) -> "JobRequirementUpdate":
+        editable = {"category", "importance", "text", "normalized_value", "weight"}
+        if not (self.model_fields_set & editable):
+            raise ValueError("At least one requirement field must be supplied")
+        for field_name in ("category", "importance", "text", "weight"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
+
+
+class JobRequirementUserCreate(BaseModel):
+    category: RequirementCategory
+    importance: RequirementImportance
+    text: str = Field(min_length=1, max_length=10_000)
+    normalized_value: str | None = Field(default=None, max_length=500)
+    weight: int = Field(default=1, ge=1, le=10)
+    correction_reason: str = Field(min_length=3, max_length=2_000)
+
+
+class JobRequirementRetire(BaseModel):
+    correction_reason: str = Field(min_length=3, max_length=2_000)
+
+
+class ManualJobCreate(BaseModel):
+    source_key: str = Field(default="manual", min_length=1, max_length=120)
+    source_url: str | None = Field(default=None, max_length=2000)
+    title: str = Field(min_length=1, max_length=500)
+    company: str = Field(min_length=1, max_length=500)
+    description: str = Field(min_length=1, max_length=100_000)
+    location: str | None = Field(default=None, max_length=255)
+    posted_at: date | None = None
+    expires_at: date | None = None
+    requirements: list[JobRequirementCreate] = Field(default_factory=list, max_length=100)
+
+    @field_validator("source_key")
+    @classmethod
+    def normalize_source_key(cls, value: str) -> str:
+        return value.strip().lower().replace(" ", "-")
+
+    @field_validator("source_url")
+    @classmethod
+    def safe_source_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        lowered = value.casefold()
+        if not lowered.startswith(("https://", "http://")):
+            raise ValueError("source_url must use http or https")
+        return value
+
+    @model_validator(mode="after")
+    def dates_in_order(self) -> "ManualJobCreate":
+        if self.posted_at and self.expires_at and self.expires_at < self.posted_at:
+            raise ValueError("expires_at cannot precede posted_at")
+        return self
+
+
+class JobRead(ORMModel):
+    id: UUID
+    source_url: str | None
+    intake_method: IntakeMethod
+    title: str
+    company: str
+    description: str
+    location: str | None
+    posted_at: date | None
+    expires_at: date | None
+    fetched_at: datetime | None
+    requirements_reviewed_at: datetime | None
+    requirements_reviewed_by_owner_id: str | None
+    requirements_review_hash: str | None
+    requirements_revision: int
+    created_at: datetime
+    source_policy: SourcePolicyRead
+    requirements: list[JobRequirementRead]
+
+
+class RequirementMatchRead(ORMModel):
+    id: UUID
+    requirement_id: UUID
+    evidence_fact_id: UUID | None
+    status: RequirementMatchStatus
+    reason: str
+    earned_weight: int
+    requirement: JobRequirementRead
+
+
+class MatchAnalysisRead(ORMModel):
+    id: UUID
+    profile_id: UUID
+    job_id: UUID
+    coverage_score: int
+    mandatory_coverage_score: int
+    readiness_band: ReadinessBand
+    confidence_band: ConfidenceBand
+    decision: ApplyDecision
+    explanation: dict[str, Any]
+    invalidated_at: datetime | None
+    invalidation_reason: str | None
+    evidence_revision: int
+    requirements_revision: int
+    requirement_matches: list[RequirementMatchRead]
+    created_at: datetime
+
+
+class AnalyzeJobRequest(BaseModel):
+    profile_id: UUID
+
+
+class DocumentClaimCreate(BaseModel):
+    claim_type: ClaimType
+    text: str = Field(min_length=1, max_length=10_000)
+    evidence_fact_ids: list[UUID] = Field(default_factory=list, max_length=25)
+
+
+class DocumentCreate(BaseModel):
+    profile_id: UUID
+    job_id: UUID | None = None
+    base_version_id: UUID | None = None
+    kind: DocumentKind
+    language: PreferredLanguage
+    title: str = Field(min_length=1, max_length=500)
+    status: DocumentStatus = DocumentStatus.DRAFT
+    content: str | None = Field(default=None, max_length=100_000)
+    diff_summary: dict[str, Any] = Field(default_factory=dict, max_length=100)
+    claims: list[DocumentClaimCreate] = Field(min_length=1, max_length=250)
+
+
+class ClaimEvidenceRead(ORMModel):
+    fact_id: UUID
+
+
+class DocumentClaimRead(ORMModel):
+    id: UUID
+    claim_type: ClaimType
+    text: str
+    position: int
+    supported: bool
+    evidence_links: list[ClaimEvidenceRead]
+
+
+class DocumentRead(ORMModel):
+    id: UUID
+    profile_id: UUID
+    job_id: UUID | None
+    base_version_id: UUID | None
+    kind: DocumentKind
+    language: PreferredLanguage
+    title: str
+    status: DocumentStatus
+    content: str
+    diff_summary: dict[str, Any]
+    reviewed_at: datetime | None
+    reviewed_by_owner_id: str | None
+    review_hash: str | None
+    evidence_revision_at_review: int | None
+    claims: list[DocumentClaimRead]
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentValidationRead(BaseModel):
+    document_id: UUID
+    valid: bool
+    unsupported_claim_ids: list[UUID]
+    export_allowed: bool
+
+
+class ApplicationCreate(BaseModel):
+    profile_id: UUID
+    job_id: UUID
+    analysis_id: UUID | None = None
+    cv_document_id: UUID | None = None
+    cover_letter_document_id: UUID | None = None
+    status: ApplicationStatus = ApplicationStatus.SAVED
+    next_action_at: datetime | None = None
+    notes: str | None = Field(default=None, max_length=10_000)
+
+
+class ApplicationUpdate(BaseModel):
+    analysis_id: UUID | None = None
+    cv_document_id: UUID | None = None
+    cover_letter_document_id: UUID | None = None
+    status: ApplicationStatus | None = None
+    submitted_at: datetime | None = None
+    next_action_at: datetime | None = None
+    notes: str | None = Field(default=None, max_length=10_000)
+
+
+class OutcomeCreate(BaseModel):
+    kind: OutcomeKind
+    occurred_at: datetime
+    confirmed_by_user: bool = True
+    qualified_human_interview: bool = False
+    detail: str | None = Field(default=None, max_length=10_000)
+
+    @model_validator(mode="after")
+    def qualified_means_interview(self) -> "OutcomeCreate":
+        if self.qualified_human_interview and self.kind is not OutcomeKind.INTERVIEW:
+            raise ValueError("qualified_human_interview is only valid for interview outcomes")
+        return self
+
+
+class OutcomeRead(ORMModel):
+    id: UUID
+    application_id: UUID
+    kind: OutcomeKind
+    occurred_at: datetime
+    confirmed_by_user: bool
+    qualified_human_interview: bool
+    detail: str | None
+
+
+class ApplicationRead(ORMModel):
+    id: UUID
+    profile_id: UUID
+    job_id: UUID
+    analysis_id: UUID | None
+    cv_document_id: UUID | None
+    cover_letter_document_id: UUID | None
+    status: ApplicationStatus
+    submitted_at: datetime | None
+    next_action_at: datetime | None
+    notes: str | None
+    outcomes: list[OutcomeRead]
+    created_at: datetime
+    updated_at: datetime
+
+
+class DashboardRead(BaseModel):
+    profile_id: UUID
+    profile_quality_percent: int
+    confirmed_facts: int
+    total_facts: int
+    application_pipeline: dict[ApplicationStatus, int]
+    submitted_applications: int
+    qualified_interviews: int
+    qualified_interviews_per_completed_application: float | None
+    actions_due: int
+    top_opportunities: list[MatchAnalysisRead]
+
+
+class DeletionReceiptRead(ORMModel):
+    id: UUID
+    completed_at: datetime
+    deleted_counts: dict[str, int]
