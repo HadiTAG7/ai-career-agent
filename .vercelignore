@@ -1,0 +1,29 @@
+# The Vercel project builds the Next.js app from apps/web.
+# Keep local runtime data and non-web monorepo files out of CLI uploads.
+.local/
+.ruff_cache/
+.github/
+.env*
+.gitignore
+.vercel/
+apps/api/
+docs/
+Makefile
+README.md
+dev.cmd
+dev.ps1
+docker-compose.yml
+render.yaml
+
+# Web-only development artifacts.
+apps/web/.dockerignore
+apps/web/.env*
+apps/web/.gitignore
+apps/web/.next/
+apps/web/.vercel/
+apps/web/node_modules/
+apps/web/coverage/
+apps/web/test-results/
+apps/web/playwright-report/
+apps/web/tests/
+apps/web/*.tsbuildinfo
