@@ -41,6 +41,9 @@ storage/
 *.sqlite
 *.sqlite3
 *.db
+*.db-journal
+*.db-shm
+*.db-wal
 celerybeat-schedule*
 
 # Test and tooling output

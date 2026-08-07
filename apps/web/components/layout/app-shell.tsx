@@ -48,6 +48,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { locale, text } = useLocale();
   const [menuOpen, setMenuOpen] = useState(false);
+  const resumeWorkspace = pathname.startsWith("/resume");
 
   useEffect(() => {
     // Route changes are an external navigation event; close any stale mobile drawer.
@@ -57,11 +58,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen bg-white text-ink">
-      <aside className="fixed inset-y-0 right-0 z-40 hidden w-[244px] border-l border-border bg-white lg:flex lg:flex-col" aria-label={locale === "ar" ? "التنقل الرئيسي" : "Primary navigation"}>
-        <div className="flex h-20 items-center border-b border-border px-6">
-          <Brand />
+      <aside className={cn(
+        "fixed inset-y-0 right-0 z-40 hidden border-l lg:flex lg:flex-col",
+        resumeWorkspace ? "w-[174px] border-emerald-dark bg-[#00563f] text-white" : "w-[244px] border-border bg-white",
+      )} aria-label={locale === "ar" ? "التنقل الرئيسي" : "Primary navigation"}>
+        <div className={cn("flex h-20 items-center px-6", resumeWorkspace ? "border-b border-white/15 [&_a]:!text-white" : "border-b border-border")}>
+          <Brand compact={resumeWorkspace} />
+          {resumeWorkspace ? <span className="ms-2 text-sm font-bold leading-5 text-white">{locale === "ar" ? "المستشار\nالمهني" : "Career\nAgent"}</span> : null}
         </div>
-        <nav className="flex-1 space-y-2 px-4 py-8">
+        <nav className={cn("flex-1 space-y-2", resumeWorkspace ? "px-3 py-7" : "px-4 py-8")}>
           {navItems.map((item) => {
             const active = isCurrentPath(pathname, item.href);
             const Icon = item.icon;
@@ -69,26 +74,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Link
                 className={cn(
                   "relative flex min-h-[52px] items-center gap-4 rounded-lg px-4 text-sm font-semibold transition-colors",
-                  active ? "bg-emerald-pale text-ink" : "text-ink hover:bg-slate-50"
+                  resumeWorkspace
+                    ? active ? "bg-[#0b7c5b] text-white" : "text-white/88 hover:bg-white/10 hover:text-white"
+                    : active ? "bg-emerald-pale text-ink" : "text-ink hover:bg-slate-50"
                 )}
                 href={item.href}
                 key={item.href}
                 aria-current={active ? "page" : undefined}
               >
-                {active ? <span className="absolute -right-4 h-full w-1 rounded-l-full bg-emerald" aria-hidden="true" /> : null}
-                <Icon className={cn("h-5 w-5", active ? "text-emerald" : "text-ink")} strokeWidth={1.7} aria-hidden="true" />
+                {active && !resumeWorkspace ? <span className="absolute -right-4 h-full w-1 rounded-l-full bg-emerald" aria-hidden="true" /> : null}
+                <Icon className={cn("h-5 w-5", resumeWorkspace ? "text-current" : active ? "text-emerald" : "text-ink")} strokeWidth={1.7} aria-hidden="true" />
                 {text(item.label)}
               </Link>
             );
           })}
         </nav>
-        <div className="border-t border-border p-5">
+        <div className={cn("border-t p-5", resumeWorkspace ? "border-white/15 [&_*]:!text-white" : "border-border")}>
           <div className="min-h-12 rounded-lg px-2 py-1"><AccountControl sidebar /></div>
         </div>
       </aside>
 
-      <div className="lg:pr-[244px]">
-        <header className="sticky top-0 z-30 hidden h-20 items-center justify-between border-b border-border bg-white/95 px-8 backdrop-blur-sm lg:flex">
+      <div className={resumeWorkspace ? "lg:pr-[174px]" : "lg:pr-[244px]"}>
+        {resumeWorkspace ? null : <header className="sticky top-0 z-30 hidden h-20 items-center justify-between border-b border-border bg-white/95 px-8 backdrop-blur-sm lg:flex">
           <div className="flex items-center gap-3">
             <LanguageSwitch />
             {!apiConfiguration.baseUrl ? <DemoNotice compact /> : null}
@@ -100,7 +107,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
             <AccountControl />
           </div>
-        </header>
+        </header>}
 
         <header className="sticky top-0 z-30 flex h-[86px] items-center justify-between border-b border-border bg-white/95 px-5 backdrop-blur-sm lg:hidden">
           <Brand />
@@ -135,7 +142,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         ) : null}
 
-        <main className="min-h-[calc(100vh-80px)] pb-24 lg:pb-0">{children}</main>
+        <main className={cn("pb-24 lg:pb-0", resumeWorkspace ? "min-h-screen" : "min-h-[calc(100vh-80px)]")}>{children}</main>
       </div>
 
       <nav className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-border bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-sm lg:hidden" aria-label={locale === "ar" ? "التنقل الرئيسي" : "Primary navigation"}>

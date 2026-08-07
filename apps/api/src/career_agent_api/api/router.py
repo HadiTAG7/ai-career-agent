@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from career_agent_api.api.career_path import router as career_path_router
 from career_agent_api.api.resume import router as resume_router
+from career_agent_api.api.resume_workspace import router as resume_workspace_router
 from career_agent_api.core.auth import CurrentUser
 from career_agent_api.core.config import Settings, get_settings
 from career_agent_api.db.session import get_db
@@ -33,6 +34,7 @@ from career_agent_api.models.domain import (
     MatchAnalysis,
     Outcome,
     RequirementMatch,
+    ResumeWorkspace,
     SourcePolicy,
 )
 from career_agent_api.models.enums import (
@@ -77,6 +79,7 @@ from career_agent_api.schemas.api import (
     OutcomeCreate,
     OutcomeRead,
     ResumeNarrativeCreate,
+    ResumeWorkspaceRead,
     SourcePolicyRead,
 )
 from career_agent_api.services.ai import get_ai_provider
@@ -108,6 +111,9 @@ from career_agent_api.services.resume_intake import (
 router = APIRouter(prefix="/v1")
 router.include_router(career_path_router)
 router.include_router(resume_router)
+router.include_router(resume_workspace_router)
+
+RESUME_EXTRACTOR_VERSION = "resume-records-v2"
 
 POST_SUBMISSION_STATUSES = {
     ApplicationStatus.SUBMITTED,
@@ -813,10 +819,24 @@ async def import_professional_file(
             "resume_content_duplicate",
             "This file has already been imported",
         )
-    if existing_source and existing_source.source_metadata.get("ai_enhanced") is True:
+    if (
+        existing_source
+        and existing_source.source_metadata.get("ai_enhanced") is True
+        and existing_source.source_metadata.get("extractor_version")
+        == RESUME_EXTRACTOR_VERSION
+    ):
+        existing_facts = list(
+            (
+                await session.scalars(
+                    select(CareerFact)
+                    .where(CareerFact.source_id == existing_source.id)
+                    .order_by(CareerFact.created_at)
+                )
+            ).all()
+        )
         return ImportResultRead(
             source=existing_source,
-            facts=[],
+            facts=existing_facts,
             requires_user_review=True,
             analysis_status="already_ai_analyzed",
         )
@@ -870,10 +890,23 @@ async def import_professional_file(
 
     if existing_source:
         await session.refresh(existing_source)
-        if existing_source.source_metadata.get("ai_enhanced") is True:
+        if (
+            existing_source.source_metadata.get("ai_enhanced") is True
+            and existing_source.source_metadata.get("extractor_version")
+            == RESUME_EXTRACTOR_VERSION
+        ):
+            current_facts = list(
+                (
+                    await session.scalars(
+                        select(CareerFact)
+                        .where(CareerFact.source_id == existing_source.id)
+                        .order_by(CareerFact.created_at)
+                    )
+                ).all()
+            )
             return ImportResultRead(
                 source=existing_source,
-                facts=[],
+                facts=current_facts,
                 requires_user_review=True,
                 analysis_status="already_ai_analyzed",
             )
@@ -919,11 +952,22 @@ async def import_professional_file(
             **existing_source.source_metadata,
             "candidate_fact_count": len(candidates),
             "ai_enhanced": True,
+            "extractor_version": RESUME_EXTRACTOR_VERSION,
             "ai_provider": provider.provider_name,
             "ai_model": provider.model,
             "consent_version": _resume_ai_consent_version(provider),
         }
-        if changed_facts:
+        stale_extracted_ids = [
+            fact.id
+            for fact in existing_facts
+            if fact.id not in matched_fact_ids
+            and fact.verification_status is VerificationStatus.EXTRACTED
+        ]
+        if stale_extracted_ids:
+            await session.execute(
+                delete(CareerFact).where(CareerFact.id.in_(stale_extracted_ids))
+            )
+        if changed_facts or stale_extracted_ids:
             await _invalidate_profile_analyses(
                 session,
                 profile_id,
@@ -952,6 +996,7 @@ async def import_professional_file(
             {
                 "candidate_fact_count": len(candidates),
                 "ai_enhanced": True,
+                "extractor_version": RESUME_EXTRACTOR_VERSION,
                 "ai_provider": provider.provider_name,
                 "ai_model": provider.model,
                 "consent_version": _resume_ai_consent_version(provider),
@@ -993,6 +1038,32 @@ async def import_professional_file(
         facts=facts,
         requires_user_review=True,
         analysis_status="created",
+    )
+
+
+@router.post(
+    "/profiles/{profile_id}/resume-workspace/import",
+    response_model=ImportResultRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_resume_workspace_file(
+    profile_id: UUID,
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    data_sharing_acknowledged: bool = Form(False),
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_db),
+) -> ImportResultRead:
+    """Use the canonical import pipeline from inside the conversational workspace."""
+
+    return await import_professional_file(
+        profile_id=profile_id,
+        user=user,
+        file=file,
+        use_ai=True,
+        data_sharing_acknowledged=data_sharing_acknowledged,
+        settings=settings,
+        session=session,
     )
 
 
@@ -2043,8 +2114,16 @@ async def export_my_data(
         .where(CareerPathConversation.profile_id == profile_id)
         .options(selectinload(CareerPathConversation.messages))
     )
+    resume_workspace = await session.scalar(
+        select(ResumeWorkspace)
+        .where(ResumeWorkspace.profile_id == profile_id)
+        .options(
+            selectinload(ResumeWorkspace.messages),
+            selectinload(ResumeWorkspace.versions),
+        )
+    )
     payload = {
-        "schema_version": "2026-08-07",
+        "schema_version": "2026-08-08",
         "generated_at": datetime.now(UTC).isoformat(),
         "profile": _dump(CareerProfileRead, profile) if profile else None,
         "evidence_sources": [_dump(EvidenceSourceRead, item) for item in sources],
@@ -2065,6 +2144,9 @@ async def export_my_data(
             ]
             if career_path_conversation
             else []
+        ),
+        "resume_workspace": (
+            _dump(ResumeWorkspaceRead, resume_workspace) if resume_workspace else None
         ),
     }
     return JSONResponse(
@@ -2174,6 +2256,16 @@ async def delete_my_data(
             )
         ).all()
     )
+    resume_workspace = await session.scalar(
+        select(ResumeWorkspace)
+        .where(ResumeWorkspace.profile_id == profile_id)
+        .options(
+            selectinload(ResumeWorkspace.messages),
+            selectinload(ResumeWorkspace.versions),
+        )
+    )
+    resume_message_count = len(resume_workspace.messages) if resume_workspace else 0
+    resume_version_count = len(resume_workspace.versions) if resume_workspace else 0
 
     # Explicit ordering covers owner-keyed jobs as well as profile-keyed records; no shared source
     # policy is removed. The receipt deliberately contains no user identifier.
@@ -2222,6 +2314,9 @@ async def delete_my_data(
             "outcomes": len(outcome_ids),
             "career_path_conversations": len(career_path_conversation_ids),
             "career_path_messages": len(career_path_message_ids),
+            "resume_workspaces": int(resume_workspace is not None),
+            "resume_messages": resume_message_count,
+            "resume_draft_versions": resume_version_count,
         },
     )
     session.add(receipt)

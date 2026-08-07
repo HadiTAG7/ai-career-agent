@@ -198,7 +198,7 @@ async def test_ai_docx_import_uses_provider_and_returns_existing_ai_analysis_on_
     duplicate_result = duplicate.json()
     assert duplicate_result["analysis_status"] == "already_ai_analyzed"
     assert duplicate_result["source"]["id"] == result["source"]["id"]
-    assert duplicate_result["facts"] == []
+    assert [fact["label"] for fact in duplicate_result["facts"]] == ["Python"]
     assert len(provider.contexts) == 1
 
 
@@ -285,7 +285,12 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
     assert repeated.status_code == 201, repeated.text
     assert repeated.json()["analysis_status"] == "already_ai_analyzed"
     assert repeated.json()["source"]["id"] == source_id
-    assert repeated.json()["facts"] == []
+    assert {fact["label"].casefold() for fact in repeated.json()["facts"]} == {
+        "python",
+        "sql",
+        "bachelor of computer science",
+        "portfolio project",
+    }
     assert len(provider.contexts) == 1
 
 

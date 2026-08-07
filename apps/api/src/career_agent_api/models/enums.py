@@ -11,6 +11,49 @@ class CareerPathMessageRole(StrEnum):
     ASSISTANT = "assistant"
 
 
+class ResumeWorkspaceStage(StrEnum):
+    UNDERSTANDING = "understanding"
+    WRITING = "writing"
+    REVIEW = "review"
+    COMPLETE = "complete"
+
+
+class ResumeMessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ResumeMessageKind(StrEnum):
+    TEXT = "text"
+    QUESTION = "question"
+    UNDERSTANDING = "understanding"
+    SUGGESTION = "suggestion"
+    STATUS = "status"
+
+
+class ResumeMessageStatus(StrEnum):
+    SENT = "sent"
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    CORRECTED = "corrected"
+    DISMISSED = "dismissed"
+    FAILED = "failed"
+
+
+class ResumeDraftVersionReason(StrEnum):
+    INITIAL_GENERATION = "initial_generation"
+    MANUAL_EDIT = "manual_edit"
+    AI_REWRITE = "ai_rewrite"
+    RESTORE = "restore"
+    REVIEW = "review"
+
+
+class ResumeDraftStatus(StrEnum):
+    DRAFT = "draft"
+    REVIEWED = "reviewed"
+    EXPORT_READY = "export_ready"
+
+
 class SourceKind(StrEnum):
     MANUAL = "manual"
     CV_UPLOAD = "cv_upload"

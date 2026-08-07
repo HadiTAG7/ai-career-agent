@@ -14,6 +14,9 @@ from career_agent_api.models.domain import (
     MatchAnalysis,
     Outcome,
     RequirementMatch,
+    ResumeDraftVersion,
+    ResumeMessage,
+    ResumeWorkspace,
     SourcePolicy,
 )
 
@@ -33,5 +36,8 @@ __all__ = [
     "MatchAnalysis",
     "Outcome",
     "RequirementMatch",
+    "ResumeDraftVersion",
+    "ResumeMessage",
+    "ResumeWorkspace",
     "SourcePolicy",
 ]

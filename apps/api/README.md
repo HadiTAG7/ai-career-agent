@@ -54,13 +54,18 @@ development can enable Mistral in `apps/api/.env`:
 AI_PROVIDER=mistral
 MISTRAL_API_KEY=replace-with-your-mistral-key
 AI_MODEL=mistral-small-2603
+# Optional: leave blank to use AI_MODEL and the same Mistral key for both tasks.
+RESUME_INTERVIEW_MODEL=
+RESUME_WRITER_MODEL=
 AI_SAFETY_SALT=replace-with-a-long-random-secret
 ```
 
 For OpenAI, select `AI_PROVIDER=openai`, set `OPENAI_API_KEY`, and choose an OpenAI model instead.
 Never put either secret in `apps/web` or a `NEXT_PUBLIC_*` variable.
 
-Restart the API after changing these values. Provider keys remain server-side. Both integrations
+Restart the API after changing these values. The conversational resume workspace uses the same
+provider account and key; the optional interview/writer settings only route tasks to different
+models when explicitly configured. Provider keys remain server-side. Both integrations
 send a bounded local conversation context, filter identity and unconfirmed profile data, require
 fresh data-sharing acknowledgement when the provider changes, and never turn a chat statement into
 a confirmed career fact. OpenAI uses the Responses API with `store=false`. Mistral uses stateless

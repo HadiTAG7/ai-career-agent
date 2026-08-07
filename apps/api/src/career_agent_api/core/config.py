@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     ai_request_timeout_seconds: float = Field(default=25, ge=5, le=60)
     ai_max_output_tokens: int = Field(default=800, ge=200, le=1000)
     resume_ai_max_output_tokens: int = Field(default=4_000, ge=1_000, le=8_000)
+    resume_workspace_v2: bool = True
+    resume_interview_model: str | None = Field(default=None, min_length=1, max_length=120)
+    resume_writer_model: str | None = Field(default=None, min_length=1, max_length=120)
     max_import_bytes: int = Field(default=10_000_000, ge=1_000_000, le=25_000_000)
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"

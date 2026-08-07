@@ -185,6 +185,136 @@ def test_build_resume_segments_redacts_pii_and_drops_empty_contact_lines() -> No
         assert sensitive not in serialized
 
 
+def test_build_resume_segments_removes_names_addresses_and_reference_contacts() -> None:
+    segments = build_resume_segments(
+        """
+        Hadi Alghanim
+        Data Analyst
+        hadi@example.test | linkedin.com/in/hadi-alghanim
+        221B Baker Street, London NW1 6XE
+        Professional Experience
+        Data Analyst — Acme Corporation; office: 123 Main Street, Riyadh 12345
+        Education
+        BSc Computer Science — King Saud University
+        References
+        Sarah Ahmed
+        Engineering Manager — Acme Corporation
+        sarah.ahmed@example.test | +966 55 222 3344
+        """
+    )
+
+    serialized = "\n".join(segment.text for segment in segments)
+    for private_value in (
+        "Hadi Alghanim",
+        "hadi@example.test",
+        "linkedin.com/in/hadi-alghanim",
+        "221B Baker Street",
+        "NW1 6XE",
+        "123 Main Street",
+        "Sarah Ahmed",
+        "sarah.ahmed@example.test",
+        "+966 55 222 3344",
+    ):
+        assert private_value not in serialized
+    assert "Acme Corporation" in serialized
+    assert "King Saud University" in serialized
+
+
+def test_build_resume_segments_applies_arabic_identity_and_reference_privacy() -> None:
+    segments = build_resume_segments(
+        """
+        الاسم الكامل: هادي الغانم
+        الجوال: +966 55 123 4567
+        العنوان البريدي: الرياض، حي النرجس، شارع عثمان بن عفان، مبنى 12
+        الخبرة
+        محلل بيانات — شركة سداد
+        التعليم
+        بكالوريوس علوم حاسب — جامعة الملك سعود
+        المراجع
+        سارة أحمد
+        مديرة هندسية — شركة مرجعية
+        sara@example.test
+        """
+    )
+
+    serialized = "\n".join(segment.text for segment in segments)
+    for private_value in (
+        "هادي الغانم",
+        "+966 55 123 4567",
+        "حي النرجس",
+        "شارع عثمان بن عفان",
+        "سارة أحمد",
+        "sara@example.test",
+        "شركة مرجعية",
+    ):
+        assert private_value not in serialized
+    assert "شركة سداد" in serialized
+    assert "جامعة الملك سعود" in serialized
+
+
+def test_provider_segment_sanitizer_cannot_bypass_contextual_privacy() -> None:
+    context = ResumeIntakeProviderContext(
+        locale="en",
+        mode="upload",
+        segments=(
+            ResumeSegment(
+                handle="profile",
+                text=(
+                    "Name: Hadi Alghanim\n"
+                    "Address: 14 King Road, Riyadh 12345\n"
+                    "Professional Experience\n"
+                    "Engineer — Acme Corporation"
+                ),
+            ),
+            ResumeSegment(
+                handle="references",
+                text=(
+                    "References: Sarah Ahmed | Engineering Manager | "
+                    "sarah@example.test | +966 55 222 3344"
+                ),
+            ),
+            ResumeSegment(
+                handle="education",
+                text="Education\nBSc — King Saud University",
+            ),
+        ),
+    )
+
+    sanitized = resume_intake._sanitized_segments(context)
+
+    serialized = repr(sanitized)
+    for private_value in (
+        "Hadi Alghanim",
+        "14 King Road",
+        "Sarah Ahmed",
+        "sarah@example.test",
+        "+966 55 222 3344",
+    ):
+        assert private_value not in serialized
+    assert "Acme Corporation" in serialized
+    assert "King Saud University" in serialized
+
+
+def test_contextual_name_filter_preserves_standalone_professional_titles() -> None:
+    assert build_resume_segments("Inventory Dashboard") == (
+        ResumeSegment(handle="segment_1", text="Inventory Dashboard"),
+    )
+
+
+def test_inline_resume_header_name_is_removed_before_segment_building() -> None:
+    segments = build_resume_segments(
+        "hadi alghanim | Data Analyst | hadi@example.test\n"
+        "Professional Experience\n"
+        "Data Analyst — Acme Corporation"
+    )
+
+    serialized = repr(segments)
+    assert "hadi alghanim" not in serialized.casefold()
+    assert "hadi@example.test" not in serialized
+    assert "Data Analyst" in serialized
+    assert "Acme Corporation" in serialized
+
+
 def test_build_resume_segments_enforces_segment_and_character_caps() -> None:
     many_segments = build_resume_segments("\n".join(f"Skill {index}" for index in range(500)))
     assert len(many_segments) == MAX_RESUME_SEGMENTS
@@ -203,6 +333,125 @@ def test_build_resume_segments_joins_a_standalone_guided_label_to_its_answer() -
             text="Evidence — Education / التعليم : BSc in Computer Science",
         ),
     )
+
+
+def test_build_resume_segments_keeps_section_context_and_repairs_wrapped_sentences() -> None:
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        Data Analyst — Acme; responsibilities: Built and
+        maintained weekly reports; tools: Python, Power BI
+        """
+    )
+
+    assert segments == (
+        ResumeSegment(
+            handle="segment_1",
+            text=(
+                "Professional Experience : Data Analyst — Acme; responsibilities: Built and "
+                "maintained weekly reports; tools: Python, Power BI"
+            ),
+        ),
+    )
+
+
+def test_generated_headings_and_dangling_fragments_are_not_facts() -> None:
+    generated = resume_intake._GeneratedResumeFacts.model_validate(
+        {
+            "facts": [
+                {
+                    "category": "experience",
+                    "label": "Professional Experience",
+                    "detail": None,
+                    "source_handle": "segment_1",
+                },
+                {
+                    "category": "experience",
+                    "label": "Built and",
+                    "detail": None,
+                    "source_handle": "segment_2",
+                },
+            ]
+        }
+    )
+
+    resolved = resume_intake._resolve_generated_facts(
+        generated,
+        (
+            ResumeSegment("segment_1", "Professional Experience"),
+            ResumeSegment("segment_2", "Built and"),
+        ),
+    )
+
+    assert resolved == []
+
+
+def test_unlabelled_responsibility_is_not_misclassified_as_an_organization() -> None:
+    responsibility = "Analyzed sales data using Power BI"
+
+    record = resume_intake._record_from_candidate(
+        category=FactCategory.EXPERIENCE,
+        label="Data Analyst",
+        detail=responsibility,
+        source_handle="segment_1",
+        source_excerpt=f"Data Analyst — {responsibility}",
+    )
+
+    assert record.organization is None
+    assert record.responsibilities == [responsibility]
+
+    arabic_responsibility = "تحليل بيانات المبيعات"
+    arabic_record = resume_intake._record_from_candidate(
+        category=FactCategory.EXPERIENCE,
+        label="محلل بيانات",
+        detail=arabic_responsibility,
+        source_handle="segment_2",
+        source_excerpt=f"محلل بيانات — {arabic_responsibility}",
+    )
+    assert arabic_record.organization is None
+    assert arabic_record.responsibilities == [arabic_responsibility]
+
+
+def test_short_name_like_context_can_still_be_an_organization() -> None:
+    record = resume_intake._record_from_candidate(
+        category=FactCategory.PROJECT,
+        label="Inventory dashboard",
+        detail="University Project; responsibilities: Built weekly reports",
+        source_handle="segment_1",
+        source_excerpt=(
+            "Inventory dashboard — University Project; responsibilities: Built weekly reports"
+        ),
+    )
+
+    assert record.organization == "University Project"
+    assert record.responsibilities == ["Built weekly reports"]
+
+
+@pytest.mark.asyncio
+async def test_section_scoped_local_fallback_creates_a_complete_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(content=json.dumps({"facts": []}))
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    context = ResumeIntakeProviderContext(
+        locale="en",
+        mode="upload",
+        segments=build_resume_segments(
+            """
+            Professional Experience
+            Data Analyst — Acme; responsibilities: Built weekly reports; tools: Python
+            """
+        ),
+    )
+
+    result = await provider.generate(context)
+
+    experience = next(item for item in result if item.category == FactCategory.EXPERIENCE)
+    assert experience.label == "Data Analyst"
+    assert experience.detail == "Acme; responsibilities: Built weekly reports; tools: Python"
+    assert experience.structured_value["organization"] == "Acme"
+    assert experience.structured_value["responsibilities"] == ["Built weekly reports"]
 
 
 @pytest.mark.asyncio
@@ -255,6 +504,99 @@ async def test_mistral_request_is_strict_bounded_and_privacy_preserving(
     assert "mistral-secret" not in serialized
     for forbidden_field in ("filename", "owner", "metadata", "safety_identifier", "tools"):
         assert forbidden_field not in request
+
+
+@pytest.mark.asyncio
+async def test_intake_writes_an_evidence_addressable_structured_resume_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail = (
+        "Acme; period: 2023–2025; responsibilities: Built weekly reports; "
+        "outcome: Reduced review time; tools: Python, Power BI"
+    )
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "experience",
+                        "label": "Data Analyst",
+                        "detail": detail,
+                        "source_handle": "segment_1",
+                    }
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    context = ResumeIntakeProviderContext(
+        locale="en",
+        mode="builder",
+        segments=(
+            ResumeSegment(
+                "segment_1",
+                f"Evidence — Experience / الخبرة: Data Analyst — {detail}",
+            ),
+        ),
+    )
+
+    result = await provider.generate(context)
+
+    assert len(result) == 1
+    record = result[0].structured_value
+    assert record == {
+        "schema_version": "resume_record.v1",
+        "record_type": "experience",
+        "source_handles": ["segment_1"],
+        "title": "Data Analyst",
+        "organization": "Acme",
+        "date_range": "2023–2025",
+        "responsibilities": ["Built weekly reports"],
+        "outcomes": ["Reduced review time"],
+        "tools": ["Python", "Power BI"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("detail", "recommended"),
+    [
+        ("University; GPA: 3.2/4", True),
+        ("University; GPA: 3.1/4", False),
+        ("University; GPA: 2.8/4; honors: honors", True),
+    ],
+)
+async def test_structured_education_record_applies_eighty_percent_or_honors_gpa_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    detail: str,
+    recommended: bool,
+) -> None:
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "education",
+                        "label": "BSc Computer Science",
+                        "detail": detail,
+                        "source_handle": "segment_1",
+                    }
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    result = await provider.generate(
+        ResumeIntakeProviderContext(
+            locale="en",
+            mode="upload",
+            segments=(ResumeSegment("segment_1", f"BSc Computer Science — {detail}"),),
+        )
+    )
+
+    assert result[0].structured_value["gpa_display_recommended"] is recommended
 
 
 @pytest.mark.asyncio

@@ -7,15 +7,18 @@ from uuid import UUID
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
+    event,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -39,6 +42,12 @@ from career_agent_api.models.enums import (
     RequirementCategory,
     RequirementImportance,
     RequirementMatchStatus,
+    ResumeDraftStatus,
+    ResumeDraftVersionReason,
+    ResumeMessageKind,
+    ResumeMessageRole,
+    ResumeMessageStatus,
+    ResumeWorkspaceStage,
     SourceKind,
     VerificationStatus,
 )
@@ -76,6 +85,9 @@ class CareerProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="profile", cascade="all, delete-orphan"
     )
     career_path_conversation: Mapped[CareerPathConversation | None] = relationship(
+        back_populates="profile", cascade="all, delete-orphan", uselist=False
+    )
+    resume_workspace: Mapped[ResumeWorkspace | None] = relationship(
         back_populates="profile", cascade="all, delete-orphan", uselist=False
     )
 
@@ -171,6 +183,144 @@ class CareerPathMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     client_turn_id: Mapped[UUID | None] = mapped_column(Uuid)
 
     conversation: Mapped[CareerPathConversation] = relationship(back_populates="messages")
+
+
+class ResumeWorkspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """The durable, owner-scoped state for the conversational resume builder."""
+
+    __tablename__ = "resume_workspaces"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="revision_non_negative"),
+        CheckConstraint("evidence_revision >= 0", name="evidence_revision_non_negative"),
+        CheckConstraint("readiness_score >= 0 AND readiness_score <= 100", name="readiness_range"),
+        CheckConstraint("draft_revision >= 0", name="draft_revision_non_negative"),
+    )
+
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("career_profiles.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    language: Mapped[PreferredLanguage] = mapped_column(
+        enum_type(PreferredLanguage, "resume_workspace_language"),
+        default=PreferredLanguage.AR,
+    )
+    stage: Mapped[ResumeWorkspaceStage] = mapped_column(
+        enum_type(ResumeWorkspaceStage, "resume_workspace_stage"),
+        default=ResumeWorkspaceStage.UNDERSTANDING,
+        index=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_revision: Mapped[int] = mapped_column(Integer, default=0)
+    readiness_score: Mapped[int] = mapped_column(Integer, default=0)
+    section_coverage: Mapped[dict[str, bool]] = mapped_column(JSON, default=dict)
+    current_draft: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    draft_revision: Mapped[int] = mapped_column(Integer, default=0)
+    contact: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    pending_understanding: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    pending_suggestion: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    consent_version: Mapped[str | None] = mapped_column(String(40))
+    consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider: Mapped[str | None] = mapped_column(String(80))
+    model: Mapped[str | None] = mapped_column(String(120))
+    provider_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    profile: Mapped[CareerProfile] = relationship(back_populates="resume_workspace")
+    messages: Mapped[list[ResumeMessage]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="ResumeMessage.sequence",
+    )
+    versions: Mapped[list[ResumeDraftVersion]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="ResumeDraftVersion.version",
+        foreign_keys="ResumeDraftVersion.workspace_id",
+    )
+
+
+class ResumeMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "resume_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "sequence", name="uq_resume_messages_workspace_sequence"
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "client_turn_id",
+            name="uq_resume_messages_workspace_client_turn",
+        ),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        Index("ix_resume_messages_workspace_status", "workspace_id", "status"),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("resume_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[ResumeMessageRole] = mapped_column(
+        enum_type(ResumeMessageRole, "resume_message_role")
+    )
+    kind: Mapped[ResumeMessageKind] = mapped_column(
+        enum_type(ResumeMessageKind, "resume_message_kind"),
+        default=ResumeMessageKind.TEXT,
+    )
+    content: Mapped[str] = mapped_column(Text)
+    structured_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[ResumeMessageStatus] = mapped_column(
+        enum_type(ResumeMessageStatus, "resume_message_status"),
+        default=ResumeMessageStatus.SENT,
+        index=True,
+    )
+    client_turn_id: Mapped[UUID | None] = mapped_column(Uuid)
+
+    workspace: Mapped[ResumeWorkspace] = relationship(back_populates="messages")
+
+
+class ResumeDraftVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """An append-only snapshot; edits create a new row instead of mutating this one."""
+
+    __tablename__ = "resume_draft_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "version", name="uq_resume_draft_versions_workspace_version"
+        ),
+        CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint("evidence_revision >= 0", name="evidence_revision_non_negative"),
+        Index("ix_resume_draft_versions_workspace_status", "workspace_id", "status"),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("resume_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    base_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("resume_draft_versions.id", ondelete="SET NULL"), index=True
+    )
+    reason: Mapped[ResumeDraftVersionReason] = mapped_column(
+        enum_type(ResumeDraftVersionReason, "resume_draft_version_reason")
+    )
+    status: Mapped[ResumeDraftStatus] = mapped_column(
+        enum_type(ResumeDraftStatus, "resume_draft_status"),
+        default=ResumeDraftStatus.DRAFT,
+        index=True,
+    )
+    content: Mapped[dict[str, Any]] = mapped_column(JSON)
+    diff: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evidence_revision: Mapped[int] = mapped_column(Integer)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by_owner_id: Mapped[str | None] = mapped_column(String(255))
+    review_hash: Mapped[str | None] = mapped_column(String(64))
+
+    workspace: Mapped[ResumeWorkspace] = relationship(
+        back_populates="versions", foreign_keys=[workspace_id]
+    )
+    base_version: Mapped[ResumeDraftVersion | None] = relationship(
+        remote_side="ResumeDraftVersion.id", foreign_keys=[base_version_id]
+    )
+
+
+@event.listens_for(ResumeDraftVersion, "before_update", propagate=True)
+def _prevent_resume_draft_version_update(*_: object) -> None:
+    raise ValueError("ResumeDraftVersion rows are immutable; create a new version instead")
 
 
 class SourcePolicy(UUIDPrimaryKeyMixin, TimestampMixin, Base):

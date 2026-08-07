@@ -1,14 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type {
+  ApiCareerFact,
+  ApiResumeDraftContent,
+  ApiResumeWorkspace,
+} from "@/lib/api-client";
 
 const apiMocks = vi.hoisted(() => ({
   getCareerProfile: vi.fn(),
   getCareerFacts: vi.fn(),
+  getResumeWorkspace: vi.fn(),
   createCareerProfile: vi.fn(),
-  getCareerPathWorkspace: vi.fn(),
-  importCareerFile: vi.fn(),
-  createResumeDraft: vi.fn(),
+  startResumeWorkspace: vi.fn(),
+  sendResumeWorkspaceMessage: vi.fn(),
+  importResumeWorkspaceFile: vi.fn(),
+  confirmCareerFact: vi.fn(),
+  confirmResumeUnderstanding: vi.fn(),
+  correctResumeUnderstanding: vi.fn(),
+  patchResumeWorkspaceDraft: vi.fn(),
+  rewriteResumeDraftSelection: vi.fn(),
+  decideResumeRewriteSuggestion: vi.fn(),
+  getResumeDraftVersions: vi.fn(),
+  restoreResumeDraftVersion: vi.fn(),
+  reviewResumeWorkspace: vi.fn(),
+  previewResumeWorkspacePdf: vi.fn(),
+  exportResumeWorkspacePdf: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", async (importOriginal) => {
@@ -23,573 +40,600 @@ vi.mock("@/lib/api-client", async (importOriginal) => {
 const profile = {
   id: "profile-1",
   full_name: "هادي الغانم",
-  headline: null,
+  headline: "محلل بيانات",
   preferred_language: "ar" as const,
   city: "الرياض",
   completed_fact_categories: [],
 };
 
-const readyWorkspace = {
-  provider_ready: true,
-  provider: "mistral",
-  model: "mistral-small-2603",
-  profile_id: profile.id,
-  confirmed_fact_count: 0,
-  consent_required: true,
-  conversation: null,
+const draft: ApiResumeDraftContent = {
+  headline: "محلل بيانات",
+  professional_summary: "محلل بيانات يحول المعلومات إلى تقارير واضحة تساعد الفرق على اتخاذ قرارات أفضل.",
+  summary_evidence_handles: ["fact:fact-1"],
+  sections: [
+    {
+      key: "experience",
+      title: "الخبرة المهنية",
+      items: [
+        {
+          id: "experience_1",
+          title: "محلل بيانات",
+          organization: "شركة التقنية",
+          date_range: "2023 - الآن",
+          location: "الرياض",
+          bullets: ["بنيت لوحات Power BI لمتابعة مؤشرات الأداء."],
+          evidence_handles: ["fact:fact-1"],
+        },
+      ],
+    },
+  ],
 };
 
-const extractedFact = {
+const assistantQuestion = {
+  id: "message-1",
+  sequence: 1,
+  role: "assistant" as const,
+  kind: "question" as const,
+  content: "احكِ لي عن تجربة مهنية تفخر بها.",
+  structured_payload: {},
+  status: "sent" as const,
+  client_turn_id: null,
+  created_at: "2026-08-08T10:00:00Z",
+};
+
+function makeWorkspace(overrides: Partial<ApiResumeWorkspace> = {}): ApiResumeWorkspace {
+  return {
+    id: "workspace-1",
+    profile_id: profile.id,
+    language: "ar",
+    stage: "understanding",
+    revision: 0,
+    evidence_revision: 1,
+    readiness_score: 25,
+    section_coverage: {
+      experience: false,
+      education: true,
+      project: false,
+      skill: true,
+      certification: false,
+      language: false,
+      achievement: false,
+    },
+    current_draft: null,
+    draft_revision: 0,
+    contact: {},
+    pending_understanding: null,
+    pending_suggestion: null,
+    provider_ready: true,
+    provider: "mistral",
+    model: "mistral-small-latest",
+    provider_metadata: {},
+    consent_required: false,
+    consent_version: "2026-08-08-v2:mistral",
+    consented_at: "2026-08-08T10:00:00Z",
+    messages: [assistantQuestion],
+    versions: [],
+    created_at: "2026-08-08T10:00:00Z",
+    updated_at: "2026-08-08T10:00:00Z",
+    ...overrides,
+  };
+}
+
+const fact: ApiCareerFact = {
   id: "fact-1",
   source_id: "source-1",
-  category: "skill",
-  label: "تحليل البيانات",
-  detail: "استخدام Excel لبناء تقارير أسبوعية",
-  verification_status: "extracted" as const,
-  source_excerpt: "Built weekly reports in Excel",
-  extraction_confidence: 0.9,
-  structured_value: {},
-  created_at: "2026-08-07T10:00:00Z",
+  category: "experience",
+  label: "محلل بيانات",
+  detail: "بنيت لوحات Power BI لمتابعة مؤشرات الأداء.",
+  verification_status: "confirmed",
+  source_excerpt: "Built Power BI dashboards",
+  extraction_confidence: 0.95,
+  structured_value: { organization: "شركة التقنية", date_range: "2023 - الآن" },
+  created_at: "2026-08-08T10:00:00Z",
 };
 
-const importResult = {
-  source: {
-    id: "source-1",
-    kind: "cv_upload" as const,
-    label: "Imported resume.pdf",
-    original_filename: "resume.pdf",
-  },
-  facts: [extractedFact],
-  requires_user_review: true,
-  analysis_status: "created" as const,
+const extractedFact: ApiCareerFact = {
+  ...fact,
+  id: "fact-imported-1",
+  source_id: "source-imported-1",
+  verification_status: "extracted",
+  label: "لوحات Power BI",
+  detail: "بنيت لوحات Power BI لمتابعة مؤشرات الأداء.",
+};
+
+const olderExtractedFact: ApiCareerFact = {
+  ...extractedFact,
+  id: "fact-older-1",
+  source_id: "source-older-1",
+  label: "معلومة من استيراد أقدم",
 };
 
 async function renderResumePage() {
-  const [{ default: ResumePage }, { LocaleProvider }, { LanguageSwitch }] = await Promise.all([
+  const [{ default: ResumePage }, { LocaleProvider }] = await Promise.all([
     import("@/app/resume/page"),
     import("@/lib/i18n"),
-    import("@/components/layout/language-switch"),
   ]);
   await act(async () => {
-    render(<LocaleProvider><LanguageSwitch /><ResumePage /></LocaleProvider>);
+    render(<LocaleProvider><ResumePage /></LocaleProvider>);
   });
 }
 
-async function startGuidedInterview(
-  user: ReturnType<typeof userEvent.setup>,
-  stage: "طالب أو طالبة" | "خريج أو خريجة حديثًا" | "لدي خبرة عملية" | "أغيّر مساري المهني" | "مستقل أو صاحب عمل حر" = "طالب أو طالبة",
-) {
-  await user.click(screen.getByRole("button", { name: /ابنِ محتوى سيرتك من الصفر/ }));
-  await user.click(screen.getByRole("radio", { name: stage }));
-  await user.click(screen.getByRole("button", { name: "التالي" }));
-}
-
-async function uploadAndAnalyze(user: ReturnType<typeof userEvent.setup>, filename = "resume.pdf") {
-  const file = new File(["resume"], filename, { type: "application/pdf" });
-  await user.upload(await screen.findByLabelText(/اختر ملف السيرة/), file);
-  await user.click(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ }));
-  await user.click(screen.getByRole("button", { name: "حلّل السيرة بالذكاء الاصطناعي" }));
-  return file;
-}
-
-async function completeMinimalInterview(
-  user: ReturnType<typeof userEvent.setup>,
-  options: {
-    target?: string;
-    field?: string;
-    environment?: string;
-    degree?: string;
-    major?: string;
-    institution?: string;
-    graduation?: string;
-    gpa?: string;
-    gpaScale?: string;
-    highlights?: string;
-    skill?: string;
-    skillSource?: string;
-    skillExample?: string;
-  } = {},
-) {
-  await startGuidedInterview(user, "خريج أو خريجة حديثًا");
-  if (options.target || options.field || options.environment) {
-    if (options.target) await user.type(screen.getByRole("textbox", { name: "الدور أو المسمى المستهدف" }), options.target);
-    if (options.field) await user.type(screen.getByRole("textbox", { name: "المجال" }), options.field);
-    if (options.environment) await user.type(screen.getByRole("textbox", { name: "بيئة العمل المفضلة" }), options.environment);
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-  } else {
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-  }
-
-  await user.type(screen.getByRole("textbox", { name: "الدرجة أو المؤهل" }), options.degree ?? "بكالوريوس");
-  await user.type(screen.getByRole("textbox", { name: "التخصص" }), options.major ?? "نظم معلومات");
-  await user.type(screen.getByRole("textbox", { name: "الجامعة أو الجهة التعليمية" }), options.institution ?? "جامعة الملك سعود");
-  await user.selectOptions(screen.getByRole("combobox", { name: "الحالة الدراسية" }), "graduated");
-  if (options.graduation) await user.type(screen.getByRole("textbox", { name: "سنة التخرج أو السنة المتوقعة" }), options.graduation);
-  if (options.gpa) await user.type(screen.getByRole("textbox", { name: "المعدل (اختياري)" }), options.gpa);
-  if (options.gpaScale) await user.type(screen.getByRole("textbox", { name: "مقياس المعدل (اختياري)" }), options.gpaScale);
-  if (options.highlights) await user.type(screen.getByRole("textbox", { name: "تكريم أو مواد بارزة (اختياري)" }), options.highlights);
-  if (options.gpa && options.gpaScale) expect(screen.getByText("سيظهر في المسودة")).toBeVisible();
-  await user.click(screen.getByRole("button", { name: "التالي" }));
-  await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // experience
-  await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // projects
-  await user.type(screen.getByRole("textbox", { name: "اسم المهارة" }), options.skill ?? "Excel");
-  if (options.skillSource) await user.type(screen.getByRole("textbox", { name: "مصدر الدليل" }), options.skillSource);
-  await user.type(screen.getByRole("textbox", { name: "مثال على استخدامها" }), options.skillExample ?? "بنيت تقريرًا أسبوعيًا");
-  await user.click(screen.getByRole("button", { name: "التالي" }));
-  await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // certifications
-  await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // achievements
-  await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // languages
-  await screen.findByRole("heading", { name: "إجاباتك جاهزة لبناء مسودة السيرة" });
-}
-
-describe("AI resume preparation", () => {
+describe("resume workspace v2", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     apiMocks.getCareerProfile.mockResolvedValue(profile);
     apiMocks.getCareerFacts.mockResolvedValue([]);
-    apiMocks.getCareerPathWorkspace.mockResolvedValue(readyWorkspace);
-    apiMocks.importCareerFile.mockResolvedValue(importResult);
-    apiMocks.createResumeDraft.mockResolvedValue(importResult);
+    apiMocks.getResumeWorkspace.mockResolvedValue(null);
     apiMocks.createCareerProfile.mockResolvedValue(profile);
+    apiMocks.startResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.sendResumeWorkspaceMessage.mockResolvedValue(makeWorkspace());
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: { id: "source-1", kind: "cv_upload", label: "resume.pdf", original_filename: "resume.pdf" },
+      facts: [extractedFact],
+      requires_user_review: true,
+      analysis_status: "created",
+    });
+    apiMocks.confirmCareerFact.mockResolvedValue({ ...extractedFact, verification_status: "confirmed" });
+    apiMocks.confirmResumeUnderstanding.mockResolvedValue(makeWorkspace({ revision: 2 }));
+    apiMocks.getResumeDraftVersions.mockResolvedValue([]);
+    apiMocks.reviewResumeWorkspace.mockResolvedValue({
+      workspace_id: "workspace-1",
+      draft_version_id: "version-1",
+      draft_revision: 1,
+      status: "export_ready",
+      reviewed_at: "2026-08-08T10:10:00Z",
+      review_hash: "review-hash",
+      evidence_revision: 1,
+      export_allowed: true,
+    });
+    apiMocks.exportResumeWorkspacePdf.mockResolvedValue(new Blob(["%PDF"], { type: "application/pdf" }));
   });
 
-  it("requires separate consent before uploading a resume for AI extraction", async () => {
+  it("starts one chat-first workspace after choosing language and acknowledging AI use", async () => {
     const user = userEvent.setup();
     await renderResumePage();
 
-    expect(await screen.findByText("mistral · mistral-small-2603")).toBeVisible();
-    const submitButton = screen.getByRole("button", { name: "حلّل السيرة بالذكاء الاصطناعي" });
+    expect(await screen.findByRole("heading", { name: "خلّنا نبني قصتك المهنية" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "العربية" })).toHaveAttribute("aria-pressed", "true");
+    const start = screen.getByRole("button", { name: "ابدأ المحادثة" });
+    expect(start).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: /موافقة استخدام الذكاء الاصطناعي/ }));
+    await user.click(start);
+
+    await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
+      language: "ar",
+      dataSharingAcknowledged: true,
+    }));
+    expect(await screen.findByText("احكِ لي عن تجربة مهنية تفخر بها.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "إرفاق سيرة موجودة" })).toBeVisible();
+    expect(screen.getByLabelText("معاينة السيرة الحية")).toBeVisible();
+  });
+
+  it("blocks AI actions until an expired consent is explicitly renewed", async () => {
+    const user = userEvent.setup();
+    const expiredWorkspace = makeWorkspace({
+      consent_required: true,
+      consented_at: null,
+      consent_version: "2026-08-08-v1:mistral",
+      contact: { email: "hadi@example.com" },
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(expiredWorkspace);
+    apiMocks.startResumeWorkspace.mockResolvedValue(makeWorkspace({ contact: expiredWorkspace.contact }));
+    await renderResumePage();
+
+    expect(await screen.findByRole("heading", { name: "جدّد موافقتك للمتابعة" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "إرفاق سيرة موجودة" })).not.toBeInTheDocument();
+    const renew = screen.getByRole("button", { name: "جدّد الموافقة وتابع" });
+    expect(renew).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: /أوافق على النسخة الحالية/ }));
+    await user.click(renew);
+
+    await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
+      language: "ar",
+      contact: { email: "hadi@example.com", phone: undefined, linkedin: undefined },
+      dataSharingAcknowledged: true,
+    }));
+    expect(await screen.findByRole("button", { name: "إرفاق سيرة موجودة" })).toBeVisible();
+  });
+
+  it("autosaves contact details without manufacturing a new AI acknowledgement", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.startResumeWorkspace.mockResolvedValue(makeWorkspace({ contact: { email: "hadi@example.com" } }));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "التواصل" }));
+    await user.type(screen.getByRole("textbox", { name: "البريد الإلكتروني" }), "hadi@example.com");
+
+    await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
+      language: "ar",
+      contact: { email: "hadi@example.com", phone: undefined, linkedin: undefined },
+      dataSharingAcknowledged: false,
+    }), { timeout: 2_000 });
+  });
+
+  it("sends an adaptive answer and requires confirming what the assistant understood", async () => {
+    const user = userEvent.setup();
+    const withUnderstanding = makeWorkspace({
+      revision: 1,
+      pending_understanding: {
+        id: "understanding-1",
+        understanding: "استخدمت Power BI لبناء لوحة ساعدت المدير على متابعة المبيعات.",
+        understanding_detail: { confidence: "high" },
+        proposed_records: [],
+        next_question: null,
+        draft_patch: null,
+      },
+      messages: [
+        assistantQuestion,
+        {
+          id: "message-2",
+          sequence: 2,
+          role: "user",
+          kind: "text",
+          content: "بنيت لوحة للمبيعات في Power BI.",
+          structured_payload: {},
+          status: "sent",
+          client_turn_id: "turn-1",
+          created_at: "2026-08-08T10:01:00Z",
+        },
+      ],
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.sendResumeWorkspaceMessage.mockResolvedValue(withUnderstanding);
+    apiMocks.confirmResumeUnderstanding.mockResolvedValue(makeWorkspace({ revision: 2 }));
+    await renderResumePage();
+
+    await user.type(await screen.findByLabelText("اكتب رسالتك"), "بنيت لوحة للمبيعات في Power BI.");
+    await user.click(screen.getByRole("button", { name: "إرسال الرسالة" }));
+
+    await waitFor(() => expect(apiMocks.sendResumeWorkspaceMessage).toHaveBeenCalledWith(profile.id, expect.objectContaining({
+      content: "بنيت لوحة للمبيعات في Power BI.",
+      expectedRevision: 0,
+      clientTurnId: expect.any(String),
+    })));
+    expect(await screen.findByText("استخدمت Power BI لبناء لوحة ساعدت المدير على متابعة المبيعات.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "صحيح" }));
+    await waitFor(() => expect(apiMocks.confirmResumeUnderstanding).toHaveBeenCalledWith(profile.id, "understanding-1", 1));
+  });
+
+  it("offers full AI generation without exposing provider internals or failed turns", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      messages: [
+        assistantQuestion,
+        {
+          id: "failed-message",
+          sequence: 2,
+          role: "user",
+          kind: "text",
+          content: "رسالة فشلت ويجب ألا تتكرر",
+          structured_payload: {},
+          status: "failed",
+          client_turn_id: "failed-turn",
+          created_at: "2026-08-08T10:01:00Z",
+        },
+      ],
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByText("الذكاء الاصطناعي جاهز")).toBeVisible();
+    expect(screen.queryByText(/mistral-small-latest/)).not.toBeInTheDocument();
+    expect(screen.queryByText("رسالة فشلت ويجب ألا تتكرر")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "اكتب السيرة الآن" }));
+    await waitFor(() => expect(apiMocks.sendResumeWorkspaceMessage).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({
+        quickAction: "generate",
+        expectedRevision: 0,
+        clientTurnId: expect.any(String),
+      }),
+    ));
+  });
+
+  it("sends helper choices and skip as commands rather than ordinary answers", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace());
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "أعطني مثالًا" }));
+    await waitFor(() => expect(apiMocks.sendResumeWorkspaceMessage).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({ content: "أعطني مثالًا", quickAction: "show_example" }),
+    ));
+
+    await user.click(screen.getByRole("button", { name: "ما عندي رقم دقيق" }));
+    await waitFor(() => expect(apiMocks.sendResumeWorkspaceMessage).toHaveBeenLastCalledWith(
+      profile.id,
+      expect.objectContaining({ content: "ما عندي رقم دقيق", quickAction: "no_exact_metric" }),
+    ));
+
+    await user.click(screen.getByRole("button", { name: "تخطَّ هذا السؤال" }));
+    await waitFor(() => expect(apiMocks.sendResumeWorkspaceMessage).toHaveBeenLastCalledWith(
+      profile.id,
+      expect.objectContaining({ content: "تخطَّ هذا السؤال", quickAction: "skip" }),
+    ));
+  });
+
+  it("requires explicit import consent, then reviews only facts returned by that upload", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace();
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(makeWorkspace({ readiness_score: 55 }));
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([olderExtractedFact])
+      .mockResolvedValue([olderExtractedFact, extractedFact]);
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
     const file = new File(["resume"], "resume.pdf", { type: "application/pdf" });
-    await user.upload(screen.getByLabelText(/اختر ملف السيرة/), file);
-    expect(submitButton).toBeDisabled();
-    expect(screen.getByText(/لا يُرسل ملف PDF أو DOCX نفسه إلى المزود/)).toBeVisible();
+    await user.upload(input!, file);
 
-    await user.click(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ }));
-    expect(submitButton).toBeEnabled();
-    await user.click(submitButton);
+    expect(apiMocks.importResumeWorkspaceFile).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "حلّل هذا الملف بالذكاء الاصطناعي؟" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "حلّل الملف" }));
 
-    await waitFor(() => expect(apiMocks.importCareerFile).toHaveBeenCalledWith(
+    await waitFor(() => expect(apiMocks.importResumeWorkspaceFile).toHaveBeenCalledWith(
       profile.id,
       file,
-      { useAi: true, dataSharingAcknowledged: true },
+      { dataSharingAcknowledged: true },
     ));
-    expect(await screen.findByRole("heading", { name: "استخرجنا 1 حقائق للمراجعة" })).toBeVisible();
-    expect(screen.getByText("تحليل البيانات")).toBeVisible();
-    expect(screen.getByText("بحاجة إلى مراجعة")).toBeVisible();
-    expect(screen.getByRole("link", { name: "افتح الحقائق وعدّلها" })).toHaveAttribute("href", "/profile?status=review#facts-title");
-    expect(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ })).not.toBeChecked();
+    expect(await screen.findByText("تم استخراج معلومات من resume.pdf")).toBeVisible();
+    const review = screen.getByRole("heading", { name: "راجع المعلومات المستخرجة" }).closest("section");
+    expect(review).not.toBeNull();
+    expect(within(review!).getByText("لوحات Power BI")).toBeVisible();
+    expect(within(review!).queryByText("معلومة من استيراد أقدم")).not.toBeInTheDocument();
+    expect(apiMocks.confirmCareerFact).not.toHaveBeenCalled();
+
+    await user.click(within(review!).getByRole("button", { name: "تأكيد هذه المعلومة" }));
+    await waitFor(() => expect(apiMocks.confirmCareerFact).toHaveBeenCalledWith(profile.id, extractedFact.id));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "راجع المعلومات المستخرجة" })).not.toBeInTheDocument());
   });
 
-  it("shows AI-upgraded suggestions as reviewable facts", async () => {
-    apiMocks.importCareerFile.mockResolvedValue({
-      ...importResult,
-      analysis_status: "ai_upgraded",
-    });
+  it("shows a before-and-after AI rewrite and accepts it without replacing the whole draft", async () => {
     const user = userEvent.setup();
-    await renderResumePage();
-    await uploadAndAnalyze(user);
-
-    expect(await screen.findByRole("heading", { name: "اكتمل تحليل السيرة بالذكاء الاصطناعي" })).toBeVisible();
-    expect(screen.getByText("أضاف التحليل اقتراحات جديدة تحتاج مراجعتك؛ صحّح ما يلزم وأكد الصحيح فقط.")).toBeVisible();
-    expect(screen.getByText("تحليل البيانات")).toBeVisible();
-    expect(screen.getByText("بحاجة إلى مراجعة")).toBeVisible();
-    expect(screen.getByRole("link", { name: "افتح الحقائق وعدّلها" })).toHaveAttribute("href", "/profile?status=review#facts-title");
-  });
-
-  it("explains an AI upgrade with no new suggestions without implying confirmed facts changed", async () => {
-    apiMocks.importCareerFile.mockResolvedValue({
-      ...importResult,
-      facts: [],
-      analysis_status: "ai_upgraded",
+    const suggestion = {
+      suggestion_id: "suggestion-1",
+      target_kind: "bullet" as const,
+      section_key: "experience" as const,
+      item_id: "experience_1",
+      bullet_index: 0,
+      mode: "stronger" as const,
+      instruction: null,
+      before_text: "بنيت لوحات Power BI.",
+      after_text: "بنيت لوحات Power BI تفاعلية سهّلت متابعة مؤشرات الأداء.",
+      base_draft_revision: 1,
+      evidence_handles: ["fact:fact-1"],
+    };
+    const reviewWorkspace = makeWorkspace({
+      stage: "writing",
+      readiness_score: 91,
+      current_draft: draft,
+      draft_revision: 1,
+      pending_suggestion: suggestion,
     });
-    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(reviewWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    apiMocks.decideResumeRewriteSuggestion.mockResolvedValue({ ...reviewWorkspace, pending_suggestion: null, draft_revision: 2 });
     await renderResumePage();
-    await uploadAndAnalyze(user);
 
-    expect(await screen.findByRole("heading", { name: "اكتمل تحليل السيرة بالذكاء الاصطناعي" })).toBeVisible();
-    expect(screen.getByText("لم نجد اقتراحات جديدة. حافظنا على الحقائق السابقة ولم نستبدل أي حقيقة مؤكدة.")).toBeVisible();
-    expect(screen.queryByText("بحاجة إلى مراجعة")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "افتح الحقائق وعدّلها" })).toHaveAttribute("href", "/profile#facts-title");
-  });
-
-  it("does not present existing facts as newly reviewable when the resume was already AI-analyzed", async () => {
-    apiMocks.importCareerFile.mockResolvedValue({
-      ...importResult,
-      analysis_status: "already_ai_analyzed",
-    });
-    const user = userEvent.setup();
-    await renderResumePage();
-    await uploadAndAnalyze(user);
-
-    expect(await screen.findByRole("heading", { name: "هذه السيرة محللة بالذكاء الاصطناعي مسبقًا" })).toBeVisible();
-    expect(screen.getByText("لم نكرر التحليل أو ننشئ حقائق مكررة. افتح ملفك المهني لمراجعة النتائج الحالية وتعديلها.")).toBeVisible();
-    expect(screen.queryByText("تحليل البيانات")).not.toBeInTheDocument();
-    expect(screen.queryByText("بحاجة إلى مراجعة")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "افتح الحقائق وعدّلها" })).toHaveAttribute("href", "/profile#facts-title");
-  });
-
-  it("shows an honest localized fallback and profile link for the legacy duplicate conflict", async () => {
-    const { ApiHttpError } = await import("@/lib/api-client");
-    apiMocks.importCareerFile.mockRejectedValue(new ApiHttpError(
-      409,
-      "This file has already been imported",
-      "resume_content_duplicate",
+    expect(await screen.findByText("بنيت لوحات Power BI.")).toBeVisible();
+    expect(screen.getByText("بنيت لوحات Power BI تفاعلية سهّلت متابعة مؤشرات الأداء.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "اعتمد التحسين" }));
+    await waitFor(() => expect(apiMocks.decideResumeRewriteSuggestion).toHaveBeenCalledWith(
+      profile.id,
+      "suggestion-1",
+      "accept",
+      1,
     ));
-    const user = userEvent.setup();
-    await renderResumePage();
-    await uploadAndAnalyze(user);
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("سبق استيراد الملف ولم يُحلل بالذكاء بعد.");
-    expect(screen.queryByText("This file has already been imported")).not.toBeInTheDocument();
-    expect(screen.getByText("resume.pdf")).toBeVisible();
-    expect(screen.getByRole("link", { name: "افتح الحقائق وعدّلها" })).toHaveAttribute("href", "/profile#facts-title");
-
-    await user.upload(screen.getByLabelText(/resume\.pdf/), new File(["other"], "other.pdf", { type: "application/pdf" }));
-    expect(screen.getByText("other.pdf")).toBeVisible();
-    expect(screen.queryByText("سبق استيراد الملف ولم يُحلل بالذكاء بعد.")).not.toBeInTheDocument();
   });
 
-  it("branches questions by career stage and supports back, skip, and an undecided target", async () => {
+  it("serializes draft autosaves and never lets an older response replace newer text", async () => {
     const user = userEvent.setup();
-    await renderResumePage();
-    await screen.findByRole("heading", { name: "كيف تبغى تبدأ؟" });
-    await startGuidedInterview(user);
-
-    expect(screen.getByRole("progressbar", { name: "تقدم مقابلة السيرة" })).toHaveAttribute("aria-valuenow", "2");
-    expect(screen.queryByRole("button", { name: "تخطي هذا القسم" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-    expect(screen.getByRole("textbox", { name: "الدرجة أو المؤهل" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "التخصص" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "الجامعة أو الجهة التعليمية" })).toBeVisible();
-    expect(screen.getByRole("combobox", { name: "الحالة الدراسية" })).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "رجوع" }));
-    expect(screen.getByRole("textbox", { name: "الدور أو المسمى المستهدف" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "رجوع" }));
-    await user.click(screen.getByRole("radio", { name: "أغيّر مساري المهني" }));
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" }));
-    expect(screen.getByRole("heading", { name: /المهارات القابلة للنقل/ })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "المسمى أو الدور" })).toBeVisible();
-    expect(apiMocks.createResumeDraft).not.toHaveBeenCalled();
-  });
-
-  it("keeps stable select values when the interface switches from Arabic to English", async () => {
-    const user = userEvent.setup();
-    await renderResumePage();
-    await startGuidedInterview(user, "خريج أو خريجة حديثًا");
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-
-    await user.type(screen.getByRole("textbox", { name: "الدرجة أو المؤهل" }), "Bachelor");
-    await user.type(screen.getByRole("textbox", { name: "التخصص" }), "Information Systems");
-    await user.type(screen.getByRole("textbox", { name: "الجامعة أو الجهة التعليمية" }), "King Saud University");
-    const arabicStatus = screen.getByRole("combobox", { name: "الحالة الدراسية" });
-    await user.selectOptions(arabicStatus, "graduated");
-    expect(arabicStatus).toHaveValue("graduated");
-
-    await user.click(screen.getByRole("button", { name: "en" }));
-
-    const englishStatus = await screen.findByRole("combobox", { name: "Study status" });
-    expect(englishStatus).toHaveValue("graduated");
-    expect(screen.getByRole("option", { name: "Graduated" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await user.click(screen.getByRole("button", { name: "Skip this section" })); // experience
-    await user.click(screen.getByRole("button", { name: "Skip this section" })); // projects
-    await user.type(screen.getByRole("textbox", { name: "Skill name" }), "Excel");
-    await user.type(screen.getByRole("textbox", { name: "Usage example" }), "Built a weekly report");
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await user.click(screen.getByRole("button", { name: "Skip this section" })); // certifications
-    await user.click(screen.getByRole("button", { name: "Skip this section" })); // achievements
-    await user.click(screen.getByRole("button", { name: "Skip this section" })); // languages
-    await user.click(screen.getByRole("checkbox", { name: /Separate consent for resume analysis/ }));
-    await user.click(screen.getByRole("button", { name: "Build resume draft" }));
-
-    await waitFor(() => expect(apiMocks.createResumeDraft).toHaveBeenCalledOnce());
-    const [, payload] = apiMocks.createResumeDraft.mock.calls[0];
-    expect(payload.content).toContain("Study status: Graduated");
-    expect(payload.content).not.toContain("Study status: graduated");
-  }, 15_000);
-
-  it("adds and removes education entries while preserving their serialized order", async () => {
-    const user = userEvent.setup();
-    await renderResumePage();
-    await startGuidedInterview(user, "خريج أو خريجة حديثًا");
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-
-    await user.type(screen.getByRole("textbox", { name: "الدرجة أو المؤهل" }), "المؤهل الأول");
-    await user.type(screen.getByRole("textbox", { name: "التخصص" }), "التخصص الأول");
-    await user.type(screen.getByRole("textbox", { name: "الجامعة أو الجهة التعليمية" }), "الجامعة الأولى");
-    await user.selectOptions(screen.getByRole("combobox", { name: "الحالة الدراسية" }), "graduated");
-    await user.click(screen.getByRole("button", { name: "إضافة مؤهل آخر" }));
-
-    expect(screen.getByRole("textbox", { name: "الدرجة أو المؤهل 1" })).toHaveValue("المؤهل الأول");
-    await user.type(screen.getByRole("textbox", { name: "الدرجة أو المؤهل 2" }), "المؤهل الثاني");
-    await user.type(screen.getByRole("textbox", { name: "التخصص 2" }), "التخصص الثاني");
-    await user.type(screen.getByRole("textbox", { name: "الجامعة أو الجهة التعليمية 2" }), "الجامعة الثانية");
-    await user.selectOptions(screen.getByRole("combobox", { name: "الحالة الدراسية 2" }), "graduated");
-
-    expect(screen.getAllByRole("button", { name: "حذف هذا السجل" })).toHaveLength(2);
-    await user.click(screen.getAllByRole("button", { name: "حذف هذا السجل" })[0]);
-    expect(screen.getByRole("textbox", { name: "الدرجة أو المؤهل" })).toHaveValue("المؤهل الثاني");
-    expect(screen.queryByDisplayValue("المؤهل الأول")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "إضافة مؤهل آخر" }));
-    await user.type(screen.getByRole("textbox", { name: "الدرجة أو المؤهل 2" }), "المؤهل الثالث");
-    await user.type(screen.getByRole("textbox", { name: "التخصص 2" }), "التخصص الثالث");
-    await user.type(screen.getByRole("textbox", { name: "الجامعة أو الجهة التعليمية 2" }), "الجامعة الثالثة");
-    await user.selectOptions(screen.getByRole("combobox", { name: "الحالة الدراسية 2" }), "graduated");
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // experience
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // projects
-    await user.type(screen.getByRole("textbox", { name: "اسم المهارة" }), "Excel");
-    await user.type(screen.getByRole("textbox", { name: "مثال على استخدامها" }), "بنيت تقريرًا أسبوعيًا");
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // certifications
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // achievements
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // languages
-    await user.click(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ }));
-    await user.click(screen.getByRole("button", { name: "ابنِ مسودة السيرة" }));
-
-    await waitFor(() => expect(apiMocks.createResumeDraft).toHaveBeenCalledOnce());
-    const [, payload] = apiMocks.createResumeDraft.mock.calls[0];
-    expect(payload.content).not.toContain("المؤهل الأول");
-    expect(payload.content).toContain("المؤهل الثاني التخصص الثاني");
-    expect(payload.content).toContain("المؤهل الثالث التخصص الثالث");
-    expect(payload.content.indexOf("المؤهل الثاني")).toBeLessThan(payload.content.indexOf("المؤهل الثالث"));
-  }, 15_000);
-
-  it("blocks completion until there is career evidence plus a skill example", async () => {
-    const user = userEvent.setup();
-    await renderResumePage();
-    await startGuidedInterview(user, "لدي خبرة عملية");
-
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // education
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // experience
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // projects
-    await user.type(screen.getByRole("textbox", { name: "اسم المهارة" }), "Excel");
-    await user.type(screen.getByRole("textbox", { name: "مثال على استخدامها" }), "بنيت تقريرًا أسبوعيًا");
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // certifications
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // achievements
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // languages
-
-    expect(screen.getByRole("alert")).toHaveTextContent("معلومة مهنية مكتملة، ومهارة واحدة مع مثال استخدامها");
-    expect(screen.queryByRole("checkbox", { name: /موافقة مستقلة/ })).not.toBeInTheDocument();
-    expect(apiMocks.createResumeDraft).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "رجوع" }));
-    await user.type(screen.getByRole("textbox", { name: "السياق أو التحدي" }), "التقرير كان يستغرق يومين");
-    await user.type(screen.getByRole("textbox", { name: "وش سويت؟" }), "أنشأت قالبًا موحدًا");
-    await user.type(screen.getByRole("textbox", { name: "النتيجة" }), "صار التقرير جاهزًا في نفس اليوم");
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" }));
-    expect(await screen.findByRole("heading", { name: "إجاباتك جاهزة لبناء مسودة السيرة" })).toBeVisible();
-  });
-
-  it("accepts an optional project URL only when it uses http or https", async () => {
-    const user = userEvent.setup();
-    await renderResumePage();
-    await startGuidedInterview(user, "خريج أو خريجة حديثًا");
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // education
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // experience
-
-    await user.type(screen.getByRole("textbox", { name: "اسم المشروع أو النشاط" }), "لوحة المبيعات");
-    expect(screen.queryByRole("button", { name: "تخطي هذا القسم" })).not.toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "الهدف أو المشكلة" }), "توضيح أداء الفروع");
-    await user.type(screen.getByRole("textbox", { name: "دورك ومساهمتك" }), "جمعت البيانات وصممت المؤشرات");
-    const link = screen.getByRole("textbox", { name: "الرابط (اختياري)" });
-    await user.type(link, "example.com/project");
-
-    expect(link).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByText("أدخل رابطًا صحيحًا يبدأ بـ http:// أو https://، أو اترك الحقل فارغًا.")).toHaveAttribute("role", "alert");
-    expect(screen.getByRole("button", { name: "التالي" })).toBeDisabled();
-
-    await user.clear(link);
-    await user.type(link, "https://example.com/project");
-    expect(link).not.toHaveAttribute("aria-invalid", "true");
-    expect(screen.queryByText("أدخل رابطًا صحيحًا يبدأ بـ http:// أو https://، أو اترك الحقل فارغًا.")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "التالي" })).toBeEnabled();
-  });
-
-  it("blocks completion when the serialized guided content exceeds 19,000 characters", async () => {
-    const user = userEvent.setup();
-    await renderResumePage();
-    await startGuidedInterview(user, "لدي خبرة عملية");
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // education
-
-    for (let entryIndex = 1; entryIndex <= 10; entryIndex += 1) {
-      const suffix = entryIndex === 1 ? "" : ` ${entryIndex}`;
-      fireEvent.change(screen.getByRole("textbox", { name: `المسمى أو الدور${suffix}` }), { target: { value: "د".repeat(180) } });
-      fireEvent.change(screen.getByRole("textbox", { name: `الجهة (أو اكتب سري)${suffix}` }), { target: { value: "ج".repeat(180) } });
-      fireEvent.change(screen.getByRole("textbox", { name: `الفترة${suffix}` }), { target: { value: "ف".repeat(180) } });
-      fireEvent.change(screen.getByRole("textbox", { name: `أبرز المسؤوليات (1–3 نقاط)${suffix}` }), { target: { value: "م".repeat(600) } });
-      fireEvent.change(screen.getByRole("textbox", { name: `الإنجازات (اختياري)${suffix}` }), { target: { value: "ن".repeat(600) } });
-      fireEvent.change(screen.getByRole("textbox", { name: `الأدوات المستخدمة (اختياري)${suffix}` }), { target: { value: "أ".repeat(180) } });
-      if (entryIndex < 10) await user.click(screen.getByRole("button", { name: "إضافة خبرة أخرى" }));
-    }
-
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // projects
-    await user.type(screen.getByRole("textbox", { name: "اسم المهارة" }), "Excel");
-    fireEvent.change(screen.getByRole("textbox", { name: "مثال على استخدامها" }), { target: { value: "س".repeat(600) } });
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // certifications
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // achievements
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // languages
-
-    expect(screen.getByRole("alert")).toHaveTextContent("المحتوى أطول من الحد المسموح (19,000 حرف). اختصر بعض الإجابات قبل بناء المسودة.");
-    expect(screen.queryByRole("heading", { name: "إجاباتك جاهزة لبناء مسودة السيرة" })).not.toBeInTheDocument();
-    expect(apiMocks.createResumeDraft).not.toHaveBeenCalled();
-  }, 15_000);
-
-  it("sends one labelled bilingual payload only after completion and separate consent", async () => {
-    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 0,
+      updated_at: "2026-08-08T10:00:00Z",
+    });
+    let resolveFirstSave!: (workspace: ApiResumeWorkspace) => void;
+    const firstSave = new Promise<ApiResumeWorkspace>((resolve) => {
+      resolveFirstSave = resolve;
+    });
+    const firstSummary = "النسخة الأولى من الملخص المهني.";
+    const newestSummary = "النسخة الأحدث التي يجب أن تبقى ظاهرة ومحفوظة.";
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    apiMocks.patchResumeWorkspaceDraft
+      .mockReturnValueOnce(firstSave)
+      .mockResolvedValueOnce(makeWorkspace({
+        ...writingWorkspace,
+        current_draft: { ...draft, professional_summary: newestSummary },
+        draft_revision: 2,
+        updated_at: "2026-08-08T10:02:00Z",
+      }));
     await renderResumePage();
 
-    await completeMinimalInterview(user, {
-      target: "محلل بيانات",
-      field: "التقنية المالية",
-      environment: "فريق صغير",
-      graduation: "2025",
-      gpa: "4",
-      gpaScale: "5",
-      highlights: "مرتبة الشرف",
-      skill: "Excel",
-      skillSource: "مشروع لوحة المبيعات",
-      skillExample: "نظفت 500 سجل وبنيت تقريرًا أسبوعيًا",
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByRole("textbox", { name: "الملخص المهني" });
+    await user.clear(summary);
+    await user.type(summary, firstSummary);
+    await waitFor(() => expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+
+    await user.clear(summary);
+    await user.type(summary, newestSummary);
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 750));
+    });
+    expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirstSave(makeWorkspace({
+        ...writingWorkspace,
+        current_draft: { ...draft, professional_summary: firstSummary },
+        draft_revision: 1,
+        updated_at: "2026-08-08T10:01:00Z",
+      }));
+      await firstSave;
     });
 
-    await user.type(screen.getByRole("textbox", { name: "البريد الإلكتروني" }), "hadi@example.com");
-    await user.type(screen.getByRole("textbox", { name: "رقم الهاتف" }), "+966500000000");
-    expect(apiMocks.createResumeDraft).not.toHaveBeenCalled();
-
-    const submitButton = screen.getByRole("button", { name: "ابنِ مسودة السيرة" });
-    expect(submitButton).toBeDisabled();
-    expect(screen.getByText(/بيانات التواصل الاختيارية المخصصة للمعاينة لا تدخل في النص المرسل/)).toBeVisible();
-    await user.click(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ }));
-    await user.click(submitButton);
-
-    await waitFor(() => expect(apiMocks.createResumeDraft).toHaveBeenCalledOnce());
-    const [, payload] = apiMocks.createResumeDraft.mock.calls[0];
-    expect(payload.dataSharingAcknowledged).toBe(true);
-    expect(payload.content).toContain("Context — Career stage / المرحلة المهنية: New graduate | خريج/خريجة حديثًا");
-    expect(payload.content).toContain("Context — Target role / الهدف المهني: محلل بيانات — المجال: التقنية المالية؛ بيئة العمل المفضلة: فريق صغير");
-    expect(payload.content).toContain("Evidence — Education / التعليم: بكالوريوس نظم معلومات — الجامعة أو الجهة التعليمية: جامعة الملك سعود؛ الحالة الدراسية: متخرج؛ سنة التخرج أو السنة المتوقعة: 2025؛ المعدل: 4 من 5؛ تكريم أو مواد بارزة: مرتبة الشرف");
-    expect(payload.content).toContain("Evidence — Skills / المهارات: Excel — مصدر الدليل: مشروع لوحة المبيعات؛ مثال على استخدامها: نظفت 500 سجل وبنيت تقريرًا أسبوعيًا");
-    expect(payload.content).not.toContain("hadi@example.com");
-    expect(payload.content).not.toContain("+966500000000");
-    expect(apiMocks.importCareerFile).not.toHaveBeenCalled();
-  }, 15_000);
-
-  it("omits a valid low GPA from AI payload while keeping independent education highlights", async () => {
-    const user = userEvent.setup();
-    await renderResumePage();
-    await startGuidedInterview(user, "خريج أو خريجة حديثًا");
-    await user.click(screen.getByRole("button", { name: "غير متأكد بعد" }));
-
-    await user.type(screen.getByRole("textbox", { name: "الدرجة أو المؤهل" }), "بكالوريوس");
-    await user.type(screen.getByRole("textbox", { name: "التخصص" }), "إدارة أعمال");
-    await user.type(screen.getByRole("textbox", { name: "الجامعة أو الجهة التعليمية" }), "جامعة الملك سعود");
-    await user.selectOptions(screen.getByRole("combobox", { name: "الحالة الدراسية" }), "graduated");
-    await user.type(screen.getByRole("textbox", { name: "المعدل (اختياري)" }), "2.8");
-    expect(screen.getByText("أكمل المعدل ومقياسه أو اتركهما فارغين")).toBeVisible();
-    expect(screen.getByRole("button", { name: "التالي" })).toBeDisabled();
-    await user.type(screen.getByRole("textbox", { name: "مقياس المعدل (اختياري)" }), "5");
-    await user.type(screen.getByRole("textbox", { name: "تكريم أو مواد بارزة (اختياري)" }), "مشروع مميز في ريادة الأعمال");
-    expect(screen.getByText("لن نضيفه لأن المعدل أقل من حد العرض 80%")).toBeVisible();
-    expect(screen.getByRole("button", { name: "التالي" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // experience
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" })); // projects
-    await user.type(screen.getByRole("textbox", { name: "اسم المهارة" }), "التواصل");
-    await user.type(screen.getByRole("textbox", { name: "مثال على استخدامها" }), "قدمت عرض مشروع التخرج أمام لجنة التحكيم");
-    await user.click(screen.getByRole("button", { name: "التالي" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" }));
-    await user.click(screen.getByRole("button", { name: "تخطي هذا القسم" }));
-    await user.click(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ }));
-    await user.click(screen.getByRole("button", { name: "ابنِ مسودة السيرة" }));
-
-    await waitFor(() => expect(apiMocks.createResumeDraft).toHaveBeenCalledOnce());
-    const [, payload] = apiMocks.createResumeDraft.mock.calls[0];
-    expect(payload.content).toContain("تكريم أو مواد بارزة: مشروع مميز في ريادة الأعمال");
-    expect(payload.content).not.toContain("2.8");
-    expect(payload.content).not.toContain("المعدل:");
-  }, 15_000);
-
-  it("hands extracted facts to the AI writer instead of treating them as a final resume", async () => {
-    const generatedFacts = [
-      {
-        ...extractedFact,
-        detail: null,
-        source_excerpt: "Evidence — Skills / المهارات: استخدام Excel لبناء تقارير أسبوعية",
-      },
-      {
-        ...extractedFact,
-        id: "fact-2",
-        category: "achievement",
-        label: "خفض وقت إعداد التقرير إلى النصف",
-        detail: null,
-        source_excerpt: "Evidence — Achievements / الإنجازات: خفض وقت إعداد التقرير إلى النصف",
-      },
-    ];
-    apiMocks.createResumeDraft.mockResolvedValue({
-      ...importResult,
-      facts: generatedFacts,
+    await waitFor(() => expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenCalledTimes(2));
+    expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenLastCalledWith(profile.id, {
+      draft: expect.objectContaining({ professional_summary: newestSummary }),
+      expectedDraftRevision: 1,
     });
-    apiMocks.getCareerFacts
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(generatedFacts);
-    const user = userEvent.setup();
-    await renderResumePage();
-    await completeMinimalInterview(user, { field: "التقنية المالية" });
-    await user.type(screen.getByRole("textbox", { name: "البريد الإلكتروني" }), "hadi@example.com");
-    await user.click(screen.getByRole("checkbox", { name: /موافقة مستقلة لتحليل السيرة/ }));
-    await user.click(screen.getByRole("button", { name: "ابنِ مسودة السيرة" }));
-
-    expect(await screen.findByRole("heading", { name: "من المعلومات الخام إلى سيرة جاهزة للتحميل" })).toBeVisible();
-    const [, payload] = apiMocks.createResumeDraft.mock.calls[0];
-    expect(payload.content).toContain("Context — Target role / الهدف المهني: التقنية المالية");
-    expect(screen.getByRole("button", { name: "ابدأ الأسئلة الذكية" })).toBeDisabled();
-    expect(screen.getByText(/تمنع حواجز التحقق الادعاءات غير المدعومة بالحقائق، وتبقى مراجعتك ضرورية قبل التحميل/)).toBeVisible();
-    expect(screen.queryByText("هذه ليست سيرة نهائية")).not.toBeInTheDocument();
-  }, 15_000);
-
-  it("shows provider readiness and never enables fake generation when AI is disabled", async () => {
-    apiMocks.getCareerPathWorkspace.mockResolvedValue({ ...readyWorkspace, provider_ready: false, model: null });
-    const user = userEvent.setup();
-    await renderResumePage();
-
-    expect(await screen.findByRole("heading", { name: "مساعد السيرة الذكي غير مفعّل" })).toBeVisible();
-    expect(screen.getByText("لن نحلل أي مصدر ولن ننشئ نتيجة تجريبية حتى يُفعّل المزود على الخادم.")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: /ابنِ محتوى سيرتك من الصفر/ }));
-    expect(screen.getByRole("radio", { name: "طالب أو طالبة" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "ابنِ مسودة السيرة" })).toBeDisabled();
-    expect(apiMocks.createResumeDraft).not.toHaveBeenCalled();
+    await waitFor(() => expect(summary).toHaveValue(newestSummary));
   });
 
-  it("creates the basic profile before loading provider details", async () => {
+  it("waits for autosave and merges a rewrite into the latest workspace without losing edits", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+      updated_at: "2026-08-08T10:00:00Z",
+    });
+    const savedSummary = "ملخص مهني محفوظ يجب أن يبقى بعد وصول اقتراح الذكاء الاصطناعي.";
+    const savedDraft = { ...draft, professional_summary: savedSummary };
+    let resolveSave!: (workspace: ApiResumeWorkspace) => void;
+    let resolveRewrite!: (suggestion: Awaited<ReturnType<typeof apiMocks.rewriteResumeDraftSelection>>) => void;
+    const saveRequest = new Promise<ApiResumeWorkspace>((resolve) => {
+      resolveSave = resolve;
+    });
+    const rewriteRequest = new Promise<Awaited<ReturnType<typeof apiMocks.rewriteResumeDraftSelection>>>((resolve) => {
+      resolveRewrite = resolve;
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    apiMocks.patchResumeWorkspaceDraft.mockReturnValue(saveRequest);
+    apiMocks.rewriteResumeDraftSelection.mockReturnValue(rewriteRequest);
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+    await user.clear(summary);
+    await user.type(summary, savedSummary);
+    await waitFor(() => expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenCalledOnce(), { timeout: 2_000 });
+
+    const strengthen = within(summary.parentElement!).getAllByRole("button")[0];
+    expect(strengthen).toBeDisabled();
+    await user.click(strengthen);
+    expect(apiMocks.rewriteResumeDraftSelection).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSave(makeWorkspace({
+        ...writingWorkspace,
+        current_draft: savedDraft,
+        draft_revision: 2,
+        updated_at: "2026-08-08T10:01:00Z",
+      }));
+      await saveRequest;
+    });
+    await waitFor(() => expect(strengthen).toBeEnabled());
+
+    await user.click(strengthen);
+    await waitFor(() => expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({
+        targetKind: "professional_summary",
+        expectedDraftRevision: 2,
+      }),
+    ));
+    expect(summary).toBeDisabled();
+
+    await user.click(screen.getByRole("tab", { name: "المحادثة" }));
+    await user.click(screen.getByRole("button", { name: "التواصل" }));
+    await user.type(screen.getByRole("textbox", { name: "البريد الإلكتروني" }), "latest@example.com");
+
+    const suggestion = {
+      suggestion_id: "suggestion-latest",
+      target_kind: "professional_summary" as const,
+      section_key: null,
+      item_id: null,
+      bullet_index: null,
+      mode: "stronger" as const,
+      instruction: null,
+      before_text: savedSummary,
+      after_text: "ملخص مهني محسّن ومدعوم بالحقائق المؤكدة.",
+      base_draft_revision: 2,
+      evidence_handles: ["fact:fact-1"],
+    };
+    await act(async () => {
+      resolveRewrite(suggestion);
+      await rewriteRequest;
+    });
+
+    expect(await screen.findByDisplayValue(savedSummary)).toBeEnabled();
+    expect(screen.getByText("latest@example.com")).toBeVisible();
+    expect(screen.getByText(suggestion.after_text)).toBeVisible();
+  });
+
+  it("reviews the saved draft before exporting its PDF", async () => {
+    const user = userEvent.setup();
+    const reviewWorkspace = makeWorkspace({
+      stage: "review",
+      readiness_score: 91,
+      current_draft: draft,
+      draft_revision: 1,
+      section_coverage: { experience: true, education: true, project: true, skill: true, certification: true, language: true, achievement: true },
+      versions: [{
+        id: "old-export-ready-version",
+        workspace_id: "workspace-1",
+        version: 1,
+        base_version_id: null,
+        reason: "review",
+        status: "export_ready",
+        content: draft,
+        diff: {},
+        evidence_revision: 0,
+        reviewed_at: "2026-08-07T10:00:00Z",
+        review_hash: "old-review-hash",
+        created_at: "2026-08-07T10:00:00Z",
+      }],
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(reviewWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const createObjectURL = vi.fn(() => "blob:resume-v2");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    await renderResumePage();
+
+    const download = await screen.findByRole("button", { name: "تنزيل PDF" });
+    expect(download).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: "راجعت المعلومات" }));
+    await waitFor(() => expect(apiMocks.reviewResumeWorkspace).toHaveBeenCalledWith(profile.id, 1));
+    expect(download).toBeEnabled();
+    await user.click(download);
+
+    await waitFor(() => expect(apiMocks.exportResumeWorkspacePdf).toHaveBeenCalledWith(profile.id, 1));
+    expect(anchorClick).toHaveBeenCalledOnce();
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:resume-v2");
+  });
+
+  it("creates the basic profile before showing the language step", async () => {
+    const user = userEvent.setup();
     apiMocks.getCareerProfile.mockResolvedValue(null);
-    const user = userEvent.setup();
     await renderResumePage();
 
-    expect(await screen.findByRole("heading", { name: "أنشئ ملفك الأساسي أولًا" })).toBeVisible();
-    expect(apiMocks.getCareerPathWorkspace).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "عرّفنا بنفسك أولًا" })).toBeVisible();
     await user.type(screen.getByRole("textbox", { name: "الاسم الكامل" }), "هادي الغانم");
-    await user.type(screen.getByRole("textbox", { name: "المدينة \(اختياري\)" }), "الرياض");
-    await user.click(screen.getByRole("button", { name: "إنشاء الملف والمتابعة" }));
+    await user.type(screen.getByRole("textbox", { name: "المدينة (اختياري)" }), "الرياض");
+    await user.click(screen.getByRole("button", { name: "أنشئ ملفي وابدأ" }));
 
     await waitFor(() => expect(apiMocks.createCareerProfile).toHaveBeenCalledWith({
       fullName: "هادي الغانم",
       city: "الرياض",
       preferredLanguage: "ar",
     }));
-    expect(await screen.findByRole("heading", { name: "كيف تبغى تبدأ؟" })).toBeVisible();
-    expect(apiMocks.getCareerPathWorkspace).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("button", { name: "ابدأ المحادثة" })).toBeVisible();
   });
 });

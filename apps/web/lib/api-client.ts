@@ -49,6 +49,12 @@ export function apiErrorMessage(error: unknown, locale: "ar" | "en") {
     if (error.code === "resume_writer_evidence_required") return locale === "ar" ? "حلّل سيرتك أو أكمل المقابلة المنظمة أولًا، ثم ابدأ الأسئلة الذكية." : "Analyze a resume or complete the guided interview before starting smart questions.";
     if (error.code === "resume_review_required") return locale === "ar" ? "راجع نص السيرة ووافق عليه قبل تنزيل PDF." : "Review and approve the resume text before downloading the PDF.";
     if (error.code === "resume_export_failed") return locale === "ar" ? "تعذر إنشاء ملف PDF مؤقتًا. حاول مرة أخرى." : "The PDF could not be generated. Please try again.";
+    if (error.code === "resume_workspace_revision_conflict") return locale === "ar" ? "تغيّرت مساحة السيرة في تبويب آخر. حدّثنا آخر نسخة؛ راجعها ثم أعد المحاولة." : "The resume workspace changed in another tab. We loaded the latest version; review it and try again.";
+    if (error.code === "resume_workspace_consent_required") return locale === "ar" ? "وافق على استخدام الذكاء الاصطناعي في مساحة السيرة قبل المتابعة." : "Acknowledge AI use in the resume workspace before continuing.";
+    if (error.code === "resume_workspace_not_configured") return locale === "ar" ? "مساحة السيرة الذكية غير مفعّلة على الخادم." : "The AI resume workspace is not enabled on the server.";
+    if (error.code === "resume_workspace_unavailable") return locale === "ar" ? "تعذر تشغيل مساعد السيرة مؤقتًا. حفظنا ما كتبته ويمكنك إعادة المحاولة." : "The resume assistant is temporarily unavailable. Your input was kept so you can retry.";
+    if (error.code === "resume_understanding_required") return locale === "ar" ? "أكد ما فهمه المساعد أو عدّله قبل الانتقال للسؤال التالي." : "Confirm or correct what the assistant understood before continuing.";
+    if (error.code === "resume_suggestion_not_found") return locale === "ar" ? "انتهت صلاحية التحسين المقترح. اطلب تحسينًا جديدًا." : "That suggestion is no longer available. Request a new improvement.";
     if (error.code === "career_profile_evidence_required") return locale === "ar" ? "جهّز سيرتك وراجع حقيقة مهنية واحدة على الأقل قبل تحديد المسار." : "Prepare your resume and confirm at least one career fact before discovering your path.";
     if (error.status === 401) return locale === "ar" ? "انتهت جلسة الدخول أو لم تعد صالحة. سجّل الدخول مجددًا." : "Your sign-in session is missing or expired. Please sign in again.";
     if (error.status === 422) return locale === "ar" ? `تعذر قبول البيانات: ${error.detail}` : `The submitted data was rejected: ${error.detail}`;
@@ -237,14 +243,139 @@ export type ApiResumeDraftSection = {
   items: ApiResumeDraftItem[];
 };
 
-export type ApiResumeDraft = {
+export type ApiResumeDraftContent = {
   headline: string;
   professional_summary: string;
   summary_evidence_handles: string[];
   sections: ApiResumeDraftSection[];
+};
+
+export type ApiResumeDraft = ApiResumeDraftContent & {
   provider: string;
   model: string;
   fact_count: number;
+};
+
+export type ApiResumeWorkspaceStage = "understanding" | "writing" | "review" | "complete";
+export type ApiResumeMessageKind = "text" | "question" | "understanding" | "suggestion" | "status";
+export type ApiResumeMessageStatus = "sent" | "pending" | "confirmed" | "corrected" | "dismissed" | "failed";
+
+export type ApiResumeRecord = {
+  schema_version: "resume_record.v1";
+  record_type: ApiResumeFactCategory;
+  source_handles: string[];
+  title: string;
+  organization?: string | null;
+  date_range?: string | null;
+  location?: string | null;
+  degree?: string | null;
+  institution?: string | null;
+  issuer?: string | null;
+  gpa_score?: string | null;
+  gpa_scale?: string | null;
+  gpa_display_recommended?: boolean | null;
+  honors?: string | null;
+  proficiency?: string | null;
+  responsibilities: string[];
+  outcomes: string[];
+  tools: string[];
+};
+
+export type ApiResumeUnderstanding = {
+  id: string;
+  understanding: string;
+  understanding_detail?: {
+    summary?: string;
+    confidence?: "low" | "medium" | "high";
+    evidence_handles?: string[];
+    confirmation_question?: string;
+  };
+  proposed_records: ApiResumeRecord[];
+  next_question?: ApiResumeQuestion | null;
+  draft_patch?: Record<string, unknown> | null;
+  ready_to_generate?: boolean;
+  question?: Record<string, unknown>;
+  source_message_id?: string;
+};
+
+export type ApiResumeRewriteSuggestion = {
+  suggestion_id: string;
+  target_kind: "headline" | "professional_summary" | "bullet";
+  section_key: ApiResumeSectionKey | null;
+  item_id?: string | null;
+  bullet_index?: number | null;
+  mode: "stronger" | "shorter" | "professional" | "custom";
+  instruction?: string | null;
+  before_text: string;
+  after_text: string;
+  base_draft_revision: number;
+  evidence_handles: string[];
+};
+
+export type ApiResumeMessage = {
+  id: string;
+  sequence: number;
+  role: "user" | "assistant";
+  kind: ApiResumeMessageKind;
+  content: string;
+  structured_payload: Record<string, unknown>;
+  status: ApiResumeMessageStatus;
+  client_turn_id: string | null;
+  created_at: string;
+};
+
+export type ApiResumeDraftVersion = {
+  id: string;
+  workspace_id: string;
+  version: number;
+  base_version_id: string | null;
+  reason: "initial_generation" | "manual_edit" | "ai_rewrite" | "restore" | "review";
+  status: "draft" | "reviewed" | "export_ready";
+  content: ApiResumeDraftContent;
+  diff: Record<string, unknown>;
+  evidence_revision: number;
+  reviewed_at: string | null;
+  reviewed_by_owner_id?: string | null;
+  review_hash?: string | null;
+  created_at: string;
+};
+
+export type ApiResumeWorkspace = {
+  id: string;
+  profile_id: string;
+  language: "ar" | "en";
+  stage: ApiResumeWorkspaceStage;
+  revision: number;
+  evidence_revision: number;
+  readiness_score: number;
+  section_coverage: Record<string, boolean>;
+  current_draft: ApiResumeDraftContent | null;
+  draft_revision: number;
+  contact: { email?: string | null; phone?: string | null; linkedin?: string | null };
+  pending_understanding: ApiResumeUnderstanding | null;
+  pending_suggestion: ApiResumeRewriteSuggestion | null;
+  consent_required: boolean;
+  consent_version?: string | null;
+  consented_at?: string | null;
+  provider_ready: boolean;
+  provider: string | null;
+  model: string | null;
+  provider_metadata?: Record<string, unknown>;
+  messages: ApiResumeMessage[];
+  versions: ApiResumeDraftVersion[];
+  created_at?: string;
+  updated_at: string;
+};
+
+export type ApiResumeReview = {
+  workspace_id: string;
+  draft_version_id: string;
+  draft_revision: number;
+  status: "draft" | "reviewed" | "export_ready";
+  reviewed_at: string;
+  review_hash: string;
+  evidence_revision: number;
+  export_allowed: boolean;
 };
 
 type BackendMatch = {
@@ -716,6 +847,230 @@ export async function exportProfessionalResumePdf(
       timeoutMs: 90_000,
     },
   );
+  return response.blob();
+}
+
+function resumeWorkspacePath(profileId: string, suffix = "") {
+  return `/v1/profiles/${encodeURIComponent(profileId)}/resume-workspace${suffix}`;
+}
+
+export async function getResumeWorkspace(profileId: string): Promise<ApiResumeWorkspace | null> {
+  try {
+    return await apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId));
+  } catch (error) {
+    if (error instanceof ApiHttpError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export async function startResumeWorkspace(
+  profileId: string,
+  input: {
+    language: "ar" | "en";
+    contact?: { email?: string; phone?: string; linkedin?: string };
+    dataSharingAcknowledged: boolean;
+  },
+) {
+  return apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId), {
+    method: "POST",
+    body: JSON.stringify({
+      language: input.language,
+      contact: {
+        email: input.contact?.email?.trim() || null,
+        phone: input.contact?.phone?.trim() || null,
+        linkedin: input.contact?.linkedin?.trim() || null,
+      },
+      data_sharing_acknowledged: input.dataSharingAcknowledged,
+    }),
+  });
+}
+
+export async function importResumeWorkspaceFile(
+  profileId: string,
+  file: File,
+  input: { dataSharingAcknowledged: boolean },
+) {
+  const body = new FormData();
+  body.set("file", file);
+  body.set("data_sharing_acknowledged", String(input.dataSharingAcknowledged));
+  return apiRequest<ApiImportResult>(resumeWorkspacePath(profileId, "/import"), {
+    method: "POST",
+    body,
+    timeoutMs: 90_000,
+  });
+}
+
+export async function sendResumeWorkspaceMessage(
+  profileId: string,
+  input: {
+    content: string;
+    clientTurnId: string;
+    expectedRevision: number;
+    quickAction?:
+      | "skip"
+      | "continue"
+      | "generate"
+      | "improve"
+      | "review"
+      | "show_example"
+      | "no_exact_metric";
+  },
+) {
+  return apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId, "/messages"), {
+    method: "POST",
+    body: JSON.stringify({
+      content: input.content,
+      client_turn_id: input.clientTurnId,
+      expected_revision: input.expectedRevision,
+      quick_action: input.quickAction || null,
+    }),
+    timeoutMs: 120_000,
+  });
+}
+
+export async function confirmResumeUnderstanding(
+  profileId: string,
+  understandingId: string,
+  expectedRevision: number,
+) {
+  return apiRequest<ApiResumeWorkspace>(
+    resumeWorkspacePath(profileId, `/understandings/${encodeURIComponent(understandingId)}/confirm`),
+    {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: expectedRevision }),
+      timeoutMs: 60_000,
+    },
+  );
+}
+
+export async function correctResumeUnderstanding(
+  profileId: string,
+  understandingId: string,
+  input: { expectedRevision: number; correctedText: string },
+) {
+  return apiRequest<ApiResumeWorkspace>(
+    resumeWorkspacePath(profileId, `/understandings/${encodeURIComponent(understandingId)}/correct`),
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expected_revision: input.expectedRevision,
+        corrected_text: input.correctedText.trim(),
+      }),
+      timeoutMs: 90_000,
+    },
+  );
+}
+
+export async function patchResumeWorkspaceDraft(
+  profileId: string,
+  input: {
+    draft: ApiResumeDraftContent;
+    expectedDraftRevision: number;
+  },
+) {
+  return apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId, "/draft"), {
+    method: "PATCH",
+    body: JSON.stringify({
+      draft: input.draft,
+      expected_draft_revision: input.expectedDraftRevision,
+    }),
+    timeoutMs: 60_000,
+  });
+}
+
+export type ResumeRewriteMode = "stronger" | "shorter" | "professional" | "custom";
+
+export async function rewriteResumeDraftSelection(
+  profileId: string,
+  input: {
+    targetKind: "headline" | "professional_summary" | "bullet";
+    sectionKey?: string;
+    itemId?: string;
+    bulletIndex?: number;
+    mode: ResumeRewriteMode;
+    instruction?: string;
+    expectedDraftRevision: number;
+  },
+) {
+  return apiRequest<ApiResumeRewriteSuggestion>(resumeWorkspacePath(profileId, "/draft/rewrite"), {
+    method: "POST",
+    body: JSON.stringify({
+      target_kind: input.targetKind,
+      section_key: input.sectionKey || null,
+      item_id: input.itemId || null,
+      bullet_index: input.bulletIndex ?? null,
+      mode: input.mode,
+      instruction: input.instruction?.trim() || null,
+      expected_draft_revision: input.expectedDraftRevision,
+    }),
+    timeoutMs: 120_000,
+  });
+}
+
+export async function decideResumeRewriteSuggestion(
+  profileId: string,
+  suggestionId: string,
+  decision: "accept" | "reject",
+  expectedDraftRevision: number,
+) {
+  return apiRequest<ApiResumeWorkspace>(
+    resumeWorkspacePath(profileId, `/draft/suggestions/${encodeURIComponent(suggestionId)}/${decision}`),
+    {
+      method: "POST",
+      body: JSON.stringify({ expected_draft_revision: expectedDraftRevision }),
+      timeoutMs: 60_000,
+    },
+  );
+}
+
+export async function getResumeDraftVersions(profileId: string) {
+  return apiRequest<ApiResumeDraftVersion[]>(resumeWorkspacePath(profileId, "/versions"));
+}
+
+export async function restoreResumeDraftVersion(
+  profileId: string,
+  versionId: string,
+  expectedDraftRevision: number,
+) {
+  return apiRequest<ApiResumeWorkspace>(
+    resumeWorkspacePath(profileId, `/versions/${encodeURIComponent(versionId)}/restore`),
+    {
+      method: "POST",
+      body: JSON.stringify({ expected_draft_revision: expectedDraftRevision }),
+    },
+  );
+}
+
+export async function reviewResumeWorkspace(
+  profileId: string,
+  expectedDraftRevision: number,
+) {
+  return apiRequest<ApiResumeReview>(resumeWorkspacePath(profileId, "/review"), {
+    method: "POST",
+    body: JSON.stringify({
+      expected_draft_revision: expectedDraftRevision,
+      review_acknowledged: true,
+    }),
+    timeoutMs: 60_000,
+  });
+}
+
+export async function previewResumeWorkspacePdf(profileId: string) {
+  const response = await apiResponse(resumeWorkspacePath(profileId, "/preview.pdf"), {
+    timeoutMs: 90_000,
+  });
+  return response.blob();
+}
+
+export async function exportResumeWorkspacePdf(profileId: string, expectedDraftRevision: number) {
+  const response = await apiResponse(resumeWorkspacePath(profileId, "/export.pdf"), {
+    method: "POST",
+    body: JSON.stringify({
+      expected_draft_revision: expectedDraftRevision,
+      review_acknowledged: true,
+    }),
+    timeoutMs: 90_000,
+  });
   return response.blob();
 }
 

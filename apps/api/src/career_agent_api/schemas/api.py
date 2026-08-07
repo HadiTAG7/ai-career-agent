@@ -20,6 +20,12 @@ from career_agent_api.models.enums import (
     RequirementCategory,
     RequirementImportance,
     RequirementMatchStatus,
+    ResumeDraftStatus,
+    ResumeDraftVersionReason,
+    ResumeMessageKind,
+    ResumeMessageRole,
+    ResumeMessageStatus,
+    ResumeWorkspaceStage,
     SourceKind,
     VerificationStatus,
 )
@@ -316,6 +322,199 @@ class ResumeDraftExportCreate(BaseModel):
     draft: ResumeDraftContent
     contact: ResumeExportContact = Field(default_factory=ResumeExportContact)
     review_acknowledged: bool = False
+
+
+ResumeQuickAction = Literal[
+    "skip",
+    "continue",
+    "show_example",
+    "no_exact_metric",
+    "generate",
+    "improve",
+    "review",
+]
+ResumeRewriteTargetKind = Literal[
+    "headline",
+    "professional_summary",
+    "bullet",
+]
+ResumeRewriteMode = Literal["stronger", "shorter", "professional", "custom"]
+
+
+class ResumeWorkspaceStartCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language: PreferredLanguage = PreferredLanguage.AR
+    contact: ResumeExportContact = Field(default_factory=ResumeExportContact)
+    data_sharing_acknowledged: bool = False
+
+
+class ResumeMessageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(default="", max_length=4_000)
+    client_turn_id: UUID
+    expected_revision: int = Field(ge=0)
+    quick_action: ResumeQuickAction | None = None
+
+    @model_validator(mode="after")
+    def content_or_quick_action(self) -> "ResumeMessageCreate":
+        self.content = self.content.strip()
+        if not self.content and self.quick_action is None:
+            raise ValueError("content or quick_action is required")
+        return self
+
+
+class ResumeUnderstandingActionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    corrected_text: str | None = Field(default=None, max_length=4_000)
+
+    @field_validator("corrected_text")
+    @classmethod
+    def non_blank_correction(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("corrected_text cannot be blank")
+        return value
+
+
+class ResumeDraftPatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft: ResumeDraftContent
+    expected_draft_revision: int = Field(ge=0)
+
+
+class ResumeDraftRevisionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_draft_revision: int = Field(ge=0)
+
+
+class ResumeRewriteCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: ResumeRewriteTargetKind
+    section_key: ResumeSectionKey | None = None
+    item_id: str | None = Field(default=None, min_length=2, max_length=80, pattern=r"^[a-z0-9_]+$")
+    bullet_index: int | None = Field(default=None, ge=0, le=7)
+    mode: ResumeRewriteMode
+    instruction: str | None = Field(default=None, max_length=1_000)
+    expected_draft_revision: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def valid_target_and_instruction(self) -> "ResumeRewriteCreate":
+        if self.target_kind == "bullet" and self.section_key is None:
+            raise ValueError("section_key is required for this target")
+        if self.target_kind == "bullet" and self.item_id is None:
+            raise ValueError("item_id is required for this target")
+        if self.target_kind == "bullet" and self.bullet_index is None:
+            raise ValueError("bullet_index is required for a bullet target")
+        if self.target_kind != "bullet" and self.bullet_index is not None:
+            raise ValueError("bullet_index is only valid for a bullet target")
+        if self.mode == "custom":
+            instruction = (self.instruction or "").strip()
+            if not instruction:
+                raise ValueError("instruction is required for custom mode")
+            self.instruction = instruction
+        elif self.instruction is not None:
+            self.instruction = self.instruction.strip() or None
+        return self
+
+
+class ResumeReviewCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_draft_revision: int = Field(ge=0)
+    review_acknowledged: bool = False
+
+
+class ResumeMessageRead(ORMModel):
+    id: UUID
+    sequence: int
+    role: ResumeMessageRole
+    kind: ResumeMessageKind
+    content: str
+    structured_payload: dict[str, Any]
+    status: ResumeMessageStatus
+    client_turn_id: UUID | None
+    created_at: datetime
+
+
+class ResumeDraftVersionRead(ORMModel):
+    id: UUID
+    workspace_id: UUID
+    version: int
+    base_version_id: UUID | None
+    reason: ResumeDraftVersionReason
+    status: ResumeDraftStatus
+    content: ResumeDraftContent
+    diff: dict[str, Any]
+    evidence_revision: int
+    reviewed_at: datetime | None
+    reviewed_by_owner_id: str | None
+    review_hash: str | None
+    created_at: datetime
+
+
+class ResumeRewriteSuggestionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    suggestion_id: UUID
+    target_kind: ResumeRewriteTargetKind
+    section_key: ResumeSectionKey | None = None
+    item_id: str | None = None
+    bullet_index: int | None = None
+    mode: ResumeRewriteMode
+    instruction: str | None = None
+    before_text: str = Field(max_length=10_000)
+    after_text: str = Field(min_length=1, max_length=10_000)
+    base_draft_revision: int = Field(ge=0)
+    evidence_handles: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ResumeReviewRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    draft_version_id: UUID
+    draft_revision: int = Field(ge=0)
+    status: ResumeDraftStatus
+    reviewed_at: datetime
+    review_hash: str = Field(min_length=1, max_length=64)
+    evidence_revision: int = Field(ge=0)
+    export_allowed: bool
+
+
+class ResumeWorkspaceRead(ORMModel):
+    id: UUID
+    profile_id: UUID
+    language: PreferredLanguage
+    stage: ResumeWorkspaceStage
+    revision: int
+    evidence_revision: int
+    readiness_score: int = Field(ge=0, le=100)
+    section_coverage: dict[ResumeSectionKey, bool]
+    current_draft: ResumeDraftContent | None
+    draft_revision: int
+    contact: ResumeExportContact
+    pending_understanding: dict[str, Any] | None = None
+    pending_suggestion: ResumeRewriteSuggestionRead | None = None
+    provider_ready: bool = False
+    provider: str | None = None
+    model: str | None = None
+    provider_metadata: dict[str, Any]
+    consent_required: bool = True
+    consent_version: str | None = None
+    consented_at: datetime | None = None
+    messages: list[ResumeMessageRead] = Field(default_factory=list)
+    versions: list[ResumeDraftVersionRead] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
 
 
 class CareerFactCreate(BaseModel):
