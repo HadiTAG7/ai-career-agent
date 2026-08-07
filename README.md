@@ -125,8 +125,9 @@ orchestration.
 ## النشر | Deployment
 
 - **Web:** Vercel من `apps/web`، مع ضبط `NEXT_PUBLIC_API_BASE_URL` إلى عنوان الـAPI.
-- **API/worker/data:** يحتوي `render.yaml` على Render Web Service، Background
-  Worker، Postgres، وKey Value داخلي بسياسة `noeviction`.
+- **API/data staging:** يحتوي `render.yaml` على Render Web Service وPostgres
+  مجانيين لتجربة FastAPI وMistral. تحليل السيرة متزامن ولا يحتاج Celery أو Redis.
+- قاعدة Render المجانية مؤقتة وتنتهي بعد 30 يومًا؛ لا تُعامل كتخزين إنتاج دائم.
 - الأسرار والقيم الخاصة بالمجال في Render معرفة بـ`sync: false` ولا توجد أسرار
   حقيقية في المستودع.
 - **بوابة إلزامية:** مخطط Render مرشح staging فقط حتى يكتمل تقييم PDPL، وموقع

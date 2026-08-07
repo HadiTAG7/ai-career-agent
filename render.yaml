@@ -1,6 +1,6 @@
-# Production-candidate infrastructure for the API tier. Do not attach real user
-# data until the PDPL/data-transfer assessment in docs/privacy-and-platform-policy.md
-# is approved. The Next.js application is deployed separately on Vercel.
+# Free staging infrastructure for the API tier. The free Postgres database expires
+# after 30 days, so use test data until the PDPL/data-transfer review and a durable
+# production plan are approved. The Next.js application is deployed on Vercel.
 previews:
   generation: "off"
 
@@ -9,11 +9,12 @@ services:
     name: ai-career-agent-api
     runtime: python
     region: frankfurt
-    plan: starter
+    plan: free
     rootDir: apps/api
     buildCommand: pip install .
-    preDeployCommand: alembic upgrade head
-    startCommand: uvicorn career_agent_api.main:app --app-dir src --host 0.0.0.0 --port $PORT
+    # Free services do not support pre-deploy commands. With one free instance,
+    # running idempotent Alembic migrations before Uvicorn is safe for staging.
+    startCommand: alembic upgrade head && uvicorn career_agent_api.main:app --app-dir src --host 0.0.0.0 --port $PORT
     healthCheckPath: /health/ready
     autoDeployTrigger: checksPass
     envVars:
@@ -27,75 +28,27 @@ services:
         fromDatabase:
           name: ai-career-agent-postgres
           property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          name: ai-career-agent-queue
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          name: ai-career-agent-queue
-          type: keyvalue
-          property: connectionString
       - key: CORS_ORIGINS
         sync: false
       - key: CLERK_JWKS_URL
         sync: false
       - key: CLERK_ISSUER
         sync: false
-      - key: CLERK_AUDIENCE
-        sync: false
       - key: CLERK_AUTHORIZED_PARTIES
         sync: false
       - key: AI_PROVIDER
-        value: deterministic
-
-  - type: worker
-    name: ai-career-agent-worker
-    runtime: python
-    region: frankfurt
-    plan: starter
-    rootDir: apps/api
-    buildCommand: pip install .
-    startCommand: celery -A career_agent_api.worker:celery_app worker --loglevel=INFO
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 120
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.13
-      - key: ENVIRONMENT
-        value: production
-      - key: AUTO_CREATE_SCHEMA
-        value: "false"
-      - key: DATABASE_URL
-        fromDatabase:
-          name: ai-career-agent-postgres
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          name: ai-career-agent-queue
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          name: ai-career-agent-queue
-          type: keyvalue
-          property: connectionString
-      - key: AI_PROVIDER
-        value: deterministic
-
-  - type: keyvalue
-    name: ai-career-agent-queue
-    region: frankfurt
-    plan: starter
-    maxmemoryPolicy: noeviction
-    persistenceMode: journal-snapshot
-    ipAllowList: []
+        value: mistral
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: AI_MODEL
+        value: mistral-small-2603
+      - key: AI_SAFETY_SALT
+        generateValue: true
 
 databases:
   - name: ai-career-agent-postgres
     region: frankfurt
-    plan: basic-256mb
+    plan: free
     postgresMajorVersion: "16"
     databaseName: career_agent
     user: career_agent
