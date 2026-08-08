@@ -3,34 +3,77 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppShell } from "@/components/layout/app-shell";
 import { LocaleProvider } from "@/lib/i18n";
+import { ThemeProvider } from "@/lib/theme";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/career-path" }));
 
-describe("AppShell career path navigation", () => {
-  it("places the resume before My path and keeps five explicit primary destinations on mobile", async () => {
+function renderShell() {
+  return render(
+    <ThemeProvider>
+      <LocaleProvider><AppShell><p>content</p></AppShell></LocaleProvider>
+    </ThemeProvider>,
+  );
+}
+
+describe("AppShell chapter navigation", () => {
+  it("keeps the exact desktop chapter order and exposes the current chapter on mobile", async () => {
     const user = userEvent.setup();
-    render(<LocaleProvider><AppShell><p>content</p></AppShell></LocaleProvider>);
+    renderShell();
 
     const desktopSidebar = screen.getByRole("complementary", { name: "التنقل الرئيسي" });
-    const desktopLinks = within(within(desktopSidebar).getByRole("navigation")).getAllByRole("link");
+    const desktopNavigation = within(desktopSidebar).getByRole("navigation", { name: "التنقل الرئيسي" });
+    const desktopLinks = within(desktopNavigation).getAllByRole("link");
+    expect(desktopLinks).toHaveLength(8);
+    expect(desktopLinks.map((link) => link.getAttribute("href"))).toEqual([
+      "/dashboard",
+      "/resume",
+      "/career-path",
+      "/profile",
+      "/jobs",
+      "/applications",
+      "/documents",
+      "/settings",
+    ]);
+    expect(desktopLinks[1]).toHaveTextContent("02");
     expect(desktopLinks[1]).toHaveTextContent("السيرة الذاتية");
-    expect(desktopLinks[1]).toHaveAttribute("href", "/resume");
     expect(desktopLinks[2]).toHaveTextContent("مساري");
     expect(desktopLinks[2]).toHaveAttribute("aria-current", "page");
 
-    const mobileNavigation = screen.getByRole("navigation", { name: "التنقل الرئيسي" });
-    const mobileLinks = within(mobileNavigation).getAllByRole("link");
-    expect(mobileLinks).toHaveLength(5);
-    expect(mobileLinks.map((link) => link.textContent)).toEqual(["الرئيسية", "السيرة", "مساري", "الفرص", "التقديمات"]);
-    expect(mobileLinks[1]).toHaveAttribute("href", "/resume");
-    expect(mobileLinks[2]).toHaveAttribute("href", "/career-path");
-    expect(mobileLinks[2]).toHaveAttribute("aria-current", "page");
+    const currentChapter = screen.getByLabelText("الفصل الحالي: مساري");
+    expect(currentChapter).toHaveTextContent("03");
+    expect(currentChapter).toHaveTextContent("مساري");
+    expect(screen.getAllByRole("navigation", { name: "التنقل الرئيسي" })).toHaveLength(1);
 
     await user.click(screen.getByRole("button", { name: "فتح القائمة" }));
     const moreNavigation = screen.getByRole("navigation", { name: "القائمة الإضافية" });
+    const mobileLinks = within(moreNavigation).getAllByRole("link");
+    expect(mobileLinks).toHaveLength(8);
+    expect(mobileLinks.map((link) => link.getAttribute("href"))).toEqual(desktopLinks.map((link) => link.getAttribute("href")));
     expect(within(moreNavigation).getByRole("link", { name: "الملف المهني" })).toBeVisible();
     expect(within(moreNavigation).getByRole("link", { name: "المستندات" })).toBeVisible();
     expect(within(moreNavigation).getByRole("link", { name: "الإعدادات" })).toBeVisible();
-    expect(within(moreNavigation).queryByRole("link", { name: "مساري" })).not.toBeInTheDocument();
+  });
+
+  it("mirrors document direction without changing chapter order", async () => {
+    const user = userEvent.setup();
+    renderShell();
+
+    await user.click(screen.getByRole("button", { name: "en" }));
+
+    expect(document.documentElement).toHaveAttribute("dir", "ltr");
+    const desktopSidebar = screen.getByRole("complementary", { name: "Primary navigation" });
+    const desktopLinks = within(within(desktopSidebar).getByRole("navigation", { name: "Primary navigation" })).getAllByRole("link");
+    expect(desktopLinks.map((link) => link.getAttribute("href"))).toEqual([
+      "/dashboard",
+      "/resume",
+      "/career-path",
+      "/profile",
+      "/jobs",
+      "/applications",
+      "/documents",
+      "/settings",
+    ]);
+    expect(desktopLinks[2]).toHaveAccessibleName("My path");
+    expect(desktopLinks[2]).toHaveAttribute("aria-current", "page");
   });
 });

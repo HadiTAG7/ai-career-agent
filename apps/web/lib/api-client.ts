@@ -4,7 +4,13 @@ import { normalizeApiDate } from "@/lib/utils";
 import type { ApiResult, Application, CareerPathMessageInput, CareerPathWorkspace, DashboardData, Job, JobRequirement, JobRequirementCategory, ManualJobInput, RequirementStatus } from "@/lib/types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "");
-const REQUEST_TIMEOUT_MS = 15_000;
+// Render's free staging service may need close to a minute to wake after being idle.
+// Keep each read attempt bounded, but retry one idempotent GET so the first visit does
+// not fail while the service is already spinning up.
+const REQUEST_TIMEOUT_MS = 35_000;
+const SAFE_GET_ATTEMPTS = 2;
+const SAFE_GET_RETRY_DELAY_MS = 500;
+const RETRYABLE_GET_STATUSES = new Set([502, 503, 504]);
 type ApiRequestOptions = RequestInit & { timeoutMs?: number };
 type TokenGetter = () => Promise<string | null>;
 let tokenGetter: TokenGetter | null = null;
@@ -62,28 +68,66 @@ export function apiErrorMessage(error: unknown, locale: "ar" | "en") {
   }
   if (error instanceof TypeError || (error instanceof DOMException && error.name === "AbortError")) {
     return locale === "ar"
-      ? "تعذر الاتصال بالخادم. لم نعرض أي تحليل أو بيانات تجريبية بدلًا من نتيجتك. حاول مجددًا."
-      : "The server could not be reached. No demo analysis or data replaced your result. Please try again.";
+      ? "لم يستجب الخادم بعد الانتظار وإعادة المحاولة. إذا كانت هذه أول زيارة بعد خمول، انتظر قليلًا ثم حاول مجددًا."
+      : "The server did not respond after waiting and retrying. If this is the first visit after idle time, wait briefly and try again.";
   }
   return locale === "ar" ? "حدث خطأ غير متوقع. لم نستبدل النتيجة ببيانات تجريبية." : "An unexpected error occurred. The result was not replaced with demo data.";
+}
+
+function isRetryableGetError(error: unknown) {
+  return error instanceof TypeError || (error instanceof DOMException && error.name === "AbortError");
+}
+
+async function waitForRetry(attempt: number) {
+  await new Promise<void>((resolve) => {
+    globalThis.setTimeout(resolve, SAFE_GET_RETRY_DELAY_MS * attempt);
+  });
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
 }
 
 async function apiResponse(path: string, init?: ApiRequestOptions): Promise<Response> {
   if (!API_BASE_URL) throw new ApiUnavailableError("API base URL is not configured");
 
   const { timeoutMs = REQUEST_TIMEOUT_MS, ...requestInit } = init ?? {};
-  const controller = new AbortController();
-  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const token = tokenGetter ? await tokenGetter() : null;
-    const headers = new Headers(requestInit.headers);
-    if (!(requestInit.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-    if (token) headers.set("Authorization", `Bearer ${token}`);
-    const response = await fetch(`${API_BASE_URL}${path}`, {
-      ...requestInit,
-      headers,
-      signal: controller.signal,
-    });
+  // Fetch timeouts should measure the API request, not Clerk token initialization.
+  const token = tokenGetter ? await tokenGetter() : null;
+  const headers = new Headers(requestInit.headers);
+  if (!(requestInit.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const method = (requestInit.method ?? "GET").toUpperCase();
+  const attempts = method === "GET" ? SAFE_GET_ATTEMPTS : 1;
+  const url = `${API_BASE_URL}${path}`;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(url, { ...requestInit, headers }, timeoutMs);
+    } catch (error) {
+      if (attempt < attempts && isRetryableGetError(error)) {
+        await waitForRetry(attempt);
+        continue;
+      }
+      throw error;
+    }
+
+    if (attempt < attempts && RETRYABLE_GET_STATUSES.has(response.status)) {
+      await response.body?.cancel().catch(() => undefined);
+      await waitForRetry(attempt);
+      continue;
+    }
+
     if (!response.ok) {
       let detail = response.statusText || "Request failed";
       let code: string | undefined;
@@ -106,9 +150,9 @@ async function apiResponse(path: string, init?: ApiRequestOptions): Promise<Resp
       throw new ApiHttpError(response.status, detail, code, requestId);
     }
     return response;
-  } finally {
-    globalThis.clearTimeout(timeout);
   }
+
+  throw new ApiUnavailableError("API request exhausted its retry budget");
 }
 
 async function apiRequest<T>(path: string, init?: ApiRequestOptions): Promise<T> {
@@ -343,6 +387,9 @@ export type ApiResumeDraftVersion = {
 export type ApiResumeWorkspace = {
   id: string;
   profile_id: string;
+  /** Language used by the assistant while interviewing the user. */
+  conversation_language?: "ar" | "en";
+  /** Language of the generated resume and exported document. */
   language: "ar" | "en";
   stage: ApiResumeWorkspaceStage;
   revision: number;
@@ -866,6 +913,7 @@ export async function getResumeWorkspace(profileId: string): Promise<ApiResumeWo
 export async function startResumeWorkspace(
   profileId: string,
   input: {
+    conversationLanguage: "ar" | "en";
     language: "ar" | "en";
     contact?: { email?: string; phone?: string; linkedin?: string };
     dataSharingAcknowledged: boolean;
@@ -874,6 +922,7 @@ export async function startResumeWorkspace(
   return apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId), {
     method: "POST",
     body: JSON.stringify({
+      conversation_language: input.conversationLanguage,
       language: input.language,
       contact: {
         email: input.contact?.email?.trim() || null,
@@ -882,6 +931,16 @@ export async function startResumeWorkspace(
       },
       data_sharing_acknowledged: input.dataSharingAcknowledged,
     }),
+  });
+}
+
+export async function resetResumeWorkspace(
+  profileId: string,
+  expectedRevision: number,
+) {
+  const query = new URLSearchParams({ expected_revision: String(expectedRevision) });
+  await apiResponse(`${resumeWorkspacePath(profileId)}?${query.toString()}`, {
+    method: "DELETE",
   });
 }
 

@@ -6,12 +6,12 @@ import { cn } from "@/lib/utils";
 export function LanguageSwitch() {
   const { locale, setLocale } = useLocale();
   return (
-    <div className="inline-flex h-11 overflow-hidden rounded-lg border border-border bg-white" aria-label={locale === "ar" ? "تغيير اللغة" : "Change language"} role="group">
+    <div className="inline-flex h-11 border border-border bg-background" aria-label={locale === "ar" ? "تغيير اللغة" : "Change language"} role="group">
       {(["ar", "en"] as const).map((option) => (
         <button
           className={cn(
-            "min-w-12 px-3 text-sm font-semibold uppercase transition-colors",
-            locale === option ? "bg-ink text-white" : "text-ink hover:bg-slate-50"
+            "min-w-11 border-s border-border px-3 font-latin text-sm font-semibold uppercase transition-colors first:border-s-0",
+            locale === option ? "text-primary-text" : "text-muted hover:text-secondary-foreground"
           )}
           key={option}
           onClick={() => setLocale(option)}

@@ -29,19 +29,21 @@ services:
           name: ai-career-agent-postgres
           property: connectionString
       - key: CORS_ORIGINS
-        sync: false
+        value: https://ai-career-agent-beige.vercel.app,https://ai-career-agent-haditag7s-projects.vercel.app,https://ai-career-agent-haditag7-haditag7s-projects.vercel.app
       - key: CLERK_JWKS_URL
         sync: false
       - key: CLERK_ISSUER
         sync: false
       - key: CLERK_AUTHORIZED_PARTIES
-        sync: false
+        value: https://ai-career-agent-beige.vercel.app,https://ai-career-agent-haditag7s-projects.vercel.app,https://ai-career-agent-haditag7-haditag7s-projects.vercel.app
       - key: AI_PROVIDER
         value: mistral
       - key: MISTRAL_API_KEY
         sync: false
       - key: AI_MODEL
         value: mistral-small-2603
+      - key: AI_REQUEST_TIMEOUT_SECONDS
+        value: "55"
       - key: RESUME_AI_MAX_OUTPUT_TOKENS
         value: "4000"
       - key: AI_SAFETY_SALT

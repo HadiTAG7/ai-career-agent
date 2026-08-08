@@ -412,8 +412,8 @@ export default function ProfilePage() {
       <div className="page-wrap page-enter max-w-[760px]">
         <h1 className="page-title">{locale === "ar" ? "أنشئ ملفك المهني" : "Create your career profile"}</h1>
         <p className="mt-2 text-muted">{locale === "ar" ? "نحتاج اسمك فقط للبدء. لن نستنتج الجنسية أو أهلية العمل من الاسم." : "We only need your name to begin. We never infer nationality or work eligibility from it."}</p>
-        {apiLoadError ? <p className="mt-5 rounded-lg border border-danger bg-danger-pale p-4 text-sm text-danger" role="alert">{apiErrorMessage(apiLoadError, locale)}</p> : null}
-        <form className="mt-8 space-y-5 rounded-xl border border-border p-6" onSubmit={handleOnboarding}>
+        {apiLoadError ? <p className="mt-5 border-y border-danger bg-danger-pale/50 py-4 text-sm text-danger" role="alert">{apiErrorMessage(apiLoadError, locale)}</p> : null}
+        <form className="mt-8 space-y-5 border-y border-border py-7" onSubmit={handleOnboarding}>
           <label><span className="field-label">{locale === "ar" ? "الاسم الكامل" : "Full name"}</span><input className="field-control" name="fullName" required autoComplete="name" /></label>
           <label><span className="field-label">{locale === "ar" ? "المدينة (اختياري)" : "City (optional)"}</span><input className="field-control" name="city" autoComplete="address-level2" /></label>
           <Button type="submit" size="lg">{locale === "ar" ? "إنشاء الملف" : "Create profile"}</Button>
@@ -422,7 +422,7 @@ export default function ProfilePage() {
     );
   }
 
-  if (apiMode && apiLoadError && !profileId) return <div className="page-wrap"><div className="rounded-xl border border-danger bg-danger-pale p-6" role="alert"><h1 className="section-title">{locale === "ar" ? "تعذر تحميل الملف" : "Could not load profile"}</h1><p className="mt-3 text-sm text-danger">{apiErrorMessage(apiLoadError, locale)}</p></div></div>;
+  if (apiMode && apiLoadError && !profileId) return <div className="page-wrap"><div className="border-y border-danger bg-danger-pale/50 py-6" role="alert"><h1 className="section-title">{locale === "ar" ? "تعذر تحميل الملف" : "Could not load profile"}</h1><p className="mt-3 text-sm text-danger">{apiErrorMessage(apiLoadError, locale)}</p></div></div>;
 
   return (
     <div className="page-wrap page-enter">
@@ -453,7 +453,7 @@ export default function ProfilePage() {
       {notice ? (
         <div
           className={cn(
-            "mt-5 flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm",
+            "mt-5 flex items-center justify-between gap-3 border-y px-1 py-3 text-sm",
             notice.tone === "success" && "border-emerald bg-emerald-pale",
             notice.tone === "warning" && "border-amber bg-amber-pale",
             notice.tone === "error" && "border-danger bg-danger-pale text-danger",
@@ -466,14 +466,14 @@ export default function ProfilePage() {
           </span>
           <span className="flex shrink-0 items-center gap-2">
             {notice.dashboardLink ? <Link href="/dashboard" className="subtle-link">{locale === "ar" ? "عرض التحديث" : "View update"}<ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" /></Link> : null}
-            <button className="grid h-11 w-11 place-items-center rounded-lg" onClick={() => setNotice(null)} aria-label={locale === "ar" ? "إغلاق" : "Dismiss"}><X className="h-4 w-4" /></button>
+            <button className="grid h-11 w-11 place-items-center" onClick={() => setNotice(null)} aria-label={locale === "ar" ? "إغلاق" : "Dismiss"}><X className="h-4 w-4" /></button>
           </span>
         </div>
       ) : null}
 
       {apiMode && profileId && !hasImportedSource ? (
-        <section className="mt-6 flex flex-col gap-5 rounded-xl border border-dashed border-emerald bg-emerald-pale/40 p-6 md:flex-row md:items-center" aria-labelledby="cv-import-title">
-          <span className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-white text-emerald"><FileUp className="h-7 w-7" aria-hidden="true" /></span>
+        <section className="mt-6 flex flex-col gap-5 border-y border-primary/55 bg-primary/5 py-6 md:flex-row md:items-center" aria-labelledby="cv-import-title">
+          <span className="grid h-14 w-14 shrink-0 place-items-center border border-primary/55 text-primary-text"><FileUp className="h-7 w-7" aria-hidden="true" /></span>
           <div className="flex-1">
             <h2 id="cv-import-title" className="section-title">{locale === "ar" ? "ابدأ باستيراد سيرتك" : "Start by importing your CV"}</h2>
             <p className="mt-2 text-sm text-muted">{locale === "ar" ? "ندعم PDF وDOCX وأرشيف LinkedIn بصيغة ZIP. نستخرج مرشحات للحقائق كي تراجعها، ولا نحتفظ بالملف الخام." : "PDF, DOCX, and LinkedIn ZIP are supported. We extract candidate facts for your review and do not retain the raw file."}</p>
@@ -482,27 +482,27 @@ export default function ProfilePage() {
         </section>
       ) : null}
 
-      <section className="mt-8 grid gap-6 rounded-xl border border-border p-5 md:grid-cols-[auto_1fr] md:items-center md:p-6" aria-labelledby="verification-summary-title">
+      <section className="mt-8 grid gap-6 border-y border-border py-7 md:grid-cols-[auto_1fr] md:items-center" aria-labelledby="verification-summary-title">
         <ProgressRing value={completion} size="lg" label={locale === "ar" ? `جودة الملف ${completion} بالمئة` : `Profile quality is ${completion} percent`} />
         <div>
           <h2 id="verification-summary-title" className="section-title">{locale === "ar" ? "جودة الملف تقيس تغطية فئات الأدلة" : "Profile quality measures evidence-category coverage"}</h2>
           <p className="mt-2 text-sm text-muted">{locale === "ar" ? "تعتمد النسبة نفسها الظاهرة في لوحة التحكم على ست فئات مؤكدة: التعليم والخبرة والمهارات والمشاريع واللغات والشهادات. ليست احتمالًا للمقابلة." : "This is the same dashboard metric across six confirmed categories: education, experience, skills, projects, languages, and certifications. It is not an interview probability."}</p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-4">
-            <div><strong className="text-xl text-emerald">{confirmedCount}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "حقائق مؤكدة" : "confirmed facts"}</span></div>
-            <div><strong className="text-xl text-amber">{extractedCount}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "تحتاج مراجعة" : "needs review"}</span></div>
-            <div><strong className="text-xl text-danger">{unconfirmedCount}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "غير مؤكدة" : "unconfirmed"}</span></div>
-            {apiMode && profileSummary ? <div><strong className="text-xl text-ink">{profileSummary.covered_quality_categories.length}/{profileSummary.total_quality_categories}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "فئات مغطاة" : "categories covered"}</span></div> : null}
+          <div className="mt-5 grid border-y border-border sm:grid-cols-4">
+            <div className="py-3 sm:border-s sm:border-border sm:px-4"><strong className="text-xl text-emerald">{confirmedCount}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "حقائق مؤكدة" : "confirmed facts"}</span></div>
+            <div className="border-t border-border py-3 sm:border-s sm:border-t-0 sm:px-4"><strong className="text-xl text-amber">{extractedCount}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "تحتاج مراجعة" : "needs review"}</span></div>
+            <div className="border-t border-border py-3 sm:border-s sm:border-t-0 sm:px-4"><strong className="text-xl text-danger">{unconfirmedCount}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "غير مؤكدة" : "unconfirmed"}</span></div>
+            {apiMode && profileSummary ? <div className="border-t border-border py-3 sm:border-s sm:border-t-0 sm:px-4"><strong className="text-xl text-foreground">{profileSummary.covered_quality_categories.length}/{profileSummary.total_quality_categories}</strong><span className="ms-2 text-sm text-muted">{locale === "ar" ? "فئات مغطاة" : "categories covered"}</span></div> : null}
           </div>
         </div>
       </section>
 
       {apiMode && profileId ? (
-        <section className="mt-6 rounded-xl border border-border p-5 md:p-6" aria-labelledby="category-completion-title">
+        <section className="mt-6 border-y border-border py-6" aria-labelledby="category-completion-title">
           <h2 id="category-completion-title" className="section-title">{locale === "ar" ? "هل أكملت هذه الفئات؟" : "Have you completed these categories?"}</h2>
           <p className="mt-2 text-sm text-muted">{locale === "ar" ? "لا تفعّل الفئة إلا بعد إدخال كل ما تريد ذكره. عند تفعيلها يصبح غياب متطلب من هذه الفئة فجوة واضحة؛ وإلا يبقى غير معلوم." : "Only mark a category complete after listing everything you want included. Missing requirements then become clear gaps; otherwise they remain unknown."}</p>
           <div className="mt-5 grid gap-x-6 gap-y-2 sm:grid-cols-2">
             {completionCategories.map((category) => (
-              <label className="flex min-h-12 items-center gap-3 rounded-lg px-2 hover:bg-slate-50" key={category.key}>
+              <label className="flex min-h-12 items-center gap-3 border-b border-border px-2 transition-colors hover:bg-surface" key={category.key}>
                 <input className="h-5 w-5 accent-emerald" type="checkbox" checked={completedCategories.includes(category.key)} disabled={completionBusy === category.key} onChange={(event) => { void toggleCategoryCompletion(category.key, event.target.checked); }} />
                 <span><strong className="block text-sm">{locale === "ar" ? category.ar : category.en}</strong><small className="text-muted">{completedCategories.includes(category.key) ? (locale === "ar" ? "القائمة مكتملة" : "List is complete") : (locale === "ar" ? "قد توجد معلومات أخرى" : "More information may exist")}</small></span>
               </label>
@@ -512,7 +512,7 @@ export default function ProfilePage() {
       ) : null}
 
       {apiMode && pendingReviewCount > 0 ? (
-        <section className="mt-6 flex flex-col gap-4 rounded-xl border border-amber bg-amber-pale p-5 md:flex-row md:items-center" aria-labelledby="review-queue-title">
+        <section className="mt-6 flex flex-col gap-4 border-y border-amber bg-amber-pale/50 py-5 md:flex-row md:items-center" aria-labelledby="review-queue-title">
           <AlertCircle className="h-7 w-7 shrink-0 text-amber" aria-hidden="true" />
           <div className="flex-1">
             <h2 id="review-queue-title" className="font-bold">{locale === "ar" ? `${pendingReviewCount} حقائق تنتظر مراجعتك` : `${pendingReviewCount} facts are waiting for review`}</h2>
@@ -525,13 +525,13 @@ export default function ProfilePage() {
       ) : null}
 
       {apiMode && hasImportedSource && pendingReviewCount === 0 ? (
-        <section className="mt-6 flex flex-col gap-4 rounded-xl border border-emerald bg-emerald-pale p-5 md:flex-row md:items-center" aria-labelledby="review-complete-title">
+        <section className="mt-6 flex flex-col gap-4 border-y border-emerald bg-emerald-pale/50 py-5 md:flex-row md:items-center" aria-labelledby="review-complete-title">
           <CheckCircle2 className="h-7 w-7 shrink-0 text-emerald" aria-hidden="true" />
           <div className="flex-1">
             <h2 id="review-complete-title" className="font-bold">{locale === "ar" ? "لا توجد حقائق معلقة" : "No facts are awaiting review"}</h2>
             <p className="mt-1 text-sm text-muted">{locale === "ar" ? "يمكنك رؤية جودة الملف المحدثة والبدء بتحليل فرصة." : "You can view the updated profile quality and start analyzing an opportunity."}</p>
           </div>
-          <Link href="/dashboard" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-emerald px-4 text-sm font-semibold text-emerald hover:bg-white">
+          <Link href="/dashboard" className="inline-flex min-h-11 items-center justify-center gap-2 border border-emerald px-4 text-sm font-semibold text-emerald hover:bg-emerald-pale">
             {locale === "ar" ? "عرض لوحة التحكم" : "View dashboard"}
             <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
           </Link>
@@ -583,12 +583,12 @@ export default function ProfilePage() {
                   <ChevronDown className={cn("h-5 w-5 transition-transform", isExpanded && "rotate-180")} aria-hidden="true" />
                 </button>
                 {isExpanded ? (
-                  <div className="mb-5 grid gap-4 rounded-lg bg-slate-50 p-4 md:grid-cols-[1fr_auto] md:items-center">
+                  <div className="mb-5 grid gap-4 border-s-2 border-primary bg-surface px-4 py-5 md:grid-cols-[1fr_auto] md:items-center">
                     <div>
                       <p className="flex items-center gap-2 text-sm font-semibold"><Link2 className="h-4 w-4 text-emerald" />{locale === "ar" ? "المصدر" : "Source"}</p>
                       <p className="mt-1 text-sm text-muted">{text(fact.source)} · {formatDemoDate(fact.updatedAt, locale)}</p>
-                      {fact.sourceExcerpt ? <div className="mt-3 rounded-lg border border-border bg-white p-3"><p className="text-xs font-semibold text-muted">{locale === "ar" ? "النص المستخرج من المصدر" : "Source excerpt"}</p><p className="mt-1 text-sm">{fact.sourceExcerpt}</p></div> : null}
-                      {fact.structuredValue && Object.keys(fact.structuredValue).length > 0 ? <div className="mt-3 rounded-lg border border-amber bg-amber-pale p-3"><p className="text-xs font-semibold text-ink">{locale === "ar" ? "قيم منظمة ستدخل في الربط بعد التأكيد" : "Structured values used for grounding after confirmation"}</p><dl className="mt-2 grid gap-2">{Object.entries(fact.structuredValue).map(([key, value]) => <div className="grid grid-cols-[120px_1fr] gap-3 text-xs" key={key}><dt className="font-semibold text-muted" dir="ltr">{key}</dt><dd className="break-words">{typeof value === "string" ? value : JSON.stringify(value)}</dd></div>)}</dl></div> : null}
+                      {fact.sourceExcerpt ? <div className="mt-3 border-y border-border py-3"><p className="text-xs font-semibold text-muted">{locale === "ar" ? "النص المستخرج من المصدر" : "Source excerpt"}</p><p className="mt-1 text-sm">{fact.sourceExcerpt}</p></div> : null}
+                      {fact.structuredValue && Object.keys(fact.structuredValue).length > 0 ? <div className="mt-3 border-y border-amber bg-amber-pale/40 py-3"><p className="text-xs font-semibold text-foreground">{locale === "ar" ? "قيم منظمة ستدخل في الربط بعد التأكيد" : "Structured values used for grounding after confirmation"}</p><dl className="mt-2 grid gap-2">{Object.entries(fact.structuredValue).map(([key, value]) => <div className="grid grid-cols-[120px_1fr] gap-3 text-xs" key={key}><dt className="font-semibold text-muted" dir="ltr">{key}</dt><dd className="break-words">{typeof value === "string" ? value : JSON.stringify(value)}</dd></div>)}</dl></div> : null}
                       {fact.extractionConfidence != null ? <p className="mt-2 text-xs text-muted">{locale === "ar" ? "ثقة الاستخراج" : "Extraction confidence"}: {Math.round(fact.extractionConfidence * 100)}%</p> : null}
                     </div>
                     <div className="flex flex-wrap gap-2 md:max-w-[230px]">
@@ -620,11 +620,11 @@ export default function ProfilePage() {
       </section>
 
       {modalOpen ? (
-        <div className="fixed inset-0 z-50 grid overflow-y-auto bg-ink/40 p-5" role="presentation" onMouseDown={(event) => { if (!savingFact && event.target === event.currentTarget) setModalOpen(false); }}>
-          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-subtle" role="dialog" aria-modal="true" aria-labelledby="add-fact-title">
+        <div className="fixed inset-0 z-50 grid overflow-y-auto bg-black/70 p-5 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (!savingFact && event.target === event.currentTarget) setModalOpen(false); }}>
+          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-subtle" role="dialog" aria-modal="true" aria-labelledby="add-fact-title">
             <div className="flex items-center justify-between">
               <h2 id="add-fact-title" className="section-title">{locale === "ar" ? "أضف حقيقة مهنية" : "Add a career fact"}</h2>
-              <button className="grid h-11 w-11 place-items-center rounded-lg hover:bg-slate-50" disabled={savingFact} onClick={() => setModalOpen(false)} aria-label={locale === "ar" ? "إغلاق" : "Close"}><X className="h-5 w-5" /></button>
+              <button className="grid h-11 w-11 place-items-center rounded-lg hover:bg-surface" disabled={savingFact} onClick={() => setModalOpen(false)} aria-label={locale === "ar" ? "إغلاق" : "Close"}><X className="h-5 w-5" /></button>
             </div>
             <form className="mt-5 space-y-4" onSubmit={handleAddFact}>
               <label><span className="field-label">{locale === "ar" ? "الفئة" : "Category"}</span><select className="field-control" name="category" defaultValue="achievement"><option value="identity">{locale === "ar" ? "هوية مهنية" : "Professional identity"}</option><option value="experience">{locale === "ar" ? "خبرة" : "Experience"}</option><option value="education">{locale === "ar" ? "تعليم" : "Education"}</option><option value="skill">{locale === "ar" ? "مهارة" : "Skill"}</option><option value="project">{locale === "ar" ? "مشروع" : "Project"}</option><option value="certificate">{locale === "ar" ? "شهادة" : "Certificate"}</option><option value="language">{locale === "ar" ? "لغة" : "Language"}</option><option value="achievement">{locale === "ar" ? "إنجاز" : "Achievement"}</option><option value="preference">{locale === "ar" ? "تفضيل مهني" : "Career preference"}</option><option value="eligibility">{locale === "ar" ? "أهلية العمل" : "Work eligibility"}</option></select></label>
@@ -639,9 +639,9 @@ export default function ProfilePage() {
       ) : null}
 
       {editingFact ? (
-        <div className="fixed inset-0 z-50 grid overflow-y-auto bg-ink/40 p-5" role="presentation" onMouseDown={(event) => { if (!savingFact && event.target === event.currentTarget) setEditingFact(null); }}>
-          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-subtle" role="dialog" aria-modal="true" aria-labelledby="edit-fact-title">
-            <div className="flex items-center justify-between"><h2 id="edit-fact-title" className="section-title">{locale === "ar" ? "صحّح الحقيقة" : "Correct fact"}</h2><button className="grid h-11 w-11 place-items-center rounded-lg hover:bg-slate-50" disabled={savingFact} onClick={() => setEditingFact(null)} aria-label={locale === "ar" ? "إغلاق" : "Close"}><X className="h-5 w-5" /></button></div>
+        <div className="fixed inset-0 z-50 grid overflow-y-auto bg-black/70 p-5 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (!savingFact && event.target === event.currentTarget) setEditingFact(null); }}>
+          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-subtle" role="dialog" aria-modal="true" aria-labelledby="edit-fact-title">
+            <div className="flex items-center justify-between"><h2 id="edit-fact-title" className="section-title">{locale === "ar" ? "صحّح الحقيقة" : "Correct fact"}</h2><button className="grid h-11 w-11 place-items-center rounded-lg hover:bg-surface" disabled={savingFact} onClick={() => setEditingFact(null)} aria-label={locale === "ar" ? "إغلاق" : "Close"}><X className="h-5 w-5" /></button></div>
             <p className="mt-2 text-sm text-muted">{locale === "ar" ? "أي تعديل يسحب التأكيد ويبطل تحليلات أو مستندات اعتمدت على النسخة السابقة حتى تراجعها مجددًا." : "Any edit withdraws confirmation and invalidates analyses or documents grounded in the previous version until you review it again."}</p>
             <form className="mt-5 space-y-4" onSubmit={handleEditFact}>
               <label><span className="field-label">{locale === "ar" ? "الفئة الصحيحة" : "Correct category"}</span><select className="field-control" name="category" defaultValue={editingFact.category}><option value="identity">{locale === "ar" ? "هوية مهنية" : "Professional identity"}</option><option value="experience">{locale === "ar" ? "خبرة" : "Experience"}</option><option value="education">{locale === "ar" ? "تعليم" : "Education"}</option><option value="skill">{locale === "ar" ? "مهارة" : "Skill"}</option><option value="project">{locale === "ar" ? "مشروع" : "Project"}</option><option value="certificate">{locale === "ar" ? "شهادة" : "Certificate"}</option><option value="language">{locale === "ar" ? "لغة" : "Language"}</option><option value="achievement">{locale === "ar" ? "إنجاز" : "Achievement"}</option><option value="preference">{locale === "ar" ? "تفضيل مهني" : "Career preference"}</option><option value="eligibility">{locale === "ar" ? "أهلية العمل" : "Work eligibility"}</option></select></label>

@@ -24,7 +24,6 @@ import { EmptyRequirementEditor } from "@/components/jobs/empty-requirement-edit
 import { RequirementRow } from "@/components/jobs/requirement-row";
 import { Button } from "@/components/ui/button";
 import { DemoNotice } from "@/components/ui/demo-notice";
-import { ProgressRing } from "@/components/ui/progress-ring";
 import { addJobRequirement, analyzeJob, apiConfiguration, apiErrorMessage, correctJobRequirement, getCareerFacts, getCareerProfile, getEvidenceSources, getJob, retireJobRequirement, reviewJobRequirements, saveApplication } from "@/lib/api-client";
 import { useLocale } from "@/lib/i18n";
 import { readLastAnalysis, saveJobForTracking, saveLastAnalysis } from "@/lib/local-store";
@@ -202,11 +201,11 @@ export default function JobAnalysisPage() {
   }
 
   if (loadError) {
-    return <div className="page-wrap grid min-h-[60vh] place-items-center"><section className="max-w-lg rounded-xl border border-danger bg-danger-pale p-6 text-center" role="alert"><h1 className="text-xl font-bold">{locale === "ar" ? "تعذر تحميل التحليل" : "Could not load analysis"}</h1><p className="mt-3 text-sm text-danger">{loadError}</p><Button variant="secondary" className="mt-5" onClick={() => router.push("/jobs")}>{locale === "ar" ? "العودة إلى الفرص" : "Back to opportunities"}</Button></section></div>;
+    return <div className="page-wrap grid min-h-[60vh] place-items-center"><section className="w-full max-w-lg border-y border-danger py-6 text-center" role="alert"><h1 className="text-xl font-bold">{locale === "ar" ? "تعذر تحميل التحليل" : "Could not load analysis"}</h1><p className="mt-3 text-sm text-danger">{loadError}</p><Button variant="secondary" className="mt-5" onClick={() => router.push("/jobs")}>{locale === "ar" ? "العودة إلى الفرص" : "Back to opportunities"}</Button></section></div>;
   }
 
   if (!job) {
-    return <div className="grid min-h-[60vh] place-items-center"><div className="text-center"><LoaderCircle className="mx-auto h-7 w-7 animate-spin text-emerald" /><p className="mt-3 text-sm text-muted">{locale === "ar" ? "جارٍ تجهيز التحليل…" : "Preparing analysis…"}</p></div></div>;
+    return <div className="grid min-h-[60vh] place-items-center"><div className="text-center"><LoaderCircle className="mx-auto h-7 w-7 animate-spin text-primary-text" /><p className="mt-3 text-sm text-muted">{locale === "ar" ? "جارٍ تجهيز التحليل…" : "Preparing analysis…"}</p></div></div>;
   }
 
   if (job.requirements.length === 0) {
@@ -226,11 +225,11 @@ export default function JobAnalysisPage() {
           <div className="mx-auto max-w-[900px]">
             <Link href="/jobs" className="subtle-link"><ChevronLeft className="h-4 w-4 ltr:rotate-180" />{locale === "ar" ? "العودة إلى الفرص" : "Back to opportunities"}</Link>
             {job.isDemo ? <DemoNotice className="mt-3" /> : null}
-            {!job.isDemo && !job.requirementsReviewedAt ? <div ref={reviewSectionRef} tabIndex={-1} className="mt-3 flex flex-col gap-3 rounded-lg border border-amber bg-amber-pale p-4 text-sm md:flex-row md:items-center md:justify-between" role="note"><p><strong>{locale === "ar" ? "الخطوة 2 من 3 — راجع المتطلبات:" : "Step 2 of 3 — Review requirements:"}</strong> {locale === "ar" ? "صحّح النص والفئة والأهمية، وأضف أي متطلب مفقود أو احذف النتيجة الخاطئة، ثم اعتمد القائمة لتبدأ المطابقة." : "Correct text, category, and importance; add missed requirements or remove false positives, then confirm the list to start matching."}</p><Button className="shrink-0" disabled={reviewingRequirements} onClick={handleRequirementsReview}>{reviewingRequirements ? (locale === "ar" ? "جارٍ الاعتماد والمطابقة…" : "Confirming and matching…") : (locale === "ar" ? "اعتماد وتشغيل المطابقة" : "Confirm and run matching")}</Button></div> : null}
-            {!job.isDemo && job.requirementsReviewedAt && !job.analysisId ? <div ref={reviewSectionRef} tabIndex={-1} className="mt-3 flex flex-col gap-3 rounded-lg border border-amber bg-amber-pale p-4 text-sm md:flex-row md:items-center md:justify-between" role="alert"><p>{locale === "ar" ? "اعتُمدت المتطلبات، لكن المطابقة لم تكتمل. أعد تشغيلها دون إعادة الاعتماد." : "Requirements are confirmed, but matching did not finish. Run it again without reconfirming."}</p><Button className="shrink-0" disabled={reviewingRequirements} onClick={handleRequirementsReview}>{reviewingRequirements ? (locale === "ar" ? "جارٍ تشغيل المطابقة…" : "Running matching…") : (locale === "ar" ? "إعادة تشغيل المطابقة" : "Run matching again")}</Button></div> : null}
-            {!job.isDemo && job.requirementsReviewedAt && job.analysisId ? <p className="mt-3 flex items-center gap-2 rounded-lg border border-emerald bg-emerald-pale p-4 text-sm text-emerald" role="status"><CheckCircle2 className="h-5 w-5 shrink-0" />{locale === "ar" ? "الخطوة 3 من 3 — اكتملت المطابقة؛ القرار مبني على المتطلبات التي راجعتها وحقائق ملفك المؤكدة فقط." : "Step 3 of 3 — Matching is complete; the decision uses your reviewed requirements and confirmed profile facts only."}</p> : null}
+            {!job.isDemo && !job.requirementsReviewedAt ? <div ref={reviewSectionRef} tabIndex={-1} className="mt-3 flex flex-col gap-3 border-y border-primary/45 bg-primary/5 py-4 text-sm md:flex-row md:items-center md:justify-between" role="note"><p><strong className="text-primary-text">{locale === "ar" ? "الخطوة 2 من 3 — راجع المتطلبات:" : "Step 2 of 3 — Review requirements:"}</strong> {locale === "ar" ? "صحّح النص والفئة والأهمية، وأضف أي متطلب مفقود أو احذف النتيجة الخاطئة، ثم اعتمد القائمة لتبدأ المطابقة." : "Correct text, category, and importance; add missed requirements or remove false positives, then confirm the list to start matching."}</p><Button className="shrink-0" disabled={reviewingRequirements} onClick={handleRequirementsReview}>{reviewingRequirements ? (locale === "ar" ? "جارٍ الاعتماد والمطابقة…" : "Confirming and matching…") : (locale === "ar" ? "اعتماد وتشغيل المطابقة" : "Confirm and run matching")}</Button></div> : null}
+            {!job.isDemo && job.requirementsReviewedAt && !job.analysisId ? <div ref={reviewSectionRef} tabIndex={-1} className="mt-3 flex flex-col gap-3 border-y border-primary/45 bg-primary/5 py-4 text-sm md:flex-row md:items-center md:justify-between" role="alert"><p>{locale === "ar" ? "اعتُمدت المتطلبات، لكن المطابقة لم تكتمل. أعد تشغيلها دون إعادة الاعتماد." : "Requirements are confirmed, but matching did not finish. Run it again without reconfirming."}</p><Button className="shrink-0" disabled={reviewingRequirements} onClick={handleRequirementsReview}>{reviewingRequirements ? (locale === "ar" ? "جارٍ تشغيل المطابقة…" : "Running matching…") : (locale === "ar" ? "إعادة تشغيل المطابقة" : "Run matching again")}</Button></div> : null}
+            {!job.isDemo && job.requirementsReviewedAt && job.analysisId ? <p className="mt-3 flex items-center gap-2 border-y border-emerald/45 py-4 text-sm text-emerald" role="status"><CheckCircle2 className="h-5 w-5 shrink-0" />{locale === "ar" ? "الخطوة 3 من 3 — اكتملت المطابقة؛ القرار مبني على المتطلبات التي راجعتها وحقائق ملفك المؤكدة فقط." : "Step 3 of 3 — Matching is complete; the decision uses your reviewed requirements and confirmed profile facts only."}</p> : null}
 
-            <header className="mt-5">
+            <header className="mt-7 border-b border-border pb-7">
               <div className="flex flex-col justify-between gap-5 md:flex-row md:items-start">
                 <div>
                   <h1 className="page-title">{text(job.title)}</h1>
@@ -251,30 +250,33 @@ export default function JobAnalysisPage() {
               </p>
             </header>
 
-            {analysisComplete ? <section className="mt-6 grid gap-5 rounded-xl border-2 border-emerald p-5 md:grid-cols-[1fr_auto_1fr] md:items-center md:p-7" aria-labelledby="decision-summary-title">
+            {analysisComplete ? <section className="mt-6 grid gap-5 border-y border-emerald/45 py-6 md:grid-cols-[1fr_auto_1fr] md:items-center" aria-labelledby="decision-summary-title">
               <div className="flex items-center gap-4">
-                <span className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-emerald-pale text-emerald"><UserRound className="h-7 w-7" /></span>
+                <span className="grid h-14 w-14 shrink-0 place-items-center rounded-full border border-emerald text-emerald"><UserRound className="h-7 w-7" /></span>
                 <div><h2 id="decision-summary-title" className="font-bold">{job.isDemo ? (locale === "ar" ? "جاهزية المقابلة" : "Interview readiness") : (locale === "ar" ? "جاهزية المقابلة" : "Interview readiness")}: <span className="text-emerald">{text(readinessCopy[job.readiness])}</span></h2><p className="mt-1 text-sm text-muted">{locale === "ar" ? "الثقة" : "Confidence"}: {text(readinessCopy[job.confidence])}</p></div>
               </div>
               <div className="hidden h-16 w-px bg-border md:block" />
               <div className="flex items-center justify-between gap-5">
                 <div><strong className="text-4xl text-emerald">{job.coverage}%</strong><span className="mt-1 block text-sm text-muted">{locale === "ar" ? "تغطية المتطلبات" : "Requirement coverage"}</span></div>
-                <ProgressRing value={job.coverage} size="sm" label={locale === "ar" ? `تغطية المتطلبات ${job.coverage} بالمئة` : `${job.coverage} percent requirement coverage`} />
+                <div className="w-28" role="img" aria-label={locale === "ar" ? `تغطية المتطلبات ${job.coverage} بالمئة` : `${job.coverage} percent requirement coverage`}>
+                  <span className="block text-end text-sm font-semibold text-emerald">{job.coverage}%</span>
+                  <span className="mt-2 block h-px bg-border" aria-hidden="true"><span className="block h-px bg-emerald" style={{ width: `${job.coverage}%` }} /></span>
+                </div>
               </div>
-            </section> : <section className="mt-6 rounded-xl border-2 border-amber p-5 md:p-7" aria-labelledby="decision-summary-title"><h2 id="decision-summary-title" className="font-bold">{locale === "ar" ? "النتيجة بانتظار مراجعتك" : "Result waiting for your review"}</h2><p className="mt-2 text-sm text-muted">{locale === "ar" ? "لن نعرض نسبة تغطية أو توصية قبل اعتماد المتطلبات وتشغيل المطابقة." : "Coverage and a recommendation will stay hidden until you confirm requirements and run matching."}</p></section>}
+            </section> : <section className="mt-6 border-y border-primary/45 py-6" aria-labelledby="decision-summary-title"><h2 id="decision-summary-title" className="font-bold text-primary-text">{locale === "ar" ? "النتيجة بانتظار مراجعتك" : "Result waiting for your review"}</h2><p className="mt-2 text-sm text-muted">{locale === "ar" ? "لن نعرض نسبة تغطية أو توصية قبل اعتماد المتطلبات وتشغيل المطابقة." : "Coverage and a recommendation will stay hidden until you confirm requirements and run matching."}</p></section>}
 
             <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4 text-xs text-muted">
               <p>{analysisComplete ? `${supportedCount} ${locale === "ar" ? `من ${job.requirements.length} متطلبات مدعومة` : `of ${job.requirements.length} requirements supported`}` : (locale === "ar" ? `استُخرج ${job.requirements.length} متطلبات للمراجعة` : `${job.requirements.length} requirements extracted for review`)}</p>
               {analysisComplete ? <div className="flex flex-wrap gap-4"><span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-emerald" />{locale === "ar" ? "تم التحقق" : "Verified"}</span><span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-amber" />{locale === "ar" ? "متوافق جزئيًا" : "Partial"}</span><span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-danger" />{locale === "ar" ? "غير مدعوم" : "Unsupported"}</span></div> : <span>{locale === "ar" ? "اختر أي بند لتصحيحه أو إضافة متطلب مفقود." : "Select any item to correct it or add a missed requirement."}</span>}
             </div>
 
-            <button className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-semibold lg:hidden" onClick={() => setDrawerOpen(true)}><Info className="h-4 w-4" />{locale === "ar" ? "فتح دليل القرار" : "Open decision evidence"}</button>
+            <button className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-[2px] border border-border px-4 text-sm font-semibold lg:hidden" onClick={() => setDrawerOpen(true)}><Info className="h-4 w-4" />{locale === "ar" ? "فتح دليل القرار" : "Open decision evidence"}</button>
 
             <section className="mt-2" aria-label={locale === "ar" ? "تفاصيل المتطلبات" : "Requirement details"}>
               {groups.map((group) => (
                 <div className="mt-6" key={group.key}>
-                  <h2 className="mb-3 flex items-center gap-2 font-bold">{group.title}<span className="grid h-7 min-w-7 place-items-center rounded-full bg-slate-100 px-2 text-sm">{group.requirements.length}</span></h2>
-                  <div className="overflow-hidden rounded-lg border border-border">
+                  <h2 className="mb-3 flex items-center gap-2 font-bold">{group.title}<span className="border-s border-border ps-2 text-sm font-normal text-muted">{group.requirements.length}</span></h2>
+                  <div className="border-y border-border">
                     {group.requirements.map((requirement) => <RequirementRow key={requirement.id} requirement={requirement} reviewMode={!analysisComplete} selected={selectedRequirement.id === requirement.id} onSelect={() => selectRequirement(requirement)} />)}
                   </div>
                 </div>
@@ -288,15 +290,15 @@ export default function JobAnalysisPage() {
         </div>
       </div>
 
-      {notice ? <div className={cn("fixed bottom-28 start-5 z-50 flex max-w-sm items-start gap-2 rounded-lg border bg-white p-4 text-sm shadow-subtle lg:bottom-24", notice.tone === "error" ? "border-danger text-danger" : "border-emerald")} role={notice.tone === "error" ? "alert" : "status"}>{notice.tone === "error" ? <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" />}<div><p>{notice.message}</p>{applicationSaved && notice.tone === "success" ? <Link href="/applications" className="mt-2 inline-flex font-semibold text-emerald underline underline-offset-4">{locale === "ar" ? "عرض لوحة التقديمات" : "View application tracker"}</Link> : null}</div></div> : null}
+      {notice ? <div className={cn("fixed bottom-28 start-5 z-50 flex max-w-sm items-start gap-2 border bg-background p-4 text-sm lg:bottom-24", notice.tone === "error" ? "border-danger text-danger" : "border-emerald")} role={notice.tone === "error" ? "alert" : "status"}>{notice.tone === "error" ? <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" />}<div><p>{notice.message}</p>{applicationSaved && notice.tone === "success" ? <Link href="/applications" className="mt-2 inline-flex font-semibold text-emerald underline underline-offset-4">{locale === "ar" ? "عرض لوحة التقديمات" : "View application tracker"}</Link> : null}</div></div> : null}
 
-      <div ref={actionBarRef} tabIndex={-1} className="fixed inset-x-0 bottom-[72px] z-30 border-t border-border bg-white/95 px-5 py-3 backdrop-blur-sm lg:bottom-0 lg:right-[244px] lg:px-8" aria-label={locale === "ar" ? "إجراءات الوظيفة" : "Job actions"}>
+      <div ref={actionBarRef} tabIndex={-1} className="fixed inset-x-0 bottom-[76px] z-30 border-t border-border bg-background/95 px-5 py-3 backdrop-blur-sm lg:bottom-0 lg:end-0 lg:start-[244px] lg:px-8" aria-label={locale === "ar" ? "إجراءات الوظيفة" : "Job actions"}>
         <div className="mx-auto flex max-w-[1220px] flex-col-reverse gap-3 md:flex-row md:items-center md:justify-between">
           <p className="hidden items-center gap-2 text-sm text-muted lg:flex"><LockKeyhole className="h-4 w-4" />{locale === "ar" ? "لن تُضاف أي حقيقة غير مؤكدة إلى مستنداتك." : "No unconfirmed fact will be added to your documents."}</p>
           <div className="grid grid-cols-2 gap-3 md:flex">
             <Button disabled={!analysisComplete} onClick={() => router.push(`/documents?job=${job.id}`)}><FilePlus2 className="h-4 w-4" />{locale === "ar" ? "أنشئ CV مخصصًا" : "Create tailored CV"}</Button>
             <Button variant="secondary" disabled={!analysisComplete || savingApplication || applicationSaved} onClick={handleSaveToTracker}><Bookmark className="h-4 w-4" />{applicationSaved ? (locale === "ar" ? "محفوظ للمتابعة" : "Saved to tracker") : savingApplication ? (locale === "ar" ? "جارٍ الحفظ…" : "Saving…") : (locale === "ar" ? "حفظ للمتابعة" : "Save to tracker")}</Button>
-            {isSafeHttpUrl(job.originalUrl) ? <a href={job.originalUrl} target="_blank" rel="noopener noreferrer" className="col-span-2 inline-flex min-h-11 items-center justify-center gap-2 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-900 md:px-3">{locale === "ar" ? "فتح صفحة التقديم" : "Open application page"}<ExternalLink className="h-4 w-4" /></a> : <span className="col-span-2 flex min-h-11 items-center justify-center gap-2 text-xs text-muted"><ShieldCheck className="h-4 w-4" />{locale === "ar" ? "لا يوجد رابط صالح محفوظ" : "No valid saved URL"}</span>}
+            {isSafeHttpUrl(job.originalUrl) ? <a href={job.originalUrl} target="_blank" rel="noopener noreferrer" className="col-span-2 inline-flex min-h-11 items-center justify-center gap-2 text-sm font-semibold text-primary-text hover:text-primary-hover md:px-3">{locale === "ar" ? "فتح صفحة التقديم" : "Open application page"}<ExternalLink className="h-4 w-4" /></a> : <span className="col-span-2 flex min-h-11 items-center justify-center gap-2 text-xs text-muted"><ShieldCheck className="h-4 w-4" />{locale === "ar" ? "لا يوجد رابط صالح محفوظ" : "No valid saved URL"}</span>}
           </div>
         </div>
       </div>

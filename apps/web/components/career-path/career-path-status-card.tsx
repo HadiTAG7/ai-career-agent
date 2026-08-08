@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, Compass, FileUser, MessageCircle, ServerOff, Sparkles } from "lucide-react";
+import { ArrowLeft, Compass, FileUser, MessageCircle, ServerOff } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
 import type { CareerPathWorkspace } from "@/lib/types";
 
@@ -42,7 +42,7 @@ export function CareerPathStatusCard({ workspace, unavailable = false, connected
     description = locale === "ar" ? "يحتاج مزود الذكاء الاصطناعي إلى إعداد داخل خادم API. لا يوجد حقل مفتاح في الواجهة." : "The AI provider must be configured on the API server. There is no key field in the interface.";
     action = locale === "ar" ? "عرض الحالة" : "View status";
   } else if (suggestionCount > 0) {
-    Icon = Sparkles;
+    Icon = Compass;
     title = locale === "ar" ? `${suggestionCount} مسارات تستحق المراجعة` : `${suggestionCount} paths are ready to review`;
     description = locale === "ar" ? "راجع أسباب كل اقتراح وما لا يزال مجهولًا، ثم ناقشه مع المستشار." : "Review the reasoning and open questions for each suggestion, then discuss it with the adviser.";
     action = locale === "ar" ? "راجع الاقتراحات" : "Review suggestions";
@@ -54,13 +54,13 @@ export function CareerPathStatusCard({ workspace, unavailable = false, connected
   }
 
   return (
-    <section className="mb-9 flex flex-col gap-5 rounded-xl border border-emerald bg-emerald-pale p-5 md:flex-row md:items-center" aria-labelledby="career-path-status-title">
-      <span className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-white text-emerald"><Icon className="h-6 w-6" aria-hidden="true" /></span>
+    <section className="mb-9 flex flex-col gap-5 border-y border-primary/45 bg-primary/5 py-5 md:flex-row md:items-center" aria-labelledby="career-path-status-title">
+      <span className="grid h-12 w-12 shrink-0 place-items-center border border-primary/45 text-primary-text"><Icon className="h-6 w-6" aria-hidden="true" /></span>
       <div className="min-w-0 flex-1">
         <h2 id="career-path-status-title" className="text-lg font-bold text-ink">{title}</h2>
         <p className="mt-1 max-w-3xl text-sm text-muted">{description}</p>
       </div>
-      <Link href={href} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-emerald px-5 text-sm font-semibold text-white hover:bg-emerald-dark">
+      <Link href={href} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 bg-primary px-5 text-sm font-semibold text-primary-foreground hover:bg-primary-hover">
         {action}
         <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
       </Link>

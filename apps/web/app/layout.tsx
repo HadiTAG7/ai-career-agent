@@ -10,7 +10,9 @@ import "@fontsource/noto-sans-arabic/700.css";
 import "./globals.css";
 import { AuthGate } from "@/components/auth/auth-gate";
 import { AppShell } from "@/components/layout/app-shell";
+import { ThemeInitScript } from "@/components/layout/theme-init-script";
 import { LocaleProvider } from "@/lib/i18n";
+import { ThemeProvider } from "@/lib/theme";
 
 export const metadata: Metadata = {
   title: { default: "AI Career Agent", template: "%s · AI Career Agent" },
@@ -19,11 +21,14 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="ar" dir="rtl" data-scroll-behavior="smooth">
+    <html lang="ar" dir="rtl" data-theme="dark" data-scroll-behavior="smooth" suppressHydrationWarning>
+      <head><ThemeInitScript /></head>
       <body>
-        <LocaleProvider>
-          <AuthGate><AppShell>{children}</AppShell></AuthGate>
-        </LocaleProvider>
+        <ThemeProvider>
+          <LocaleProvider>
+            <AuthGate><AppShell>{children}</AppShell></AuthGate>
+          </LocaleProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

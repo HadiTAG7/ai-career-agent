@@ -323,7 +323,14 @@ Safety rules:
   separate handles into a new employer-tool, role-result, or project-skill relationship.
 - Preserve negation exactly; never turn absent experience or a skipped metric into a positive claim.
 - GPA is display-ready only at 80% of its stated scale or when honors are explicit.
-- Match the requested language and keep the next question concise and friendly.
+- Use `conversation_language` for `understanding.summary`,
+  `understanding.confirmation_question`, `next_question.question`,
+  `next_question.why_it_matters`, and `next_question.placeholder`. Keep the next question concise
+  and friendly.
+- Use `output_language` for every `draft_patch` title and bullet candidate. The conversation may be
+  Arabic while the resume output is English, or vice versa.
+- Preserve the user's evidence language in proposed records where practical. Do not translate a
+  proper noun, product name, number, or date.
 """.strip()
 
 SECTION_REWRITE_SYSTEM_INSTRUCTIONS = """
@@ -1638,13 +1645,8 @@ def _validated_draft(
     )
 
 
-def _validate_requested_draft_language(
-    draft: ResumeDraftContent,
-    language: PreferredLanguage,
-) -> None:
-    """Require narrative prose to follow the user's selected resume language."""
-
-    narrative = " ".join(
+def _draft_narrative(draft: ResumeDraftContent) -> str:
+    return " ".join(
         (
             draft.headline,
             draft.professional_summary,
@@ -1656,15 +1658,83 @@ def _validate_requested_draft_language(
             ),
         )
     )
-    arabic_letters = len(re.findall(r"[\u0621-\u064a]", narrative))
-    latin_letters = len(re.findall(r"[A-Za-z]", narrative))
+
+
+def _script_letter_counts(text: str) -> tuple[int, int]:
+    return (
+        len(re.findall(r"[\u0621-\u064a]", text)),
+        len(re.findall(r"[A-Za-z]", text)),
+    )
+
+
+def _uses_requested_language(
+    text: str,
+    language: PreferredLanguage,
+    *,
+    allow_short: bool,
+) -> bool:
+    arabic_letters, latin_letters = _script_letter_counts(text)
     total_letters = arabic_letters + latin_letters
     if total_letters < 10:
+        # Short labels and product names such as "Power BI" are not reliable language samples.
+        return allow_short
+    requested_letters = (
+        arabic_letters if language is PreferredLanguage.AR else latin_letters
+    )
+    return requested_letters / total_letters >= 0.4
+
+
+def _validate_requested_draft_language(
+    draft: ResumeDraftContent,
+    language: PreferredLanguage,
+) -> None:
+    """Require narrative prose to follow the user's selected resume language."""
+
+    narrative = _draft_narrative(draft)
+    arabic_letters, latin_letters = _script_letter_counts(narrative)
+    if arabic_letters + latin_letters < 10:
         raise ResumeWriterError("Resume writer returned too little narrative text")
-    if language is PreferredLanguage.AR and arabic_letters / total_letters < 0.4:
+    if _uses_requested_language(narrative, language, allow_short=False):
+        return
+    if language is PreferredLanguage.AR:
         raise ResumeWriterError("Resume writer did not use the requested Arabic language")
-    if language is PreferredLanguage.EN and latin_letters / total_letters < 0.4:
-        raise ResumeWriterError("Resume writer did not use the requested English language")
+    raise ResumeWriterError("Resume writer did not use the requested English language")
+
+
+def resume_patch_uses_requested_language(
+    patch: object,
+    language: PreferredLanguage,
+) -> bool:
+    """Reject only clear script mismatches in provider-authored live-draft prose.
+
+    Short labels and mixed-script proper nouns are accepted because they are not meaningful
+    language samples. Full writer output still goes through the stricter draft validator.
+    """
+
+    raw_patch = patch.model_dump(mode="python") if isinstance(patch, BaseModel) else patch
+    if not isinstance(raw_patch, dict):
+        return False
+    candidate = raw_patch.get("draft") if isinstance(raw_patch.get("draft"), dict) else raw_patch
+    if {"headline", "professional_summary", "summary_evidence_handles", "sections"} <= set(
+        candidate
+    ):
+        try:
+            draft = ResumeDraftContent.model_validate(candidate)
+        except ValueError:
+            return False
+        return _uses_requested_language(
+            _draft_narrative(draft),
+            language,
+            allow_short=True,
+        )
+    try:
+        normalized_patch = ResumeDraftPatch.model_validate(candidate)
+    except ValueError:
+        return False
+    patch_narrative = " ".join(
+        (normalized_patch.title, *normalized_patch.bullet_candidates)
+    )
+    return _uses_requested_language(patch_narrative, language, allow_short=True)
 
 
 def _validate_record(
@@ -1821,7 +1891,8 @@ class ResumeWriterProvider(ABC):
     async def generate_adaptive_turn(
         self,
         *,
-        language: PreferredLanguage,
+        conversation_language: PreferredLanguage,
+        output_language: PreferredLanguage,
         target_role: str | None,
         evidence: tuple[ResumeEvidence, ...],
         conversation: list[ResumeConversationMessage | dict[str, str]],
@@ -1979,7 +2050,8 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
     async def generate_adaptive_turn(
         self,
         *,
-        language: PreferredLanguage,
+        conversation_language: PreferredLanguage,
+        output_language: PreferredLanguage,
         target_role: str | None,
         evidence: tuple[ResumeEvidence, ...],
         conversation: list[ResumeConversationMessage | dict[str, str]],
@@ -2041,7 +2113,8 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
             schema_name="adaptive_resume_interview_turn",
             system_instructions=ADAPTIVE_TURN_SYSTEM_INSTRUCTIONS,
             payload={
-                "language": language.value,
+                "conversation_language": conversation_language.value,
+                "output_language": output_language.value,
                 "target_role": _redact_resume_text(target_role).strip()[:300]
                 if target_role
                 else None,

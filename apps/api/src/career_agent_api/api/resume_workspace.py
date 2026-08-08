@@ -11,7 +11,7 @@ from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from starlette.concurrency import run_in_threadpool
@@ -60,6 +60,7 @@ from career_agent_api.services.resume_writer import (
     ResumeWriterProvider,
     build_resume_evidence,
     get_resume_writer_provider,
+    resume_patch_uses_requested_language,
     validate_claim_grounding,
 )
 
@@ -219,6 +220,21 @@ def _has_current_consent(
     return workspace.consent_version == _provider_consent_version(provider)
 
 
+def _conversation_language(workspace: ResumeWorkspace) -> PreferredLanguage:
+    """Return the persisted interview language without changing the database schema.
+
+    Workspaces created before the bilingual contract have no metadata value, so they retain the
+    former behavior where the workspace language controlled both interview and resume output.
+    """
+
+    metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
+    raw_language = metadata.get("conversation_language")
+    try:
+        return PreferredLanguage(str(raw_language))
+    except ValueError:
+        return workspace.language
+
+
 def _coverage(
     facts: list[CareerFact],
     draft: ResumeDraftContent | None,
@@ -334,6 +350,7 @@ def _workspace_read(
 ) -> ResumeWorkspaceRead:
     return ResumeWorkspaceRead.model_validate(workspace).model_copy(
         update={
+            "conversation_language": _conversation_language(workspace),
             "provider_ready": provider.available,
             "provider": provider.provider_name,
             "model": provider.model if provider.available else None,
@@ -778,13 +795,14 @@ async def _handle_resume_quick_action(
 
     sequence = user_message.sequence + 1
     category = str(current_question.get("category") or "achievement")
+    conversation_language = _conversation_language(workspace)
     assistant_kind = ResumeMessageKind.STATUS
     structured_payload: dict[str, Any] = {"quick_action": action}
 
     if action == "show_example":
-        assistant_content = _quick_action_example(workspace.language, category)
+        assistant_content = _quick_action_example(conversation_language, category)
     elif action == "no_exact_metric":
-        if workspace.language is PreferredLanguage.AR:
+        if conversation_language is PreferredLanguage.AR:
             assistant_content = (
                 "ما يحتاج تخمّن رقمًا. صف نطاق العمل: ماذا أنجزت، من استفاد، "
                 "وما الأداة أو المسؤولية التي كانت عليك؟"
@@ -821,7 +839,7 @@ async def _handle_resume_quick_action(
         structured_payload = {"question": next_question, "quick_action": action}
     elif action in {"skip", "continue"}:
         questions = await provider.generate_questions(
-            language=workspace.language,
+            language=conversation_language,
             target_role=None,
             evidence=evidence,
         )
@@ -830,7 +848,9 @@ async def _handle_resume_quick_action(
             (question for question in questions if question.id != current_id),
             questions[0] if questions else None,
         )
-        next_question = _dump(selected) if selected else _first_question(workspace.language, facts)
+        next_question = (
+            _dump(selected) if selected else _first_question(conversation_language, facts)
+        )
         assistant_content = str(next_question["question"])
         workspace.pending_understanding = None
         workspace.provider_metadata = {
@@ -875,7 +895,7 @@ async def _handle_resume_quick_action(
             if action == "review"
             else ResumeWorkspaceStage.WRITING
         )
-        if workspace.language is PreferredLanguage.AR:
+        if conversation_language is PreferredLanguage.AR:
             assistant_content = (
                 "جهزت المسودة من الحقائق التي أكّدتها. راجعها وعدّلها قبل التنزيل."
             )
@@ -929,13 +949,74 @@ async def start_resume_workspace(
         include_versions=False,
     )
     if workspace:
+        current_conversation_language = _conversation_language(workspace)
+        conversation_language = (
+            payload.conversation_language or current_conversation_language
+        )
         if workspace.current_draft and workspace.language is not payload.language:
             raise _api_error(
                 status.HTTP_409_CONFLICT,
                 "resume_language_change_requires_new_version",
                 "Restore or finish the current draft before changing its language",
             )
+        if conversation_language is not current_conversation_language:
+            user_message_count = await session.scalar(
+                select(func.count(ResumeMessage.id)).where(
+                    ResumeMessage.workspace_id == workspace.id,
+                    ResumeMessage.role == ResumeMessageRole.USER,
+                )
+            )
+            if user_message_count or workspace.pending_understanding:
+                raise _api_error(
+                    status.HTTP_409_CONFLICT,
+                    "resume_conversation_language_change_not_allowed",
+                    "Start a new resume workspace to change the conversation language",
+                )
+            facts = await _profile_facts(session, profile_id)
+            question = _first_question(conversation_language, facts)
+            assistant_question = await session.scalar(
+                select(ResumeMessage)
+                .where(
+                    ResumeMessage.workspace_id == workspace.id,
+                    ResumeMessage.role == ResumeMessageRole.ASSISTANT,
+                    ResumeMessage.kind == ResumeMessageKind.QUESTION,
+                )
+                .order_by(ResumeMessage.sequence.desc())
+                .limit(1)
+            )
+            if assistant_question:
+                assistant_question.content = question["question"]
+                assistant_question.structured_payload = {"question": question}
+                assistant_question.status = ResumeMessageStatus.SENT
+            else:
+                last_sequence = await session.scalar(
+                    select(func.max(ResumeMessage.sequence)).where(
+                        ResumeMessage.workspace_id == workspace.id
+                    )
+                )
+                session.add(
+                    ResumeMessage(
+                        workspace_id=workspace.id,
+                        sequence=int(last_sequence or 0) + 1,
+                        role=ResumeMessageRole.ASSISTANT,
+                        kind=ResumeMessageKind.QUESTION,
+                        content=question["question"],
+                        structured_payload={"question": question},
+                        status=ResumeMessageStatus.SENT,
+                    )
+                )
+            workspace.pending_understanding = None
+            workspace.revision += 1
+            workspace.provider_metadata = {
+                **workspace.provider_metadata,
+                "current_question": question,
+                "pending_question": None,
+            }
         workspace.language = payload.language
+        workspace.provider_metadata = {
+            **workspace.provider_metadata,
+            "conversation_language": conversation_language.value,
+        }
         workspace.contact = payload.contact.model_dump(mode="json", exclude_none=True)
         workspace.provider = provider.provider_name
         workspace.model = provider.model if provider.available else None
@@ -949,7 +1030,8 @@ async def start_resume_workspace(
         return _workspace_read(workspace, provider)
 
     facts = await _profile_facts(session, profile_id)
-    question = _first_question(payload.language, facts)
+    conversation_language = payload.conversation_language or payload.language
+    question = _first_question(conversation_language, facts)
     workspace = ResumeWorkspace(
         profile_id=profile_id,
         language=payload.language,
@@ -958,7 +1040,11 @@ async def start_resume_workspace(
         contact=payload.contact.model_dump(mode="json", exclude_none=True),
         provider=provider.provider_name,
         model=provider.model if provider.available else None,
-        provider_metadata={"current_question": question, "prompt_version": CONSENT_VERSION},
+        provider_metadata={
+            "current_question": question,
+            "prompt_version": CONSENT_VERSION,
+            "conversation_language": conversation_language.value,
+        },
         consent_version=(
             _provider_consent_version(provider) if payload.data_sharing_acknowledged else None
         ),
@@ -1013,6 +1099,45 @@ async def get_resume_workspace(
     return _workspace_read(workspace, provider)
 
 
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_resume_workspace(
+    profile_id: UUID,
+    user: CurrentUser,
+    expected_revision: int = Query(ge=0),
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    """Delete only the resume workspace while retaining confirmed career evidence."""
+
+    # Lock the profile first, matching workspace creation, so reset cannot race a first POST.
+    await _owned_profile(session, profile_id, user.id, for_update=True)
+    workspace = await _load_workspace(session, profile_id, for_update=True)
+    if not workspace:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    if expected_revision != workspace.revision:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_workspace_revision_conflict",
+            "The resume workspace changed; reload it before clearing it",
+        )
+    # `_load_workspace` deliberately limits response relationships to recent rows. Explicit bulk
+    # deletes ensure reset removes older rows too, including on SQLite where relying on a partially
+    # loaded ORM collection is unsafe. Break the self-referential version chain before deletion.
+    await session.execute(
+        delete(ResumeMessage).where(ResumeMessage.workspace_id == workspace.id)
+    )
+    await session.execute(
+        update(ResumeDraftVersion)
+        .where(ResumeDraftVersion.workspace_id == workspace.id)
+        .values(base_version_id=None)
+    )
+    await session.execute(
+        delete(ResumeDraftVersion).where(ResumeDraftVersion.workspace_id == workspace.id)
+    )
+    await session.execute(delete(ResumeWorkspace).where(ResumeWorkspace.id == workspace.id))
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/messages", response_model=ResumeWorkspaceRead)
 async def send_resume_message(
     profile_id: UUID,
@@ -1065,6 +1190,7 @@ async def send_resume_message(
 
     facts = await _profile_facts(session, profile_id)
     evidence = build_resume_evidence(facts)
+    conversation_language = _conversation_language(workspace)
     current_question = dict(workspace.provider_metadata.get("current_question") or {})
     answer = payload.content or str(payload.quick_action or "")
     sequence = _next_sequence(workspace)
@@ -1111,7 +1237,8 @@ async def send_resume_message(
         adaptive = getattr(provider, "generate_adaptive_turn", None)
         if callable(adaptive):
             result = await adaptive(
-                language=workspace.language,
+                conversation_language=conversation_language,
+                output_language=workspace.language,
                 target_role=None,
                 evidence=evidence,
                 conversation=[
@@ -1133,12 +1260,12 @@ async def send_resume_message(
             ready_to_generate = bool(getattr(result, "ready_to_generate", False))
         else:
             questions = await provider.generate_questions(
-                language=workspace.language,
+                language=conversation_language,
                 target_role=None,
                 evidence=evidence,
             )
             next_question = (
-                _dump(questions[0]) if questions else _first_question(workspace.language, facts)
+                _dump(questions[0]) if questions else _first_question(conversation_language, facts)
             )
             understanding = answer
             proposed_records = [
@@ -1317,6 +1444,15 @@ async def confirm_resume_understanding(
         created_handles=created_handles,
         available_handles={item.handle for item in confirmed_evidence},
     )
+    if remapped_patch and not resume_patch_uses_requested_language(
+        remapped_patch,
+        workspace.language,
+    ):
+        remapped_patch = None
+        workspace.provider_metadata = {
+            **workspace.provider_metadata,
+            "generation_warning": "draft_patch_language_mismatch",
+        }
     draft: ResumeDraftContent | None = None
     explicit_generation = pending.get("quick_action") in {"generate", "review"}
     should_generate_full_draft = (
@@ -1345,7 +1481,18 @@ async def confirm_resume_understanding(
                 **workspace.provider_metadata,
                 "generation_warning": "full_generation_unavailable",
             }
-    if draft is None and remapped_patch:
+    if (
+        draft is None
+        and remapped_patch
+        and (
+            workspace.current_draft is not None
+            or _conversation_language(workspace) is workspace.language
+        )
+    ):
+        # When the interview and resume languages differ, the conversational understanding is
+        # not a safe professional-summary fallback for a brand-new draft. Wait for the full
+        # writer pass, which validates the requested output language. Existing drafts can still
+        # receive a provider-authored patch in the output language.
         draft = _draft_from_patch(
             workspace.current_draft,
             remapped_patch,
@@ -1366,7 +1513,7 @@ async def confirm_resume_understanding(
     next_question = pending.get("next_question")
     if pending.get("corrected_by_user") and not next_question:
         next_question = _first_question(
-            workspace.language,
+            _conversation_language(workspace),
             await _profile_facts(session, profile_id),
         )
     workspace.pending_understanding = None

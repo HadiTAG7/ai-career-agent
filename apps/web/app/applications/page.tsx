@@ -85,37 +85,48 @@ export default function ApplicationsPage() {
 
   return (
     <div className="page-wrap page-enter">
-      <div className="flex flex-col justify-between gap-5 md:flex-row md:items-end">
+      <header className="flex flex-col justify-between gap-6 border-b border-border pb-7 md:flex-row md:items-end">
         <div>
-          <h1 className="page-title">{locale === "ar" ? "لوحة التقديمات" : "Application tracker"}</h1>
-          <p className="mt-2 max-w-2xl text-muted">{locale === "ar" ? "كل حالة هنا يؤكدها المستخدم؛ لا نستنتج نتائج طلباتك من البريد." : "Every stage here is user-confirmed; we do not infer outcomes from your email."}</p>
+          <p className="text-xs text-muted">{locale === "ar" ? "دليل 06 / التقديمات" : "Guide 06 / Applications"}</p>
+          <h1 className="mt-3 text-[40px] font-bold leading-tight tracking-[-0.03em] text-foreground md:text-[52px]">{locale === "ar" ? "لوحة التقديمات" : "Application tracker"}</h1>
+          <p className="mt-3 max-w-2xl text-muted">{locale === "ar" ? "كل حالة هنا يؤكدها المستخدم؛ لا نستنتج نتائج طلباتك من البريد." : "Every stage here is user-confirmed; we do not infer outcomes from your email."}</p>
           {!apiConfiguration.baseUrl ? <DemoNotice className="mt-3" /> : null}
         </div>
-        <Link href="/jobs/new" className="inline-flex min-h-[52px] items-center justify-center gap-2 rounded-lg bg-emerald px-6 font-semibold text-white hover:bg-emerald-dark"><Plus className="h-5 w-5" />{locale === "ar" ? "أضف فرصة" : "Add opportunity"}</Link>
-      </div>
+        <Link href="/jobs/new" className="inline-flex min-h-[52px] items-center justify-center gap-2 bg-primary px-6 font-semibold text-primary-foreground hover:bg-primary-hover"><Plus className="h-5 w-5" />{locale === "ar" ? "أضف فرصة" : "Add opportunity"}</Link>
+      </header>
 
-      <div className="mt-8 overflow-x-auto border-b border-border" role="tablist" aria-label={locale === "ar" ? "تصفية التقديمات" : "Filter applications"}>
+      <div className="overflow-x-auto border-b border-border" role="tablist" aria-label={locale === "ar" ? "تصفية التقديمات" : "Filter applications"}>
         <div className="flex min-w-max gap-2">
           {filterGroups.map((item) => {
             const count = item.key === "all" ? applications.length : applications.filter((application) => application.stage === item.key).length;
             return (
-              <button key={item.key} type="button" role="tab" aria-selected={filter === item.key} onClick={() => setFilter(item.key)} className={cn("relative min-h-12 px-4 text-sm font-semibold", filter === item.key ? "text-ink" : "text-muted hover:text-ink")}>
-                {locale === "ar" ? item.ar : item.en} <span className="ms-1 text-xs">({count})</span>
-                {filter === item.key ? <span className="absolute inset-x-1 bottom-0 h-0.5 bg-emerald" /> : null}
+              <button key={item.key} type="button" role="tab" aria-selected={filter === item.key} onClick={() => setFilter(item.key)} className={cn("relative min-h-14 px-4 text-sm font-semibold", filter === item.key ? "text-foreground" : "text-muted hover:text-foreground")}>
+                {locale === "ar" ? item.ar : item.en} <span className="ms-1 text-xs tabular-nums">({count})</span>
+                {filter === item.key ? <span className="absolute inset-x-1 bottom-0 h-0.5 bg-primary" /> : null}
               </button>
             );
           })}
         </div>
       </div>
 
-      <section aria-live="polite" aria-label={locale === "ar" ? "التقديمات" : "Applications"}>
-        {loadState === "loading" ? <div className="my-8 flex min-h-40 items-center justify-center gap-3 rounded-xl border border-border text-sm text-muted" role="status"><LoaderCircle className="h-5 w-5 animate-spin text-emerald" />{locale === "ar" ? "جارٍ تحميل التقديمات…" : "Loading applications…"}</div> : null}
-        {loadState === "error" && loadError ? <div className="my-5 rounded-lg border border-danger bg-danger-pale p-4 text-sm text-danger" role="alert"><p className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{loadError}</p><button type="button" className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-lg border border-danger px-4 font-semibold" onClick={retryLoad}><RotateCcw className="h-4 w-4" />{locale === "ar" ? "إعادة المحاولة" : "Try again"}</button></div> : null}
-        {apiConfiguration.baseUrl ? <p className="mt-5 rounded-lg border border-amber bg-amber-pale p-4 text-sm" role="note">{locale === "ar" ? "مرحلتا «جاهزة» وما بعد الإرسال معطلتان حتى يُربط تدفق حزمة CV الموثقة والمراجعة. لن نسجل تقديمًا لا يملك مستندًا صالحًا." : "Ready and post-submission stages are disabled until the reviewed, evidence-backed CV package flow is connected. We will not record an application without a valid document."}</p> : null}
+      {apiConfiguration.baseUrl ? <p className="border-b border-primary/45 py-4 text-sm text-muted" role="note"><strong className="text-primary-text">{locale === "ar" ? "قيد الربط: " : "Connection pending: "}</strong>{locale === "ar" ? "مرحلتا «جاهزة» وما بعد الإرسال معطلتان حتى يُربط تدفق حزمة CV الموثقة والمراجعة. لن نسجل تقديمًا لا يملك مستندًا صالحًا." : "Ready and post-submission stages are disabled until the reviewed, evidence-backed CV package flow is connected. We will not record an application without a valid document."}</p> : null}
+
+      <section className="mt-7" aria-live="polite" aria-label={locale === "ar" ? "التقديمات" : "Applications"}>
+        <div className="hidden grid-cols-[minmax(220px,1.2fr)_160px_minmax(190px,1fr)_170px_44px] gap-5 border-y border-border px-3 py-3 text-xs font-medium text-muted lg:grid">
+          <span>{locale === "ar" ? "الفرصة" : "Opportunity"}</span>
+          <span>{locale === "ar" ? "الحالة" : "Stage"}</span>
+          <span>{locale === "ar" ? "الخطوة التالية" : "Next action"}</span>
+          <span>{locale === "ar" ? "المستند" : "Document"}</span>
+          <span />
+        </div>
+
+        {loadState === "loading" ? <div className="flex min-h-40 items-center justify-center gap-3 border-b border-border text-sm text-muted" role="status"><LoaderCircle className="h-5 w-5 animate-spin text-primary-text" />{locale === "ar" ? "جارٍ تحميل التقديمات…" : "Loading applications…"}</div> : null}
+        {loadState === "error" && loadError ? <div className="border-b border-danger py-5 text-sm" role="alert"><p className="flex items-start gap-2 text-danger"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{loadError}</p><button type="button" className="mt-3 inline-flex min-h-11 items-center gap-2 border border-danger px-4 font-semibold text-danger hover:text-foreground" onClick={retryLoad}><RotateCcw className="h-4 w-4" />{locale === "ar" ? "إعادة المحاولة" : "Try again"}</button></div> : null}
+
         {loadState === "success" ? visibleApplications.map((application) => (
-          <article className="grid gap-5 border-b border-border py-6 lg:grid-cols-[minmax(210px,1.2fr)_150px_minmax(190px,1fr)_170px_44px] lg:items-center" key={application.id}>
+          <article className="grid gap-5 border-b border-border px-3 py-5 lg:grid-cols-[minmax(220px,1.2fr)_160px_minmax(190px,1fr)_170px_44px] lg:items-center" key={application.id}>
             <div>
-              <Link href={`/jobs/${application.jobId}`} className="font-bold hover:text-emerald">{text(application.role)}</Link>
+              <Link href={`/jobs/${application.jobId}`} className="font-bold text-foreground hover:text-primary-text">{text(application.role)}</Link>
               <p className="mt-1 text-sm text-muted">{text(application.company)}</p>
               <p className="mt-2 flex items-center gap-1 text-xs text-muted"><MapPin className="h-3.5 w-3.5" />{text(application.location)}</p>
             </div>
@@ -125,15 +136,16 @@ export default function ApplicationsPage() {
                 {Object.entries(stageCopy).map(([key, label]) => <option value={key} key={key} disabled={Boolean(apiConfiguration.baseUrl) && ["ready", "applied", "interview", "rejected", "offer"].includes(key)}>{text(label)}</option>)}
               </select>
             </label>
-            <div><p className="text-sm font-semibold">{text(application.nextAction)}</p><p className="mt-1 flex items-center gap-1 text-xs text-muted"><CalendarDays className="h-3.5 w-3.5" />{formatDemoDate(application.updatedAt, locale)}</p></div>
+            <div><p className="text-sm font-semibold text-foreground">{text(application.nextAction)}</p><p className="mt-1 flex items-center gap-1 text-xs text-muted"><CalendarDays className="h-3.5 w-3.5" />{formatDemoDate(application.updatedAt, locale)}</p></div>
             <div className="flex items-center gap-2 text-sm text-muted"><FileText className="h-4 w-4" />{application.documentVersion}</div>
-            <Link href={`/jobs/${application.jobId}`} className="grid h-11 w-11 place-items-center rounded-lg border border-border hover:border-emerald" aria-label={locale === "ar" ? "فتح تحليل الوظيفة" : "Open job analysis"}><ChevronLeft className="h-5 w-5 rtl:rotate-0 ltr:rotate-180" /></Link>
+            <Link href={`/jobs/${application.jobId}`} className="grid h-11 w-11 place-items-center text-muted hover:text-primary-text" aria-label={locale === "ar" ? "فتح تحليل الوظيفة" : "Open job analysis"}><ChevronLeft className="h-5 w-5 rtl:rotate-0 ltr:rotate-180" /></Link>
           </article>
         )) : null}
-        {loadState === "success" && visibleApplications.length === 0 ? <div className="py-20 text-center"><BriefcaseBusiness className="mx-auto h-9 w-9 text-muted" /><h2 className="mt-4 font-bold">{locale === "ar" ? "لا توجد تقديمات في هذه المرحلة" : "No applications in this stage"}</h2><p className="mt-2 text-sm text-muted">{locale === "ar" ? "غيّر التصفية أو أضف فرصة جديدة." : "Change the filter or add a new opportunity."}</p></div> : null}
+
+        {loadState === "success" && visibleApplications.length === 0 ? <div className="border-b border-border py-20 text-center"><BriefcaseBusiness className="mx-auto h-9 w-9 text-muted" strokeWidth={1.6} /><h2 className="mt-4 font-bold text-foreground">{locale === "ar" ? "لا توجد تقديمات في هذه المرحلة" : "No applications in this stage"}</h2><p className="mt-2 text-sm text-muted">{locale === "ar" ? "غيّر التصفية أو أضف فرصة جديدة." : "Change the filter or add a new opportunity."}</p></div> : null}
       </section>
 
-      {notice ? <div className="fixed bottom-24 start-5 z-50 rounded-lg border border-emerald bg-white px-4 py-3 text-sm shadow-subtle lg:bottom-6" role="status">{notice}</div> : null}
+      {notice ? <div className="fixed bottom-24 start-5 z-50 border border-emerald bg-background px-4 py-3 text-sm lg:bottom-6" role="status">{notice}</div> : null}
     </div>
   );
 }

@@ -28,6 +28,7 @@ from career_agent_api.schemas.api import (
     ResumeMessageCreate,
     ResumeRewriteCreate,
     ResumeWorkspaceRead,
+    ResumeWorkspaceStartCreate,
 )
 
 
@@ -214,6 +215,10 @@ async def test_resume_draft_versions_are_immutable(
 
 
 def test_resume_workspace_request_schemas_enforce_revisions_and_rewrite_targets() -> None:
+    start = ResumeWorkspaceStartCreate(language="en", conversation_language="ar")
+    assert start.language is PreferredLanguage.EN
+    assert start.conversation_language is PreferredLanguage.AR
+
     with pytest.raises(ValidationError):
         ResumeMessageCreate(
             content="   ",
@@ -283,3 +288,4 @@ async def test_resume_workspace_read_serializes_persisted_state(
         assert payload.current_draft is not None
         assert payload.current_draft.headline == "مهندس برمجيات"
         assert payload.contact.email == "owner@example.com"
+        assert payload.conversation_language is PreferredLanguage.AR

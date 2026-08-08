@@ -27,10 +27,52 @@ describe("API authentication and HTTP errors", () => {
 
   it("fails closed on a network error when an API is configured", async () => {
     vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network unavailable")));
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("network unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
     const { getJob } = await import("@/lib/api-client");
 
     await expect(getJob("11111111-1111-4111-8111-111111111111")).rejects.toThrow("network unavailable");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries one transient GET failure while Render is warming up", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
+    const profile = {
+      id: "11111111-1111-4111-8111-111111111111",
+      full_name: "Hadi Alghanim",
+      preferred_language: "ar",
+      city: "Riyadh",
+      created_at: "2026-08-08T00:00:00Z",
+      updated_at: "2026-08-08T00:00:00Z",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "Service waking" }), { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(profile), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getCareerProfile } = await import("@/lib/api-client");
+
+    await expect(getCareerProfile()).resolves.toEqual(profile);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a non-idempotent POST after a transient server failure", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "Service unavailable" }), {
+      status: 503,
+      statusText: "Service Unavailable",
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { ApiHttpError, createCareerProfile } = await import("@/lib/api-client");
+
+    await expect(createCareerProfile({ fullName: "Hadi Alghanim", city: "Riyadh", preferredLanguage: "ar" }))
+      .rejects.toBeInstanceOf(ApiHttpError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("maps the user-facing applied stage to the backend submitted enum", async () => {

@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from conftest import create_profile_and_source
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from career_agent_api.api import resume_workspace as workspace_api
 from career_agent_api.models.domain import (
@@ -29,31 +29,45 @@ class StubWorkspaceProvider(ResumeWriterProvider):
     model = "test-resume-model"
     available = True
 
+    def __init__(self) -> None:
+        self.draft_calls: list[dict[str, object]] = []
+        self.adaptive_calls: list[dict[str, object]] = []
+
     async def generate_questions(self, **_: object) -> list:
         return []
 
     async def generate_draft(self, **kwargs: object) -> ResumeDraftContent:
+        self.draft_calls.append(kwargs)
         evidence = tuple(kwargs.get("evidence") or ())
         handle = evidence[0].handle if evidence else "missing_evidence"
+        english = kwargs.get("language") is PreferredLanguage.EN
         return ResumeDraftContent.model_validate(
             {
-                "headline": "محلل بيانات",
+                "headline": "Data Analyst" if english else "محلل بيانات",
                 "professional_summary": (
-                    "حللت المبيعات باستخدام Power BI في شركة تجريبية."
+                    "Analyzed sales using Power BI at an example company."
+                    if english
+                    else "حللت المبيعات باستخدام Power BI في شركة تجريبية."
                 ),
                 "summary_evidence_handles": [handle],
                 "sections": [
                     {
                         "key": "experience",
-                        "title": "الخبرة المهنية",
+                        "title": "Professional experience" if english else "الخبرة المهنية",
                         "items": [
                             {
                                 "id": "experience_1",
-                                "title": "محلل بيانات",
-                                "organization": "شركة تجريبية",
+                                "title": "Data Analyst" if english else "محلل بيانات",
+                                "organization": (
+                                    "Example Company" if english else "شركة تجريبية"
+                                ),
                                 "date_range": None,
                                 "location": None,
-                                "bullets": ["حللت المبيعات باستخدام Power BI"],
+                                "bullets": [
+                                    "Analyzed sales using Power BI"
+                                    if english
+                                    else "حللت المبيعات باستخدام Power BI"
+                                ],
                                 "evidence_handles": [handle],
                             }
                         ],
@@ -63,7 +77,8 @@ class StubWorkspaceProvider(ResumeWriterProvider):
         )
 
     async def generate_adaptive_turn(self, **kwargs: object):
-        assert kwargs["language"] is PreferredLanguage.AR
+        self.adaptive_calls.append(kwargs)
+        assert isinstance(kwargs["conversation_language"], PreferredLanguage)
         answer = str(kwargs["answer"])
         return SimpleNamespace(
             understanding=f"فهمت أنك {answer}",
@@ -568,6 +583,411 @@ async def test_workspace_rejects_stale_conversation_revision(
     )
     assert stale.status_code == 409
     assert stale.json()["detail"]["code"] == "resume_workspace_revision_conflict"
+
+
+async def test_workspace_separates_arabic_conversation_from_english_resume(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+
+    started_response = await client.post(
+        base,
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "ar",
+            "data_sharing_acknowledged": True,
+        },
+    )
+    assert started_response.status_code == 201, started_response.text
+    started = started_response.json()
+    assert started["language"] == "en"
+    assert started["conversation_language"] == "ar"
+    assert any("\u0621" <= character <= "\u064a" for character in started["messages"][0]["content"])
+
+    answered_response = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "حللت المبيعات باستخدام Power BI في شركة تجريبية.",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started["revision"],
+        },
+    )
+    assert answered_response.status_code == 200, answered_response.text
+    answered = answered_response.json()
+    adaptive_call = stub_provider.adaptive_calls[-1]
+    assert adaptive_call["conversation_language"] is PreferredLanguage.AR
+    assert adaptive_call["output_language"] is PreferredLanguage.EN
+
+    confirmed_response = await client.post(
+        f"{base}/understandings/{answered['pending_understanding']['id']}/confirm",
+        headers=headers,
+        json={"expected_revision": answered["revision"]},
+    )
+    assert confirmed_response.status_code == 200, confirmed_response.text
+    confirmed = confirmed_response.json()
+    assert confirmed["current_draft"]["headline"] == "Data Analyst"
+    assert stub_provider.draft_calls[-1]["language"] is PreferredLanguage.EN
+
+
+async def test_start_without_conversation_language_keeps_legacy_single_language_behavior(
+    client,
+    session_factory,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started_response = await client.post(
+        base,
+        headers=headers,
+        json={"language": "en", "data_sharing_acknowledged": True},
+    )
+    assert started_response.status_code == 201, started_response.text
+    started = started_response.json()
+    assert started["conversation_language"] == "en"
+    assert started["messages"][0]["content"].startswith("Tell")
+
+    # Simulate a row created before conversation_language was persisted in provider metadata.
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(ResumeWorkspace).where(ResumeWorkspace.id == UUID(started["id"]))
+        )
+        assert stored is not None
+        stored.provider_metadata = {
+            key: value
+            for key, value in stored.provider_metadata.items()
+            if key != "conversation_language"
+        }
+        await session.commit()
+
+    reloaded_response = await client.get(base, headers=headers)
+    assert reloaded_response.status_code == 200, reloaded_response.text
+    assert reloaded_response.json()["conversation_language"] == "en"
+
+
+async def test_conversation_language_can_change_before_answers_but_not_after(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = (
+        await client.post(
+            base,
+            headers=headers,
+            json={
+                "language": "en",
+                "conversation_language": "ar",
+                "data_sharing_acknowledged": True,
+            },
+        )
+    ).json()
+
+    changed_response = await client.post(
+        base,
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "en",
+            "data_sharing_acknowledged": True,
+        },
+    )
+    assert changed_response.status_code == 201, changed_response.text
+    changed = changed_response.json()
+    assert changed["conversation_language"] == "en"
+    assert changed["revision"] == started["revision"] + 1
+    assert len(changed["messages"]) == 1
+    assert changed["messages"][0]["content"].startswith("Tell")
+    assert changed["provider_metadata"]["current_question"]["question"].startswith("Tell")
+
+    answered_response = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "I analyzed sales using Power BI.",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": changed["revision"],
+        },
+    )
+    assert answered_response.status_code == 200, answered_response.text
+    answered = answered_response.json()
+
+    rejected = await client.post(
+        base,
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "ar",
+            "data_sharing_acknowledged": True,
+        },
+    )
+    assert rejected.status_code == 409
+    assert (
+        rejected.json()["detail"]["code"]
+        == "resume_conversation_language_change_not_allowed"
+    )
+    current = (await client.get(base, headers=headers)).json()
+    assert current["conversation_language"] == "en"
+    assert current["revision"] == answered["revision"]
+    assert current["pending_understanding"]["id"] == answered["pending_understanding"]["id"]
+
+
+async def test_mismatched_adaptive_patch_does_not_mutate_existing_output_language_draft(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = (
+        await client.post(
+            base,
+            headers=headers,
+            json={
+                "language": "en",
+                "conversation_language": "ar",
+                "data_sharing_acknowledged": True,
+            },
+        )
+    ).json()
+    first_answer = (
+        await client.post(
+            f"{base}/messages",
+            headers=headers,
+            json={
+                "content": "حللت المبيعات باستخدام Power BI في شركة تجريبية.",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": started["revision"],
+            },
+        )
+    ).json()
+    first_confirmed = (
+        await client.post(
+            f"{base}/understandings/{first_answer['pending_understanding']['id']}/confirm",
+            headers=headers,
+            json={"expected_revision": first_answer["revision"]},
+        )
+    ).json()
+    original_draft = deepcopy(first_confirmed["current_draft"])
+    original_draft_revision = first_confirmed["draft_revision"]
+
+    second_answer_response = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "أنشأت تقارير عربية أسبوعية للمبيعات.",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": first_confirmed["revision"],
+        },
+    )
+    assert second_answer_response.status_code == 200, second_answer_response.text
+    second_answer = second_answer_response.json()
+    assert stub_provider.adaptive_calls[-1]["output_language"] is PreferredLanguage.EN
+
+    second_confirmed_response = await client.post(
+        f"{base}/understandings/{second_answer['pending_understanding']['id']}/confirm",
+        headers=headers,
+        json={"expected_revision": second_answer["revision"]},
+    )
+    assert second_confirmed_response.status_code == 200, second_confirmed_response.text
+    second_confirmed = second_confirmed_response.json()
+    assert second_confirmed["current_draft"] == original_draft
+    assert second_confirmed["draft_revision"] == original_draft_revision
+    assert (
+        second_confirmed["provider_metadata"]["generation_warning"]
+        == "draft_patch_language_mismatch"
+    )
+
+
+async def test_reset_workspace_is_guarded_idempotent_and_preserves_confirmed_facts(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = (
+        await client.post(
+            base,
+            headers=headers,
+            json={
+                "language": "en",
+                "conversation_language": "ar",
+                "data_sharing_acknowledged": True,
+            },
+        )
+    ).json()
+    answered = (
+        await client.post(
+            f"{base}/messages",
+            headers=headers,
+            json={
+                "content": "حللت المبيعات باستخدام Power BI في شركة تجريبية.",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": started["revision"],
+            },
+        )
+    ).json()
+    confirmed_response = await client.post(
+        f"{base}/understandings/{answered['pending_understanding']['id']}/confirm",
+        headers=headers,
+        json={"expected_revision": answered["revision"]},
+    )
+    assert confirmed_response.status_code == 200, confirmed_response.text
+    confirmed = confirmed_response.json()
+    old_workspace_id = confirmed["id"]
+    facts_before = (
+        await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
+    ).json()
+    assert facts_before
+
+    stale = await client.delete(
+        base,
+        headers=headers,
+        params={"expected_revision": confirmed["revision"] - 1},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "resume_workspace_revision_conflict"
+
+    reset = await client.delete(
+        base,
+        headers=headers,
+        params={"expected_revision": confirmed["revision"]},
+    )
+    assert reset.status_code == 204, reset.text
+    assert reset.content == b""
+    assert (await client.get(base, headers=headers)).status_code == 404
+    facts_after = (
+        await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
+    ).json()
+    assert {fact["id"] for fact in facts_after} == {fact["id"] for fact in facts_before}
+
+    repeated = await client.delete(
+        base,
+        headers=headers,
+        params={"expected_revision": confirmed["revision"]},
+    )
+    assert repeated.status_code == 204
+
+    restarted_response = await client.post(
+        base,
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "ar",
+            "data_sharing_acknowledged": True,
+        },
+    )
+    assert restarted_response.status_code == 201, restarted_response.text
+    restarted = restarted_response.json()
+    assert restarted["id"] != old_workspace_id
+    assert restarted["revision"] == 0
+    assert restarted["conversation_language"] == "ar"
+
+
+async def test_reset_explicitly_removes_all_limited_messages_and_chained_versions(
+    client,
+    session_factory,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    workspace_id = UUID(workspace["id"])
+    draft = deepcopy(workspace["current_draft"])
+
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(ResumeWorkspace).where(ResumeWorkspace.id == workspace_id)
+        )
+        assert stored is not None
+        last_sequence = await session.scalar(
+            select(func.max(ResumeMessage.sequence)).where(
+                ResumeMessage.workspace_id == workspace_id
+            )
+        )
+        for offset in range(60):
+            session.add(
+                ResumeMessage(
+                    workspace_id=workspace_id,
+                    sequence=int(last_sequence or 0) + offset + 1,
+                    role=ResumeMessageRole.ASSISTANT,
+                    kind=ResumeMessageKind.STATUS,
+                    content=f"historical-message-{offset}",
+                    structured_payload={},
+                    status=ResumeMessageStatus.SENT,
+                )
+            )
+
+        previous_version = await session.scalar(
+            select(ResumeDraftVersion)
+            .where(ResumeDraftVersion.workspace_id == workspace_id)
+            .order_by(ResumeDraftVersion.version.desc())
+            .limit(1)
+        )
+        assert previous_version is not None
+        for version_number in range(previous_version.version + 1, 27):
+            version = ResumeDraftVersion(
+                workspace_id=workspace_id,
+                version=version_number,
+                base_version_id=previous_version.id,
+                reason=ResumeDraftVersionReason.MANUAL_EDIT,
+                content=draft,
+                evidence_revision=stored.evidence_revision,
+            )
+            session.add(version)
+            await session.flush()
+            previous_version = version
+        await session.commit()
+
+        message_count = await session.scalar(
+            select(func.count(ResumeMessage.id)).where(
+                ResumeMessage.workspace_id == workspace_id
+            )
+        )
+        version_count = await session.scalar(
+            select(func.count(ResumeDraftVersion.id)).where(
+                ResumeDraftVersion.workspace_id == workspace_id
+            )
+        )
+        assert int(message_count or 0) > workspace_api.WORKSPACE_MESSAGE_RESPONSE_LIMIT
+        assert int(version_count or 0) > workspace_api.WORKSPACE_VERSION_RESPONSE_LIMIT
+
+    reset = await client.delete(
+        base,
+        headers=headers,
+        params={"expected_revision": workspace["revision"]},
+    )
+    assert reset.status_code == 204, reset.text
+
+    async with session_factory() as session:
+        assert await session.get(ResumeWorkspace, workspace_id) is None
+        assert not list(
+            (
+                await session.scalars(
+                    select(ResumeMessage.id).where(
+                        ResumeMessage.workspace_id == workspace_id
+                    )
+                )
+            ).all()
+        )
+        assert not list(
+            (
+                await session.scalars(
+                    select(ResumeDraftVersion.id).where(
+                        ResumeDraftVersion.workspace_id == workspace_id
+                    )
+                )
+            ).all()
+        )
 
 
 async def test_explicit_generation_uses_existing_evidence_without_saving_a_negative_answer(

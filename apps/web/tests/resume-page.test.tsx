@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { ApiHttpError } from "@/lib/api-client";
 import type {
   ApiCareerFact,
   ApiResumeDraftContent,
@@ -11,6 +12,7 @@ const apiMocks = vi.hoisted(() => ({
   getCareerProfile: vi.fn(),
   getCareerFacts: vi.fn(),
   getResumeWorkspace: vi.fn(),
+  resetResumeWorkspace: vi.fn(),
   createCareerProfile: vi.fn(),
   startResumeWorkspace: vi.fn(),
   sendResumeWorkspaceMessage: vi.fn(),
@@ -85,6 +87,7 @@ function makeWorkspace(overrides: Partial<ApiResumeWorkspace> = {}): ApiResumeWo
   return {
     id: "workspace-1",
     profile_id: profile.id,
+    conversation_language: "ar",
     language: "ar",
     stage: "understanding",
     revision: 0,
@@ -165,7 +168,8 @@ describe("resume workspace v2", () => {
     apiMocks.getCareerFacts.mockResolvedValue([]);
     apiMocks.getResumeWorkspace.mockResolvedValue(null);
     apiMocks.createCareerProfile.mockResolvedValue(profile);
-    apiMocks.startResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.startResumeWorkspace.mockResolvedValue(makeWorkspace({ language: "en" }));
+    apiMocks.resetResumeWorkspace.mockResolvedValue(undefined);
     apiMocks.sendResumeWorkspaceMessage.mockResolvedValue(makeWorkspace());
     apiMocks.importResumeWorkspaceFile.mockResolvedValue({
       source: { id: "source-1", kind: "cv_upload", label: "resume.pdf", original_filename: "resume.pdf" },
@@ -189,12 +193,35 @@ describe("resume workspace v2", () => {
     apiMocks.exportResumeWorkspacePdf.mockResolvedValue(new Blob(["%PDF"], { type: "application/pdf" }));
   });
 
+  it("explains a slow staging wake-up instead of looking stuck", async () => {
+    vi.useFakeTimers();
+    apiMocks.getCareerProfile.mockImplementation(() => new Promise(() => undefined));
+    try {
+      await renderResumePage();
+      expect(screen.getByRole("heading", { name: "نجهّز مساحة سيرتك" })).toBeVisible();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(screen.getByRole("heading", { name: "نشغّل الخادم ونستعيد سيرتك" })).toBeVisible();
+      expect(screen.getByText(/سنعيد محاولة التحميل تلقائيًا/)).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts one chat-first workspace after choosing language and acknowledging AI use", async () => {
     const user = userEvent.setup();
     await renderResumePage();
 
     expect(await screen.findByRole("heading", { name: "خلّنا نبني قصتك المهنية" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "العربية" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "لغة الحوار: العربية" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "لغة السيرة: الإنجليزية" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("heading", { name: "خلّنا نبني قصتك المهنية" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "لغة السيرة: العربية" }));
+    expect(screen.getByRole("heading", { name: "خلّنا نبني قصتك المهنية" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "لغة السيرة: الإنجليزية" }));
     const start = screen.getByRole("button", { name: "ابدأ المحادثة" });
     expect(start).toBeDisabled();
 
@@ -202,12 +229,35 @@ describe("resume workspace v2", () => {
     await user.click(start);
 
     await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
-      language: "ar",
+      conversationLanguage: "ar",
+      language: "en",
       dataSharingAcknowledged: true,
     }));
     expect(await screen.findByText("احكِ لي عن تجربة مهنية تفخر بها.")).toBeVisible();
     expect(screen.getByRole("button", { name: "إرفاق سيرة موجودة" })).toBeVisible();
     expect(screen.getByLabelText("معاينة السيرة الحية")).toBeVisible();
+  });
+
+  it("sends independently changed conversation and resume languages without changing the UI locale", async () => {
+    const user = userEvent.setup();
+    apiMocks.startResumeWorkspace.mockResolvedValue(makeWorkspace({
+      conversation_language: "en",
+      language: "ar",
+    }));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "لغة الحوار: الإنجليزية" }));
+    await user.click(screen.getByRole("button", { name: "لغة السيرة: العربية" }));
+    expect(screen.getByRole("heading", { name: "خلّنا نبني قصتك المهنية" })).toBeVisible();
+    await user.click(screen.getByRole("checkbox", { name: /موافقة استخدام الذكاء الاصطناعي/ }));
+    await user.click(screen.getByRole("button", { name: "ابدأ المحادثة" }));
+
+    await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
+      conversationLanguage: "en",
+      language: "ar",
+      dataSharingAcknowledged: true,
+    }));
+    expect(screen.getByRole("heading", { name: "خلّنا نبني قصتك المهنية" })).toBeVisible();
   });
 
   it("blocks AI actions until an expired consent is explicitly renewed", async () => {
@@ -231,11 +281,229 @@ describe("resume workspace v2", () => {
     await user.click(renew);
 
     await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
+      conversationLanguage: "ar",
       language: "ar",
       contact: { email: "hadi@example.com", phone: undefined, linkedin: undefined },
       dataSharingAcknowledged: true,
     }));
     expect(await screen.findByRole("button", { name: "إرفاق سيرة موجودة" })).toBeVisible();
+  });
+
+  it("keeps an Arabic conversation while rendering an English resume left-to-right", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      conversation_language: "ar",
+      language: "en",
+      stage: "writing",
+      current_draft: {
+        ...draft,
+        headline: "Data Analyst",
+        professional_summary: "Data analyst who turns evidence into clear decisions.",
+      },
+      draft_revision: 1,
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByText("احكِ لي عن تجربة مهنية تفخر بها.")).toBeVisible();
+    expect(screen.getByText("الحوار AR · السيرة EN")).toBeVisible();
+    const preview = screen.getByLabelText("معاينة السيرة الحية");
+    expect(preview.querySelector("article")).toHaveAttribute("dir", "ltr");
+    expect(preview.querySelector("article")).toHaveAttribute("lang", "en");
+    expect(within(preview).getByRole("heading", { name: "Professional summary" })).toBeVisible();
+    expect(within(preview).queryByRole("heading", { name: "نبذة مهنية" })).not.toBeInTheDocument();
+  });
+
+  it("falls back to the resume language for legacy workspaces without a conversation language", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      conversation_language: undefined,
+      language: "en",
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByText("الحوار EN · السيرة EN")).toBeVisible();
+  });
+
+  it("requires confirmation before permanently clearing the resume workspace", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      conversation_language: "en",
+      language: "ar",
+      stage: "writing",
+      revision: 7,
+      current_draft: draft,
+      draft_revision: 2,
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    await renderResumePage();
+
+    const resetTrigger = await screen.findByRole("button", { name: "مسح والبدء من جديد" });
+    await user.click(resetTrigger);
+    const dialog = screen.getByRole("alertdialog", { name: "مسح مساحة السيرة والبدء من جديد؟" });
+    expect(within(dialog).getByText(/ستبقى الحقائق المهنية المؤكدة/)).toBeVisible();
+    expect(apiMocks.resetResumeWorkspace).not.toHaveBeenCalled();
+    const cancel = within(dialog).getByRole("button", { name: "إلغاء" });
+    const confirm = within(dialog).getByRole("button", { name: "امسح وابدأ من جديد" });
+    expect(cancel).toHaveFocus();
+    expect(document.body).toHaveStyle({ overflow: "hidden" });
+    await user.tab();
+    expect(confirm).toHaveFocus();
+    await user.tab();
+    expect(cancel).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(confirm).toHaveFocus();
+
+    await user.click(cancel);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(resetTrigger).toHaveFocus();
+    expect(document.body).not.toHaveStyle({ overflow: "hidden" });
+    expect(screen.getByDisplayValue(draft.professional_summary)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "مسح والبدء من جديد" }));
+    await user.click(screen.getByRole("button", { name: "امسح وابدأ من جديد" }));
+
+    await waitFor(() => expect(apiMocks.resetResumeWorkspace).toHaveBeenCalledWith(profile.id, 7));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "لغة الحوار: الإنجليزية" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "لغة السيرة: العربية" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
+  });
+
+  it("keeps the current draft when permanent clearing fails", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "writing",
+      revision: 4,
+      current_draft: draft,
+      draft_revision: 1,
+    }));
+    apiMocks.resetResumeWorkspace.mockRejectedValue(new Error("تعذر مسح مساحة السيرة"));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "مسح والبدء من جديد" }));
+    await user.click(screen.getByRole("button", { name: "امسح وابدأ من جديد" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("حدث خطأ غير متوقع");
+    expect(screen.getByDisplayValue(draft.professional_summary)).toBeVisible();
+    expect(screen.getByRole("alertdialog")).toBeVisible();
+  });
+
+  it("refreshes a conflicting workspace revision and retries clearing with the latest revision", async () => {
+    const user = userEvent.setup();
+    const original = makeWorkspace({ revision: 7, stage: "writing", current_draft: draft, draft_revision: 1 });
+    const refreshed = makeWorkspace({ revision: 8, stage: "writing", current_draft: draft, draft_revision: 1 });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(original)
+      .mockResolvedValueOnce(refreshed);
+    apiMocks.resetResumeWorkspace
+      .mockRejectedValueOnce(new ApiHttpError(409, "Workspace revision changed", "resume_workspace_revision_conflict"))
+      .mockResolvedValueOnce(undefined);
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "مسح والبدء من جديد" }));
+    await user.click(screen.getByRole("button", { name: "امسح وابدأ من جديد" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("حدّثنا أحدث نسخة");
+    expect(apiMocks.resetResumeWorkspace).toHaveBeenNthCalledWith(1, profile.id, 7);
+    await user.click(screen.getByRole("button", { name: "امسح وابدأ من جديد" }));
+
+    await waitFor(() => expect(apiMocks.resetResumeWorkspace).toHaveBeenNthCalledWith(2, profile.id, 8));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
+  });
+
+  it("treats an already-missing workspace as a successful local reset", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({ revision: 3, stage: "writing", current_draft: draft }));
+    apiMocks.resetResumeWorkspace.mockRejectedValue(new ApiHttpError(404, "Workspace not found"));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "مسح والبدء من جديد" }));
+    await user.click(screen.getByRole("button", { name: "امسح وابدأ من جديد" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
+  });
+
+  it("allows clearing after an autosave error once no persistence request remains", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      revision: 5,
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+    }));
+    apiMocks.patchResumeWorkspaceDraft.mockRejectedValue(new Error("save failed"));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByRole("textbox", { name: "الملخص المهني" });
+    await user.type(summary, " تعديل");
+    expect(await screen.findByText("تعذر الحفظ", {}, { timeout: 2_000 })).toBeVisible();
+    const reset = screen.getByRole("button", { name: "مسح والبدء من جديد" });
+    expect(reset).toBeEnabled();
+
+    await user.click(reset);
+    await user.click(screen.getByRole("button", { name: "امسح وابدأ من جديد" }));
+    await waitFor(() => expect(apiMocks.resetResumeWorkspace).toHaveBeenCalledWith(profile.id, 5));
+    expect(screen.getByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
+  });
+
+  it("ignores a renewal response that arrives after a same-tick successful reset", async () => {
+    const expired = makeWorkspace({
+      revision: 9,
+      consent_required: true,
+      consented_at: null,
+    });
+    let resolveRenew!: (workspace: ApiResumeWorkspace) => void;
+    const renewRequest = new Promise<ApiResumeWorkspace>((resolve) => {
+      resolveRenew = resolve;
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(expired);
+    apiMocks.startResumeWorkspace.mockReturnValue(renewRequest);
+    await renderResumePage();
+
+    const renew = await screen.findByRole("button", { name: "جدّد الموافقة وتابع" });
+    fireEvent.click(screen.getByRole("checkbox", { name: /أوافق على النسخة الحالية/ }));
+    const reset = screen.getByRole("button", { name: "مسح والبدء من جديد" });
+    fireEvent.click(reset);
+    const confirm = screen.getByRole("button", { name: "امسح وابدأ من جديد" });
+    act(() => {
+      renew.click();
+      confirm.click();
+    });
+
+    await waitFor(() => expect(apiMocks.resetResumeWorkspace).toHaveBeenCalledWith(profile.id, 9));
+    expect(await screen.findByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
+    await act(async () => {
+      resolveRenew(makeWorkspace({ revision: 10 }));
+      await renewRequest;
+    });
+    expect(screen.getByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
+    expect(screen.queryByText("احكِ لي عن تجربة مهنية تفخر بها.")).not.toBeInTheDocument();
+  });
+
+  it("sends only one DELETE while the reset request is in flight", async () => {
+    const user = userEvent.setup();
+    let resolveReset!: () => void;
+    const resetRequest = new Promise<void>((resolve) => {
+      resolveReset = resolve;
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({ revision: 6, stage: "writing", current_draft: draft }));
+    apiMocks.resetResumeWorkspace.mockReturnValue(resetRequest);
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "مسح والبدء من جديد" }));
+    const confirm = screen.getByRole("button", { name: "امسح وابدأ من جديد" });
+    act(() => {
+      confirm.click();
+      confirm.click();
+    });
+    expect(apiMocks.resetResumeWorkspace).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveReset();
+      await resetRequest;
+    });
+    expect(await screen.findByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
   });
 
   it("autosaves contact details without manufacturing a new AI acknowledgement", async () => {
@@ -248,6 +516,7 @@ describe("resume workspace v2", () => {
     await user.type(screen.getByRole("textbox", { name: "البريد الإلكتروني" }), "hadi@example.com");
 
     await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
+      conversationLanguage: "ar",
       language: "ar",
       contact: { email: "hadi@example.com", phone: undefined, linkedin: undefined },
       dataSharingAcknowledged: false,
@@ -336,7 +605,7 @@ describe("resume workspace v2", () => {
 
   it("sends helper choices and skip as commands rather than ordinary answers", async () => {
     const user = userEvent.setup();
-    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({ conversation_language: "ar", language: "en" }));
     await renderResumePage();
 
     await user.click(await screen.findByRole("button", { name: "أعطني مثالًا" }));
@@ -488,7 +757,7 @@ describe("resume workspace v2", () => {
       expectedDraftRevision: 1,
     });
     await waitFor(() => expect(summary).toHaveValue(newestSummary));
-  });
+  }, 15_000);
 
   it("waits for autosave and merges a rewrite into the latest workspace without losing edits", async () => {
     const user = userEvent.setup();
@@ -572,7 +841,7 @@ describe("resume workspace v2", () => {
     expect(await screen.findByDisplayValue(savedSummary)).toBeEnabled();
     expect(screen.getByText("latest@example.com")).toBeVisible();
     expect(screen.getByText(suggestion.after_text)).toBeVisible();
-  });
+  }, 15_000);
 
   it("reviews the saved draft before exporting its PDF", async () => {
     const user = userEvent.setup();

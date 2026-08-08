@@ -27,17 +27,17 @@ export function RequirementRow({ requirement, reviewMode = false, selected, onSe
   const { locale, text } = useLocale();
   const [expanded, setExpanded] = useState(false);
   return (
-    <article className={cn("border-b border-border last:border-b-0", selected && "bg-emerald-pale/40")}>
+    <article className={cn("relative border-b border-border transition-colors last:border-b-0", selected && "bg-primary/5 before:absolute before:inset-y-0 before:start-0 before:w-0.5 before:bg-primary")}>
       <div className="grid min-h-[76px] items-center gap-3 px-4 py-3 md:grid-cols-[160px_minmax(150px,1fr)_minmax(130px,.7fr)_44px]">
-        {reviewMode ? <span className="w-fit rounded-full bg-amber-pale px-3 py-1 text-xs font-semibold text-amber">{requirement.kind === "essential" ? (locale === "ar" ? "أساسي" : "Essential") : (locale === "ar" ? "مفضل" : "Preferred")}</span> : <StatusLabel status={requirement.status} labels={labels[locale]} compact />}
-        <button className="text-start font-semibold hover:text-emerald" onClick={onSelect} type="button">{text(requirement.label)}</button>
+        {reviewMode ? <span className="w-fit border-s-2 border-primary ps-2 text-xs font-semibold text-primary-text">{requirement.kind === "essential" ? (locale === "ar" ? "أساسي" : "Essential") : (locale === "ar" ? "مفضل" : "Preferred")}</span> : <StatusLabel status={requirement.status} labels={labels[locale]} compact />}
+        <button className="text-start font-semibold text-foreground transition-colors hover:text-primary-text" onClick={onSelect} type="button">{text(requirement.label)}</button>
         {reviewMode ? <button className="text-start text-sm text-muted hover:text-ink" onClick={onSelect} type="button">{text(categoryLabels[requirement.category])}</button> : <button className="flex items-center gap-2 text-start text-sm text-muted hover:text-ink" onClick={onSelect} type="button">
           {requirement.evidence ? <FileCheck2 className="h-4 w-4 shrink-0" aria-hidden="true" /> : null}
           {requirement.evidence ? text(requirement.evidence) : (locale === "ar" ? "لم يُعثر على دليل" : "No evidence found")}
         </button>}
-        {reviewMode ? <button type="button" className="absolute end-8 mt-10 grid h-11 w-11 place-items-center rounded-lg hover:bg-white md:static md:mt-0" onClick={onSelect} aria-label={locale === "ar" ? "مراجعة المتطلب" : "Review requirement"}><Pencil className="h-4 w-4" aria-hidden="true" /></button> : <button
+        {reviewMode ? <button type="button" className="absolute end-4 top-4 grid h-11 w-11 place-items-center text-muted transition-colors hover:text-primary-text md:static md:mt-0" onClick={onSelect} aria-label={locale === "ar" ? "مراجعة المتطلب" : "Review requirement"}><Pencil className="h-4 w-4" aria-hidden="true" /></button> : <button
           type="button"
-          className="absolute end-8 mt-10 grid h-11 w-11 place-items-center rounded-lg hover:bg-white md:static md:mt-0"
+          className="absolute end-4 top-4 grid h-11 w-11 place-items-center text-muted transition-colors hover:text-foreground md:static md:mt-0"
           onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
           aria-label={locale === "ar" ? "عرض تفسير المطابقة" : "Show match explanation"}
@@ -45,7 +45,7 @@ export function RequirementRow({ requirement, reviewMode = false, selected, onSe
           <ChevronDown className={cn("h-5 w-5 transition-transform", expanded && "rotate-180")} aria-hidden="true" />
         </button>}
       </div>
-      {expanded && !reviewMode ? <p className="px-4 pb-4 text-sm text-muted">{text(requirement.explanation)}</p> : null}
+      {expanded && !reviewMode ? <p className="mx-4 mb-4 border-s-2 border-emerald bg-emerald/5 px-4 py-3 text-sm text-muted">{text(requirement.explanation)}</p> : null}
     </article>
   );
 }

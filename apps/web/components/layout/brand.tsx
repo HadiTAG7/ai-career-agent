@@ -3,7 +3,7 @@ import Image from "next/image";
 
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
-    <Link href="/dashboard" className="inline-flex min-h-11 items-center gap-3 rounded-lg font-latin text-ink" aria-label="AI Career Agent dashboard">
+    <Link href="/dashboard" className="inline-flex min-h-11 items-center gap-3 font-latin text-foreground" aria-label="AI Career Agent dashboard">
       <Image
         src="/brand-mark.png"
         alt=""
@@ -11,10 +11,10 @@ export function Brand({ compact = false }: { compact?: boolean }) {
         width={36}
         height={36}
         priority
-        className="object-contain"
+        className="brand-mark object-contain"
         style={{ width: 36, height: 36 }}
       />
-      {compact ? null : <span className="whitespace-nowrap text-lg font-bold tracking-tight">AI Career Agent</span>}
+      {compact ? null : <span className="whitespace-nowrap text-base font-bold tracking-tight sm:text-lg">AI Career Agent</span>}
     </Link>
   );
 }

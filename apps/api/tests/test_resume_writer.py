@@ -23,6 +23,7 @@ from career_agent_api.services.resume_writer import (
     _validated_draft,
     build_resume_evidence,
     get_resume_writer_provider,
+    resume_patch_uses_requested_language,
     validate_claim_grounding,
 )
 
@@ -136,6 +137,24 @@ def test_generated_draft_must_follow_requested_language() -> None:
         }
     )
     _validate_requested_draft_language(arabic_draft, PreferredLanguage.AR)
+
+
+def test_live_patch_language_check_rejects_clear_mismatch_but_allows_short_proper_nouns() -> None:
+    arabic_patch = {
+        "section_key": "experience",
+        "title": "تحليل المبيعات",
+        "bullet_candidates": ["أنشأت تقارير عربية أسبوعية للمبيعات."],
+        "evidence_handles": ["fact_1"],
+    }
+    assert not resume_patch_uses_requested_language(arabic_patch, PreferredLanguage.EN)
+
+    proper_noun_patch = {
+        "section_key": "skill",
+        "title": "Power BI",
+        "bullet_candidates": [],
+        "evidence_handles": ["fact_1"],
+    }
+    assert resume_patch_uses_requested_language(proper_noun_patch, PreferredLanguage.EN)
 
 
 def test_rewrite_restores_a_dropped_open_ended_number_qualifier() -> None:
@@ -724,7 +743,8 @@ async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_
     )
 
     result = await provider.generate_adaptive_turn(
-        language=PreferredLanguage.EN,
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.EN,
         target_role="Data Analyst",
         evidence=(),
         conversation=[{"role": "assistant", "content": question.question}],
@@ -745,6 +765,11 @@ async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_
     assert len(provider.calls) == 1
     assert provider.calls[0]["model_name"] == "interview-model"
     assert provider.calls[0]["schema_name"] == "adaptive_resume_interview_turn"
+    assert provider.calls[0]["payload"]["conversation_language"] == "ar"
+    assert provider.calls[0]["payload"]["output_language"] == "en"
+    instructions = provider.calls[0]["system_instructions"]
+    assert "conversation_language" in instructions
+    assert "output_language" in instructions
 
 
 @pytest.mark.asyncio

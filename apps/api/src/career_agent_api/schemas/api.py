@@ -345,6 +345,7 @@ class ResumeWorkspaceStartCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     language: PreferredLanguage = PreferredLanguage.AR
+    conversation_language: PreferredLanguage | None = None
     contact: ResumeExportContact = Field(default_factory=ResumeExportContact)
     data_sharing_acknowledged: bool = False
 
@@ -494,6 +495,7 @@ class ResumeWorkspaceRead(ORMModel):
     id: UUID
     profile_id: UUID
     language: PreferredLanguage
+    conversation_language: PreferredLanguage = PreferredLanguage.AR
     stage: ResumeWorkspaceStage
     revision: int
     evidence_revision: int

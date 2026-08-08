@@ -1,23 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import {
-  AlertCircle,
-  ArrowLeft,
-  BriefcaseBusiness,
-  CheckCircle2,
-  Compass,
-  FileUser,
-  LoaderCircle,
-  RotateCcw,
-  Search,
-  Send,
-  ShieldCheck,
-  UserRoundCheck,
-} from "lucide-react";
+import { AlertCircle, ArrowLeft, BriefcaseBusiness, LoaderCircle, Plus, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ApplicationStageRail } from "@/components/dashboard/application-stage-rail";
-import { CareerPathStatusCard } from "@/components/career-path/career-path-status-card";
+import { CareerEvidencePath } from "@/components/dashboard/career-evidence-path";
 import { EvidenceProgress } from "@/components/dashboard/evidence-progress";
 import { JobRow } from "@/components/dashboard/job-row";
 import { DemoNotice } from "@/components/ui/demo-notice";
@@ -39,147 +26,142 @@ export function DashboardWorkspace({ data, careerPath, careerPathUnavailable = f
       label: locale === "ar" ? "جودة الملف" : "Profile quality",
       value: `${data.profileQualityPercent}%`,
       detail: locale === "ar" ? `${data.confirmedFacts} من ${data.totalFacts} حقائق مؤكدة` : `${data.confirmedFacts} of ${data.totalFacts} facts confirmed`,
-      icon: CheckCircle2,
+      verified: true,
     },
     {
       label: locale === "ar" ? "طلبات مرسلة" : "Submitted applications",
       value: data.submittedApplications.toLocaleString(locale === "ar" ? "ar-SA" : "en-US"),
       detail: locale === "ar" ? "طلبات أُرسلت فعليًا" : "Applications actually sent",
-      icon: Send,
+      verified: false,
     },
     {
       label: locale === "ar" ? "مقابلات مؤهلة" : "Qualified interviews",
       value: data.qualifiedInterviews.toLocaleString(locale === "ar" ? "ar-SA" : "en-US"),
       detail: locale === "ar" ? "نتائج أكدتها بنفسك" : "Outcomes you confirmed",
-      icon: UserRoundCheck,
+      verified: false,
     },
     {
       label: locale === "ar" ? "معدل الوصول للمقابلة" : "Interview conversion",
       value: data.interviewRate === null ? "—" : `${Math.round(data.interviewRate * 100)}%`,
       detail: locale === "ar" ? "من الطلبات المرسلة" : "From submitted applications",
-      icon: BriefcaseBusiness,
+      verified: false,
     },
   ] : [];
+
+  const primaryHref = connected ? (resumeRequired ? "/resume" : "/career-path") : "/jobs/new";
+  const primaryLabel = resumeRequired
+    ? (locale === "ar" ? "جهّز سيرتك الذاتية" : "Prepare your resume")
+    : connected
+      ? careerPathStarted
+        ? (locale === "ar" ? "أكمل اكتشاف مسارك" : "Continue discovering your path")
+        : (locale === "ar" ? "ابدأ اكتشاف مسارك" : "Discover your path")
+      : (locale === "ar" ? "حلّل وظيفة جديدة" : "Analyze a new job");
 
   return (
     <div className="page-wrap page-enter">
       {!connected ? <DemoNotice className="mb-5 lg:hidden" /> : null}
-      <div className="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end">
-        <div>
-          <h1 className="page-title">
+
+      <section className="grid gap-10 border-b border-border pb-8 lg:grid-cols-[430px_minmax(0,1fr)] lg:gap-12" dir="ltr">
+        <div className="flex flex-col items-start justify-center" dir={locale === "ar" ? "rtl" : "ltr"}>
+          <h1 className="text-[40px] font-bold leading-[1.35] tracking-[-0.03em] text-foreground md:text-[50px]">
             {connected
               ? (locale === "ar" ? "مساحتك المهنية" : "Your career workspace")
               : (locale === "ar" ? "صباح الخير" : "Good morning")}
           </h1>
-          <p className="mt-2 text-base text-muted md:text-lg">
+          <p className="mt-5 max-w-md text-base leading-8 text-muted">
             {connected
-              ? (locale === "ar" ? "ملخص حقيقي لملفك وفرصك وطلباتك الحالية." : "A real-time summary of your profile, opportunities, and applications.")
+              ? (locale === "ar" ? "ملخص حقيقي لملفك وفرصك وطلباتك الحالية. نحو قرارات مهنية مدروسة بالأدلة." : "A real-time summary of your profile, opportunities, and applications. Built for evidence-led career decisions.")
               : (locale === "ar" ? "هذه أهم الخطوات التي ترفع جودة بحثك اليوم." : "These are the highest-impact steps for your search today.")}
           </p>
+          <Link href={primaryHref} className="mt-6 inline-flex min-h-[52px] w-full items-center justify-center bg-primary px-7 text-base font-bold text-primary-foreground transition-colors hover:bg-primary-hover sm:w-auto">
+            {primaryLabel}
+          </Link>
         </div>
-        <Link href={connected ? (resumeRequired ? "/resume" : "/career-path") : "/jobs/new"} className="inline-flex min-h-[52px] items-center justify-center gap-3 rounded-lg bg-emerald px-6 text-base font-semibold text-white transition-colors hover:bg-emerald-dark md:min-w-[210px]">
-          {resumeRequired ? <FileUser className="h-5 w-5" aria-hidden="true" /> : connected ? <Compass className="h-5 w-5" aria-hidden="true" /> : <Search className="h-5 w-5" aria-hidden="true" />}
-          {resumeRequired
-            ? (locale === "ar" ? "جهّز سيرتك الذاتية" : "Prepare your resume")
-            : connected
-              ? careerPathStarted
-                ? (locale === "ar" ? "أكمل اكتشاف مسارك" : "Continue discovering your path")
-                : (locale === "ar" ? "ابدأ اكتشاف مسارك" : "Discover your path")
-              : (locale === "ar" ? "حلّل وظيفة جديدة" : "Analyze a new job")}
-        </Link>
-      </div>
 
-      <CareerPathStatusCard workspace={careerPath} unavailable={careerPathUnavailable} connected={connected} />
+        <div dir={locale === "ar" ? "rtl" : "ltr"}>
+          <CareerEvidencePath connected={connected} data={data} workspace={careerPath} unavailable={careerPathUnavailable} />
+        </div>
+      </section>
 
       {data ? (
-        <section className="mb-9 grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label={locale === "ar" ? "مؤشرات المساحة المهنية" : "Career workspace metrics"}>
-          {metrics.map((metric) => {
-            const Icon = metric.icon;
-            return (
-              <article className="rounded-xl border border-border p-5" key={metric.label}>
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold text-muted">{metric.label}</p>
-                    <strong className="mt-2 block text-3xl text-ink">{metric.value}</strong>
-                  </div>
-                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-emerald-pale text-emerald">
-                    <Icon className="h-5 w-5" aria-hidden="true" />
-                  </span>
-                </div>
-                <p className="mt-3 text-xs text-muted">{metric.detail}</p>
+        <section className="border-b border-border py-4" aria-label={locale === "ar" ? "مؤشرات المساحة المهنية" : "Career workspace metrics"}>
+          <p className="mb-1 text-xs text-muted">{locale === "ar" ? "ملاحظة 02" : "Note 02"}</p>
+          <div className="grid grid-cols-2 md:grid-cols-4">
+            {metrics.map((metric) => (
+              <article className="border-b border-s border-border px-4 py-2 first:border-s-0 [&:nth-child(3)]:border-s-0 md:border-b-0 md:[&:nth-child(3)]:border-s" key={metric.label}>
+                <p className="text-sm text-muted">{metric.label}</p>
+                <strong className={`mt-1 block text-3xl font-medium leading-none tabular-nums ${metric.verified ? "text-emerald" : "text-foreground"}`}>{metric.value}</strong>
+                <p className="mt-2 text-xs text-muted">{metric.detail}</p>
               </article>
-            );
-          })}
+            ))}
+          </div>
         </section>
       ) : null}
 
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <div className="min-w-0">
-          <section aria-labelledby="best-opportunities-title">
-            <div className="flex items-center justify-between border-b border-border pb-4">
-              <h2 id="best-opportunities-title" className="section-title flex items-center gap-3">
-                <BriefcaseBusiness className="h-6 w-6 text-emerald lg:hidden" aria-hidden="true" />
-                {locale === "ar" ? "أفضل الفرص لك" : "Best opportunities for you"}
-              </h2>
-              <Link href="/jobs" className="subtle-link hidden md:inline-flex">
-                {locale === "ar" ? "عرض جميع الفرص" : "View all opportunities"}
-                <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
-              </Link>
-            </div>
-            {opportunities.length > 0 ? (
-              <>
-                <div className="hidden grid-cols-[minmax(190px,1.3fr)_minmax(130px,.8fr)_minmax(150px,.9fr)_minmax(145px,.8fr)_44px] gap-4 border-b border-border py-3 text-xs font-semibold text-muted md:grid">
-                  <span>{locale === "ar" ? "الوظيفة" : "Role"}</span>
-                  <span>{locale === "ar" ? "تغطية المتطلبات" : "Coverage"}</span>
-                  <span>{locale === "ar" ? "المصدر" : "Source"}</span>
-                  <span>{locale === "ar" ? "التوصية" : "Recommendation"}</span>
-                  <span />
-                </div>
-                <div className="relative">
-                  {opportunities.map((job) => <JobRow job={job} key={job.id} />)}
-                </div>
-              </>
-            ) : (
-              <div className="rounded-b-xl border-x border-b border-border px-5 py-10 text-center">
-                <BriefcaseBusiness className="mx-auto h-8 w-8 text-muted" aria-hidden="true" />
-                <p className="mt-3 font-semibold">{locale === "ar" ? "لا توجد فرص محللة بعد" : "No analyzed opportunities yet"}</p>
-                <p className="mx-auto mt-2 max-w-md text-sm text-muted">
-                  {locale === "ar" ? "أضف وصف وظيفة لنعرض ملاءمتها هنا بعد تحليلها." : "Add a job description and its fit will appear here after analysis."}
-                </p>
-                <Link href="/jobs/new" className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-lg border border-emerald px-4 text-sm font-semibold text-emerald hover:bg-emerald-pale">
-                  {locale === "ar" ? "إضافة وظيفة" : "Add a job"}
-                  <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
-                </Link>
-              </div>
-            )}
-          </section>
-
-          <section className="mt-8" aria-labelledby="journey-title">
-            <div className="flex items-center justify-between">
-              <h2 id="journey-title" className="section-title">{locale === "ar" ? "رحلة التقديم" : "Application journey"}</h2>
-              <Link href="/applications" className="subtle-link">
-                {locale === "ar" ? "عرض التقديمات" : "View applications"}
-                <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
-              </Link>
-            </div>
-            <div className="mt-5"><ApplicationStageRail counts={data?.applicationStages} /></div>
-          </section>
-
-          <section className="mt-8 flex flex-col gap-4 rounded-xl border border-border p-5 md:flex-row md:items-center" aria-label={locale === "ar" ? "وعد الأدلة" : "Evidence promise"}>
-            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-emerald-pale text-emerald"><ShieldCheck className="h-7 w-7" aria-hidden="true" /></span>
-            <div className="flex-1">
-              <h2 className="font-bold">{locale === "ar" ? "كل ادعاء نولّده مرتبط بحقيقة موثّقة." : "Every generated claim is linked to a verified fact."}</h2>
-              <p className="mt-1 text-sm text-muted">{locale === "ar" ? "نربط المتطلبات بمصادر راجعتها أنت، ولا نخترع أرقامًا أو خبرات." : "We map requirements to sources you reviewed and never invent numbers or experience."}</p>
-            </div>
-            <Link href="/profile" className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-border px-4 text-sm font-semibold hover:border-emerald">
-              {locale === "ar" ? "اعرف المزيد" : "Learn more"}
+      <section className="py-7" aria-labelledby="best-opportunities-title">
+        <div className="mb-4 flex items-end justify-between gap-5">
+          <div>
+            <h2 id="best-opportunities-title" className="text-2xl font-bold text-foreground">
+              {locale === "ar" ? "الفرص المتاحة" : "Available opportunities"}
+            </h2>
+            <p className="mt-1 text-sm text-muted">
+              {locale === "ar" ? "فرص مختارة وفق مسارك وملفك." : "Opportunities selected from your path and profile."}
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            <p className="text-xs text-muted">{locale === "ar" ? "مرجع 04" : "Reference 04"}</p>
+            <Link href="/jobs" className="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-primary-text hover:text-foreground">
+              {locale === "ar" ? "عرض جميع الفرص" : "View all opportunities"}
               <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
             </Link>
-          </section>
+          </div>
         </div>
 
-        <EvidenceProgress data={data} />
-      </div>
+        <div className="border border-border">
+          <div className="hidden grid-cols-[minmax(160px,1.25fr)_minmax(105px,.8fr)_minmax(110px,.8fr)_minmax(105px,.75fr)_minmax(125px,.9fr)_minmax(100px,.7fr)_44px] gap-3 border-b border-border px-3 py-3 text-xs font-medium text-muted md:grid">
+            <span>{locale === "ar" ? "الوظيفة" : "Role"}</span>
+            <span>{locale === "ar" ? "الشركة" : "Company"}</span>
+            <span>{locale === "ar" ? "الموقع" : "Location"}</span>
+            <span>{locale === "ar" ? "نوع العمل" : "Work type"}</span>
+            <span>{locale === "ar" ? "تطابق المسار" : "Path match"}</span>
+            <span>{locale === "ar" ? "آخر تحديث" : "Updated"}</span>
+            <span />
+          </div>
+          {opportunities.length > 0 ? (
+            <div>{opportunities.map((job) => <JobRow job={job} key={job.id} />)}</div>
+          ) : (
+            <div className="flex min-h-24 flex-col items-center justify-center gap-3 px-4 py-5 text-center sm:flex-row">
+              <BriefcaseBusiness className="h-5 w-5 shrink-0 text-muted" strokeWidth={1.7} aria-hidden="true" />
+              <p className="text-sm text-muted">
+                {locale === "ar" ? "لا توجد فرص محللة بعد — أضف وصف وظيفة لتحليلها." : "No analyzed opportunities yet — add a job description to analyze it."}
+              </p>
+              <Link href="/jobs/new" className="inline-flex min-h-11 shrink-0 items-center gap-2 font-semibold text-primary-text hover:text-foreground">
+                <Plus className="h-4 w-4" aria-hidden="true" />
+                {locale === "ar" ? "إضافة وظيفة" : "Add a job"}
+              </Link>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="border-t border-border py-7" aria-labelledby="journey-title">
+        <div className="mb-6 flex items-end justify-between gap-5">
+          <div>
+            <h2 id="journey-title" className="text-2xl font-bold text-foreground">{locale === "ar" ? "رحلة التقديم" : "Application journey"}</h2>
+            <p className="mt-1 text-sm text-muted">{locale === "ar" ? "تتبّع طلباتك حتى الوصول للقرار." : "Track applications through to a decision."}</p>
+          </div>
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            <p className="text-xs text-muted">{locale === "ar" ? "مرجع 05" : "Reference 05"}</p>
+            <Link href="/applications" className="inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-primary-text hover:text-foreground">
+              {locale === "ar" ? "عرض التقديمات" : "View applications"}
+              <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
+            </Link>
+          </div>
+        </div>
+        <ApplicationStageRail counts={data?.applicationStages} />
+      </section>
+
+      <EvidenceProgress data={data} />
     </div>
   );
 }
@@ -215,9 +197,7 @@ export default function DashboardPage() {
           setCareerPathUnavailable(true);
         }
       });
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [connected, retryKey]);
 
   function retryLoad() {
@@ -235,40 +215,38 @@ export default function DashboardPage() {
   const profileMissing = loadError instanceof ApiHttpError && loadError.status === 404;
   return (
     <div className="page-wrap page-enter">
-      <div>
-        <h1 className="page-title">{locale === "ar" ? "مساحتك المهنية" : "Your career workspace"}</h1>
-        <p className="mt-2 max-w-2xl text-muted">{locale === "ar" ? "ملخص حقيقي لملفك وفرصك وطلباتك الحالية." : "A real-time summary of your profile, opportunities, and applications."}</p>
-      </div>
+      <h1 className="page-title">{locale === "ar" ? "مساحتك المهنية" : "Your career workspace"}</h1>
+      <p className="mt-2 max-w-2xl text-muted">{locale === "ar" ? "ملخص حقيقي لملفك وفرصك وطلباتك الحالية." : "A real-time summary of your profile, opportunities, and applications."}</p>
 
       {loadState === "loading" ? (
-        <div className="mt-10 flex min-h-56 items-center justify-center gap-3 rounded-xl border border-border text-sm text-muted" role="status">
-          <LoaderCircle className="h-5 w-5 animate-spin text-emerald" aria-hidden="true" />
+        <div className="mt-10 flex min-h-56 items-center justify-center gap-3 border-y border-border text-sm text-muted" role="status">
+          <LoaderCircle className="h-5 w-5 animate-spin text-primary-text" aria-hidden="true" />
           {locale === "ar" ? "جارٍ تحميل لوحة التحكم…" : "Loading your dashboard…"}
         </div>
       ) : null}
 
       {loadState === "error" ? (
-        <div className="mt-10 rounded-xl border border-red-200 bg-red-50 p-6" role="alert">
+        <div className="mt-10 border-y border-danger py-6" role="alert">
           <div className="flex items-start gap-3">
-            <AlertCircle className="mt-0.5 h-6 w-6 shrink-0 text-red-700" aria-hidden="true" />
+            <AlertCircle className="mt-0.5 h-6 w-6 shrink-0 text-danger" aria-hidden="true" />
             <div>
-              <h2 className="text-lg font-bold text-red-900">
+              <h2 className="text-lg font-bold text-foreground">
                 {profileMissing
                   ? (locale === "ar" ? "أنشئ ملفك المهني أولًا" : "Create your career profile first")
                   : (locale === "ar" ? "تعذر تحميل لوحة التحكم" : "Could not load the dashboard")}
               </h2>
-              <p className="mt-2 text-sm text-red-800">
+              <p className="mt-2 text-sm text-muted">
                 {profileMissing
                   ? (locale === "ar" ? "أضف معلوماتك الأساسية، ثم ستظهر مؤشراتك وفرصك هنا." : "Add your basic information, then your metrics and opportunities will appear here.")
                   : apiErrorMessage(loadError, locale)}
               </p>
               {profileMissing ? (
-                <Link href="/profile" className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald px-4 text-sm font-semibold text-white hover:bg-emerald-dark">
+                <Link href="/profile" className="mt-4 inline-flex min-h-11 items-center gap-2 bg-primary px-4 text-sm font-semibold text-primary-foreground hover:bg-primary-hover">
                   {locale === "ar" ? "إنشاء الملف" : "Create profile"}
                   <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
                 </Link>
               ) : (
-                <button className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-lg border border-red-300 px-4 text-sm font-semibold text-red-900 hover:bg-red-100" type="button" onClick={retryLoad}>
+                <button className="mt-4 inline-flex min-h-11 items-center gap-2 border border-danger px-4 text-sm font-semibold text-danger hover:text-foreground" type="button" onClick={retryLoad}>
                   <RotateCcw className="h-4 w-4" aria-hidden="true" />
                   {locale === "ar" ? "إعادة المحاولة" : "Try again"}
                 </button>

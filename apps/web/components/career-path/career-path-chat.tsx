@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowLeft, Bot, CheckCircle2, Compass, FileCheck2, FileUser, LoaderCircle, LockKeyhole, RotateCcw, Send, ServerOff, ShieldCheck, Sparkles, Trash2, UserRound } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, Compass, FileCheck2, FileUser, LoaderCircle, LockKeyhole, RotateCcw, Send, ServerOff, ShieldCheck, Trash2 } from "lucide-react";
 import { PathSuggestionCard } from "@/components/career-path/path-suggestion-card";
 import { Button } from "@/components/ui/button";
 import { ApiHttpError, apiConfiguration, apiErrorMessage, deleteCareerPathConversation, getCareerPathWorkspace, sendCareerPathMessage } from "@/lib/api-client";
@@ -142,9 +142,9 @@ export function CareerPathChat() {
   }
 
   const pageHeader = (
-    <header>
-      <h1 className="page-title">{locale === "ar" ? "اكتشف مسارًا يستحق التجربة" : "Discover a path worth exploring"}</h1>
-      <p className="mt-2 max-w-3xl text-base text-muted">
+    <header className="border-b border-border pb-7">
+      <h1 className="page-title text-[34px] md:text-[44px]">{locale === "ar" ? "دفتر اكتشاف المسار" : "Career path field journal"}</h1>
+      <p className="mt-3 max-w-3xl text-base text-muted">
         {locale === "ar"
           ? "نتعرف على اهتماماتك ونقاط قوتك وقيودك العملية، ثم نقترح مسارات لتجربها. الاقتراحات قابلة للتعديل وليست حكمًا نهائيًا."
           : "We learn about your interests, strengths, and practical constraints, then suggest paths to test. Suggestions are editable, not a final verdict."}
@@ -156,7 +156,7 @@ export function CareerPathChat() {
     return (
       <div className="page-wrap page-enter max-w-[1040px]">
         {pageHeader}
-        <section className="mt-8 rounded-xl border border-amber bg-amber-pale p-6" role="alert">
+        <section className="mt-8 border-y border-amber bg-amber-pale/40 px-1 py-7" role="alert">
           <ServerOff className="h-8 w-8 text-amber" aria-hidden="true" />
           <h2 className="mt-4 text-xl font-bold">{locale === "ar" ? "يحتاج المستشار إلى اتصال خادم" : "The adviser needs a server connection"}</h2>
           <p className="mt-2 text-sm text-muted">{locale === "ar" ? "اربط الواجهة بخادم API أولًا. لن نعرض محادثة أو اقتراحات تجريبية بدلًا من نتيجة حقيقية." : "Connect the interface to the API server first. No demo conversation or suggestions will replace a real result."}</p>
@@ -169,7 +169,7 @@ export function CareerPathChat() {
     return (
       <div className="page-wrap page-enter max-w-[1040px]">
         {pageHeader}
-        <div className="mt-8 flex min-h-64 items-center justify-center gap-3 rounded-xl border border-border text-sm text-muted" role="status">
+        <div className="mt-8 flex min-h-64 items-center justify-center gap-3 border-y border-border text-sm text-muted" role="status">
           <LoaderCircle className="h-5 w-5 animate-spin text-emerald" aria-hidden="true" />
           {locale === "ar" ? "جارٍ تحميل محادثة مسارك…" : "Loading your path conversation…"}
         </div>
@@ -182,12 +182,12 @@ export function CareerPathChat() {
     return (
       <div className="page-wrap page-enter max-w-[1040px]">
         {pageHeader}
-        <section className="mt-8 rounded-xl border border-danger bg-danger-pale p-6" role="alert">
+        <section className="mt-8 border-y border-danger bg-danger-pale/40 px-1 py-7" role="alert">
           <AlertCircle className="h-8 w-8 text-danger" aria-hidden="true" />
           <h2 className="mt-4 text-xl font-bold">{profileMissing ? (locale === "ar" ? "أنشئ ملفك الأساسي أولًا" : "Create your basic profile first") : (locale === "ar" ? "تعذر تحميل مستشار المسار" : "Could not load the path adviser")}</h2>
           <p className="mt-2 text-sm text-muted">{profileMissing ? (locale === "ar" ? "نحتاج اسمك ولغتك أولًا، وبعدها أنشئ سيرتك الذاتية أو ارفعها قبل بدء تحديد المسار." : "We need your name and language first. Then create or upload your resume before starting path discovery.") : apiErrorMessage(loadError, locale)}</p>
           {profileMissing ? (
-            <Link href="/profile" className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald px-4 text-sm font-semibold text-white hover:bg-emerald-dark">{locale === "ar" ? "إنشاء الملف" : "Create profile"}<ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" /></Link>
+            <Link href="/profile" className="mt-4 inline-flex min-h-11 items-center gap-2 bg-primary px-5 text-sm font-semibold text-primary-foreground hover:bg-primary-hover">{locale === "ar" ? "إنشاء الملف" : "Create profile"}<ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" /></Link>
           ) : (
             <Button variant="secondary" className="mt-4" onClick={retryLoad}><RotateCcw className="h-4 w-4" aria-hidden="true" />{locale === "ar" ? "إعادة المحاولة" : "Try again"}</Button>
           )}
@@ -200,7 +200,7 @@ export function CareerPathChat() {
     return (
       <div className="page-wrap page-enter max-w-[1040px]">
         {pageHeader}
-        <section className="mt-8 rounded-xl border border-emerald bg-emerald-pale p-6" aria-labelledby="resume-prerequisite-title">
+        <section className="mt-8 border-y border-emerald bg-emerald-pale/40 px-1 py-7" aria-labelledby="resume-prerequisite-title">
           <FileUser className="h-8 w-8 text-emerald" aria-hidden="true" />
           <h2 id="resume-prerequisite-title" className="mt-4 text-xl font-bold">{locale === "ar" ? "ابدأ بسيرتك الذاتية أولًا" : "Start with your resume first"}</h2>
           <p className="mt-2 max-w-2xl text-sm text-muted">
@@ -208,7 +208,7 @@ export function CareerPathChat() {
               ? "ارفع سيرتك الحالية أو أنشئ واحدة بمساعدة الذكاء الاصطناعي، ثم راجع المعلومات المستخرجة. سيستخدمها المستشار بعد تأكيدك لها لاقتراح مسارات أدق."
               : "Upload your current resume or create one with AI, then review the extracted information. Once confirmed, the adviser will use it to suggest more relevant paths."}
           </p>
-          <Link href="/resume" className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-lg bg-emerald px-4 text-sm font-semibold text-white hover:bg-emerald-dark">
+          <Link href="/resume" className="mt-5 inline-flex min-h-11 items-center gap-2 bg-primary px-5 text-sm font-semibold text-primary-foreground hover:bg-primary-hover">
             {locale === "ar" ? "إنشاء أو رفع السيرة" : "Create or upload resume"}
             <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" />
           </Link>
@@ -221,7 +221,7 @@ export function CareerPathChat() {
     return (
       <div className="page-wrap page-enter max-w-[1040px]">
         {pageHeader}
-        <section className="mt-8 rounded-xl border border-amber bg-amber-pale p-6" role="alert">
+        <section className="mt-8 border-y border-amber bg-amber-pale/40 px-1 py-7" role="alert">
           <ServerOff className="h-8 w-8 text-amber" aria-hidden="true" />
           <h2 className="mt-4 text-xl font-bold">{locale === "ar" ? "المستشار الذكي غير مفعّل على الخادم" : "The AI adviser is not enabled on the server"}</h2>
           <p className="mt-2 max-w-2xl text-sm text-muted">{locale === "ar" ? "أكمل إعداد مزود الذكاء الاصطناعي داخل بيئة خادم API ثم أعد تشغيله. حفاظًا على الأمان، لا يوجد حقل لإدخال المفتاح أو تخزينه في المتصفح." : "Configure the AI provider in the API server environment, then restart it. For security, the interface has no field for entering or storing a key."}</p>
@@ -244,7 +244,7 @@ export function CareerPathChat() {
       </div>
 
       {!workspace.provider_ready ? (
-        <section className="mt-6 rounded-xl border border-amber bg-amber-pale p-4" role="alert">
+        <section className="mt-6 border-y border-amber bg-amber-pale/40 px-1 py-4" role="alert">
           <div className="flex items-start gap-3">
             <ServerOff className="mt-0.5 h-5 w-5 shrink-0 text-amber" aria-hidden="true" />
             <div>
@@ -255,40 +255,42 @@ export function CareerPathChat() {
         </section>
       ) : null}
 
-      <div className="mt-8 grid gap-6 xl:grid-cols-[minmax(0,1fr)_300px]">
-        <section className="min-w-0 rounded-xl border border-border bg-white" aria-labelledby="career-path-chat-title">
-          <div className="flex items-center gap-3 border-b border-border px-5 py-4">
-            <span className="grid h-10 w-10 place-items-center rounded-full bg-emerald-pale text-emerald"><Sparkles className="h-5 w-5" aria-hidden="true" /></span>
+      <div className="mt-8 grid gap-10 xl:grid-cols-[minmax(0,1fr)_280px]">
+        <section className="min-w-0 border-y border-border" aria-labelledby="career-path-chat-title">
+          <div className="flex items-end justify-between gap-4 border-b border-border py-5">
             <div>
-              <h2 id="career-path-chat-title" className="font-bold">{locale === "ar" ? "المستشار الذكي" : "AI career adviser"}</h2>
-              <p className="text-xs text-muted">{locale === "ar" ? "يساعدك على الاستكشاف، ولا يقرر بدلًا منك." : "Helps you explore; it does not decide for you."}</p>
+              <h2 id="career-path-chat-title" className="text-xl font-bold">{locale === "ar" ? "سجل المقابلة" : "Interview journal"}</h2>
+              <p className="mt-1 text-xs text-muted">{locale === "ar" ? "أسئلة متتابعة تبني قرارًا يمكنك مراجعته." : "A sequence of questions that builds a reviewable decision."}</p>
             </div>
+            <span className="font-latin text-xs text-muted">03 / 08</span>
           </div>
 
-          <div className="space-y-5 p-5" aria-live="polite">
+          <div className="divide-y divide-border" aria-live="polite">
             {messages.length === 0 ? (
-              <div className="rounded-xl bg-slate-50 p-5">
-                <div className="flex items-start gap-3">
-                  <Bot className="mt-1 h-5 w-5 shrink-0 text-emerald" aria-hidden="true" />
+              <div className="py-6">
+                <div className="grid gap-3 sm:grid-cols-[84px_1fr]">
+                  <span className="font-latin text-sm text-primary-text">01</span>
                   <div>
                     <p className="font-semibold">{locale === "ar" ? "خلّنا نبدأ بما يهمك في يوم العمل." : "Let’s start with what matters to you in a workday."}</p>
                     <p className="mt-2 text-sm text-muted">{locale === "ar" ? "اكتب بطريقتك، أو اختر بداية سريعة. سنفرّق دائمًا بين ما تقوله في المحادثة والحقائق المؤكدة في ملفك." : "Write in your own words or choose a quick start. We will always distinguish chat statements from confirmed profile facts."}</p>
                   </div>
                 </div>
-                <div className="mt-4 flex flex-wrap gap-2" aria-label={locale === "ar" ? "بدايات مقترحة" : "Suggested starters"}>
-                  {starterPrompts.map((prompt) => <button className="min-h-11 rounded-lg border border-emerald bg-white px-4 text-sm font-semibold text-emerald hover:bg-emerald-pale" type="button" key={prompt} onClick={() => chooseStarterPrompt(prompt)}>{prompt}</button>)}
+                <div className="mt-5 grid border-y border-border sm:grid-cols-3" aria-label={locale === "ar" ? "بدايات مقترحة" : "Suggested starters"}>
+                  {starterPrompts.map((prompt) => <button className="min-h-12 border-b border-border px-3 text-start text-sm font-semibold text-primary-text transition-colors hover:bg-primary/5 sm:border-b-0 sm:border-s" type="button" key={prompt} onClick={() => chooseStarterPrompt(prompt)}>{prompt}</button>)}
                 </div>
               </div>
             ) : null}
 
-            {messages.map((message) => (
-              <article className="space-y-4" key={message.id}>
-                <div className={message.role === "user" ? "ms-auto max-w-[88%] rounded-xl bg-ink px-4 py-3 text-white" : "max-w-[92%] rounded-xl bg-slate-50 px-4 py-3 text-ink"}>
-                  <p className={message.role === "user" ? "mb-1 flex items-center gap-2 text-xs font-bold text-white/75" : "mb-1 flex items-center gap-2 text-xs font-bold text-emerald"}>
-                    {message.role === "user" ? <UserRound className="h-4 w-4" aria-hidden="true" /> : <Bot className="h-4 w-4" aria-hidden="true" />}
+            {messages.map((message, messageIndex) => (
+              <article className="space-y-5 py-6" key={message.id}>
+                <div className="grid gap-3 sm:grid-cols-[84px_1fr]">
+                  <span className={message.role === "user" ? "font-latin text-sm text-primary-text" : "font-latin text-sm text-emerald"}>{String(messageIndex + 1).padStart(2, "0")}</span>
+                  <div>
+                  <p className={message.role === "user" ? "mb-2 text-xs font-bold text-primary-text" : "mb-2 text-xs font-bold text-emerald"}>
                     {message.role === "user" ? (locale === "ar" ? "أنت" : "You") : (locale === "ar" ? "المستشار" : "Adviser")}
                   </p>
                   <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                  </div>
                 </div>
                 {message.suggestions.length > 0 ? (
                   <section className="space-y-4" aria-label={locale === "ar" ? "مسارات مقترحة" : "Suggested paths"}>
@@ -304,13 +306,13 @@ export function CareerPathChat() {
 
             {pendingContent ? (
               <>
-                <div className="ms-auto max-w-[88%] rounded-xl bg-ink px-4 py-3 text-sm text-white"><p className="mb-1 text-xs font-bold text-white/75">{locale === "ar" ? "أنت" : "You"}</p><p>{pendingContent}</p></div>
-                <div className="flex max-w-[92%] items-center gap-3 rounded-xl bg-slate-50 px-4 py-3 text-sm text-muted" role="status"><LoaderCircle className="h-4 w-4 animate-spin text-emerald" aria-hidden="true" />{locale === "ar" ? "يفكر المستشار في سؤالك…" : "The adviser is considering your message…"}</div>
+                <div className="grid gap-3 border-b border-border py-5 sm:grid-cols-[84px_1fr]"><span className="font-latin text-sm text-primary-text">…</span><div className="text-sm"><p className="mb-1 text-xs font-bold text-primary-text">{locale === "ar" ? "أنت" : "You"}</p><p>{pendingContent}</p></div></div>
+                <div className="flex items-center gap-3 py-5 text-sm text-muted" role="status"><LoaderCircle className="h-4 w-4 animate-spin text-emerald" aria-hidden="true" />{locale === "ar" ? "يفكر المستشار في سؤالك…" : "The adviser is considering your message…"}</div>
               </>
             ) : null}
           </div>
 
-          <form className="border-t border-border p-5" onSubmit={handleSubmit} aria-busy={sending}>
+          <form className="border-t border-border py-6" onSubmit={handleSubmit} aria-busy={sending}>
             <label className="field-label" htmlFor="career-path-message">{locale === "ar" ? "رسالتك" : "Your message"}</label>
             <textarea
               ref={composerRef}
@@ -326,8 +328,8 @@ export function CareerPathChat() {
             <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted"><span>{locale === "ar" ? "Enter للإرسال · Shift + Enter لسطر جديد" : "Enter to send · Shift + Enter for a new line"}</span><span>{draft.length}/3000</span></div>
 
             {workspace.consent_required ? (
-              <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3 text-sm">
-                <input className="mt-1 h-5 w-5 shrink-0 accent-emerald" type="checkbox" checked={consentAcknowledged} onChange={(event) => setConsentAcknowledged(event.target.checked)} />
+              <label className="mt-4 flex cursor-pointer items-start gap-3 border-y border-primary/45 bg-primary/5 px-1 py-4 text-sm">
+                <input className="mt-1 h-5 w-5 shrink-0 accent-[var(--primary)]" type="checkbox" checked={consentAcknowledged} onChange={(event) => setConsentAcknowledged(event.target.checked)} />
                 <span><strong className="block">{locale === "ar" ? "موافقة مشاركة البيانات" : "Data-sharing consent"}</strong><span className="mt-1 block text-xs text-muted">{locale === "ar" ? `أوافق على إرسال رسالتي وحقائق ملفي المؤكدة إلى مزود ${workspace.provider} لإنشاء الرد.` : `I agree to send my message and confirmed profile facts to ${workspace.provider} to generate the response.`}</span></span>
               </label>
             ) : null}
@@ -340,7 +342,7 @@ export function CareerPathChat() {
             ) : null}
 
             {sendError ? (
-              <div className="mt-4 rounded-lg border border-danger bg-danger-pale p-3 text-sm text-danger" role="alert">
+              <div className="mt-4 border-y border-danger bg-danger-pale/50 px-1 py-3 text-sm text-danger" role="alert">
                 <p>{apiErrorMessage(sendError, locale)}</p>
                 <p className="mt-1 text-xs">{locale === "ar" ? "احتفظنا برسالتك؛ يمكنك إعادة الإرسال دون كتابتها من جديد." : "Your message is preserved so you can retry without retyping it."}</p>
               </div>
@@ -359,10 +361,10 @@ export function CareerPathChat() {
           </form>
         </section>
 
-        <aside className="space-y-5" aria-labelledby="adviser-context-title">
-          <section className="rounded-xl border border-border p-5">
+        <aside className="space-y-0 border-s border-border ps-6" aria-labelledby="adviser-context-title">
+          <section className="border-b border-border py-5">
             <h2 id="adviser-context-title" className="section-title">{locale === "ar" ? "ما يعرفه المستشار" : "What the adviser knows"}</h2>
-            <div className="mt-5 flex items-center gap-3 rounded-lg bg-emerald-pale p-4">
+            <div className="mt-5 flex items-end gap-3 border-y border-border py-4">
               <FileCheck2 className="h-6 w-6 shrink-0 text-emerald" aria-hidden="true" />
               <div><strong className="block text-2xl">{workspace.confirmed_fact_count}</strong><span className="text-xs text-muted">{locale === "ar" ? "حقائق مؤكدة في ملفك" : "confirmed profile facts"}</span></div>
             </div>
@@ -370,7 +372,7 @@ export function CareerPathChat() {
             <Link href="/profile" className="subtle-link mt-3">{locale === "ar" ? "راجع حقائق ملفك" : "Review profile facts"}<ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" aria-hidden="true" /></Link>
           </section>
 
-          <section className="rounded-xl border border-border p-5" aria-labelledby="adviser-boundaries-title">
+          <section className="border-b border-border py-5" aria-labelledby="adviser-boundaries-title">
             <ShieldCheck className="h-6 w-6 text-emerald" aria-hidden="true" />
             <h2 id="adviser-boundaries-title" className="mt-3 font-bold">{locale === "ar" ? "حدود واضحة" : "Clear boundaries"}</h2>
             <ul className="mt-3 space-y-3 text-sm text-muted">

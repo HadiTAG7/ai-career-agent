@@ -55,10 +55,11 @@ describe("resume workspace API client", () => {
       calls.push({ url: String(request), init });
       return jsonResponse({ id: "workspace-1" });
     }));
-    const { startResumeWorkspace, sendResumeWorkspaceMessage } = await import("@/lib/api-client");
+    const { resetResumeWorkspace, startResumeWorkspace, sendResumeWorkspaceMessage } = await import("@/lib/api-client");
 
     await startResumeWorkspace("profile-1", {
-      language: "ar",
+      conversationLanguage: "ar",
+      language: "en",
       contact: { email: "hadi@example.com" },
       dataSharingAcknowledged: true,
     });
@@ -80,11 +81,13 @@ describe("resume workspace API client", () => {
       expectedRevision: 5,
       quickAction: "no_exact_metric",
     });
+    await resetResumeWorkspace("profile-1", 5);
 
     expect(calls[0].url).toBe("https://api.test/v1/profiles/profile-1/resume-workspace");
     expect(calls[0].init?.method).toBe("POST");
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({
-      language: "ar",
+      conversation_language: "ar",
+      language: "en",
       contact: { email: "hadi@example.com", phone: null, linkedin: null },
       data_sharing_acknowledged: true,
     });
@@ -107,11 +110,27 @@ describe("resume workspace API client", () => {
       expected_revision: 5,
       quick_action: "no_exact_metric",
     });
+    expect(calls[4].url).toBe("https://api.test/v1/profiles/profile-1/resume-workspace?expected_revision=5");
+    expect(calls[4].init?.method).toBe("DELETE");
+    expect(calls[4].init?.body).toBeUndefined();
     expect(educationRecord).toMatchObject({
       gpa_score: "4.75",
       gpa_scale: "5",
       gpa_display_recommended: true,
     });
+  });
+
+  it("accepts an empty 204 response when permanently clearing a workspace", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { resetResumeWorkspace } = await import("@/lib/api-client");
+
+    await expect(resetResumeWorkspace("profile-1", 12)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.test/v1/profiles/profile-1/resume-workspace?expected_revision=12",
+      expect.objectContaining({ method: "DELETE" }),
+    );
   });
 
   it("forwards the import acknowledgement exactly as supplied", async () => {
