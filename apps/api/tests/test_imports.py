@@ -184,7 +184,7 @@ async def test_ai_docx_import_uses_provider_and_returns_existing_ai_analysis_on_
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
-    assert metadata["extractor_version"] == "resume-records-v4"
+    assert metadata["extractor_version"] == "resume-records-v5"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert "Senior Python backend developer" not in str(metadata)
     assert {fact["verification_status"] for fact in result["facts"]} == {"extracted"}
@@ -253,7 +253,7 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
-    assert metadata["extractor_version"] == "resume-records-v4"
+    assert metadata["extractor_version"] == "resume-records-v5"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert metadata["candidate_fact_count"] == 4
     assert {fact["label"] for fact in result["facts"]} == {
@@ -291,7 +291,7 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
     assert len(provider.contexts) == 1
 
 
-async def test_v3_ai_import_is_reanalyzed_once_by_v4_without_replacing_reviewed_facts(
+async def test_v4_ai_import_is_reanalyzed_once_by_v5_without_replacing_reviewed_facts(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     session_factory,
@@ -328,7 +328,7 @@ async def test_v3_ai_import_is_reanalyzed_once_by_v4_without_replacing_reviewed_
         source.source_metadata = {
             **source.source_metadata,
             "ai_enhanced": True,
-            "extractor_version": "resume-records-v3",
+            "extractor_version": "resume-records-v4",
             "ai_provider": "mistral",
             "ai_model": "legacy-resume-model",
         }
@@ -352,7 +352,7 @@ async def test_v3_ai_import_is_reanalyzed_once_by_v4_without_replacing_reviewed_
     assert upgraded_result["analysis_status"] == "ai_upgraded"
     assert upgraded_result["source"]["id"] == source_id
     assert upgraded_result["source"]["source_metadata"]["extractor_version"] == (
-        "resume-records-v4"
+        "resume-records-v5"
     )
     assert len(provider.contexts) == 1
 

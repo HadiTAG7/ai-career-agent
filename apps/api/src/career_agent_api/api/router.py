@@ -113,7 +113,7 @@ router.include_router(career_path_router)
 router.include_router(resume_router)
 router.include_router(resume_workspace_router)
 
-RESUME_EXTRACTOR_VERSION = "resume-records-v4"
+RESUME_EXTRACTOR_VERSION = "resume-records-v5"
 
 POST_SUBMISSION_STATUSES = {
     ApplicationStatus.SUBMITTED,
