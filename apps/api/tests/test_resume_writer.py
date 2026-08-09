@@ -468,6 +468,18 @@ def test_completion_separates_multiple_experience_handles_instead_of_hiding_a_re
     ]
 
 
+def test_legacy_trading_role_without_source_section_keeps_its_own_section() -> None:
+    support = ResumeEvidence(
+        handle="legacy_trading_fact",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail="Active trader in regional equity markets",
+        verification_status="confirmed",
+    )
+
+    assert resume_writer_module._evidence_section_key(support) == "trading_experience"
+
+
 @pytest.mark.asyncio
 async def test_fact_order_and_complete_responsibilities_survive_draft_and_pdf_preview() -> None:
     education_coursework = [

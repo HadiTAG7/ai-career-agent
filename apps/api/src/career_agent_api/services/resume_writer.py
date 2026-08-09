@@ -645,6 +645,14 @@ _EXPLICIT_TRADING_SECTION_HEADINGS = frozenset(
         "خبرة التداول",
     )
 )
+_LEGACY_TRADING_ROLE_TITLES = frozenset(
+    _heading_key(value)
+    for value in (
+        "Investment & Trading Professional",
+        "Investment and Trading Professional",
+        "Trading Professional",
+    )
+)
 _EXPLICIT_PROFESSIONAL_EXPERIENCE_HEADINGS = frozenset(
     _heading_key(value)
     for value in (
@@ -1921,6 +1929,10 @@ def _explicit_experience_section(
             return "trading_experience"
         if heading in _EXPLICIT_PROFESSIONAL_EXPERIENCE_HEADINGS:
             return "experience"
+    # Older imported facts predate ``source_section``. Keep this fallback deliberately exact so
+    # teaching roles or finance jobs that merely mention markets remain professional experience.
+    if _heading_key(evidence.label) in _LEGACY_TRADING_ROLE_TITLES:
+        return "trading_experience"
     return None
 
 

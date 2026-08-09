@@ -46,6 +46,9 @@ describe("resume presentation", () => {
         date_range: "2019 – Present",
         responsibilities: ["Tested strategies across 6 market regimes"],
       }),
+      fact("trade-legacy", "experience", "Investment & Trading Professional", {
+        responsibilities: ["Managed risk across regional equity markets"],
+      }),
       fact("work-1", "experience", "Finance Analyst", {
         source_section: "Professional Experience",
         organization: "Northstar",
@@ -77,6 +80,10 @@ describe("resume presentation", () => {
     ]);
     expect(sections[2].items[0].bullets).toEqual([
       "Tested strategies across 6 market regimes",
+    ]);
+    expect(sections[2].items.map((item) => item.title)).toEqual([
+      "Independent Trader",
+      "Investment & Trading Professional",
     ]);
     expect(sections[0].items[0].organization).toBe("Synthetic University");
     expect(sections[0].items[0].bullets).toEqual([

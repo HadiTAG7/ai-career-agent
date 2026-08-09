@@ -37,6 +37,12 @@ const TRADING_SECTION_HEADINGS = new Set([
   "خبرة التداول",
 ]);
 
+const LEGACY_TRADING_ROLE_TITLES = new Set([
+  "investment & trading professional",
+  "investment and trading professional",
+  "trading professional",
+]);
+
 const GENERIC_DETAIL_HEADINGS = new Set([
   "skills",
   "financial skills",
@@ -110,7 +116,9 @@ export function resumeSectionForFact(fact: ApiCareerFact): ApiResumeSectionKey |
     const sourceSection = stringValue(fact, "source_section")
       ?? fact.source_excerpt?.split(/\r?\n/u, 1)[0]
       ?? "";
+    const recordTitle = stringValue(fact, "title") ?? fact.label;
     return TRADING_SECTION_HEADINGS.has(normalizedHeading(sourceSection))
+      || LEGACY_TRADING_ROLE_TITLES.has(normalizedHeading(recordTitle))
       ? "trading_experience"
       : "experience";
   }
