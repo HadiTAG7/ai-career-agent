@@ -468,6 +468,82 @@ def test_completion_separates_multiple_experience_handles_instead_of_hiding_a_re
     ]
 
 
+@pytest.mark.asyncio
+async def test_education_and_skills_only_keep_grounded_provider_summary() -> None:
+    supports = (
+        ResumeEvidence(
+            handle="education_fact",
+            category="education",
+            label="Bachelor of Science in Finance",
+            detail="Harbor University, completed 2023",
+            verification_status="confirmed",
+            structured_value={
+                "institution": "Harbor University",
+                "date_range": "2023",
+            },
+        ),
+        ResumeEvidence(
+            handle="skill_fact",
+            category="skill",
+            label="Financial Modeling",
+            detail="Applied financial modeling to university budgeting case studies",
+            verification_status="confirmed",
+        ),
+    )
+    provider_summary = (
+        "Applied financial modeling to university budgeting case studies."
+    )
+    provider = CapturingResumeWriter(
+        {
+            "headline": "Financial Modeling",
+            "professional_summary": provider_summary,
+            "summary_evidence_handles": ["skill_fact"],
+            "sections": [
+                {
+                    "key": "education",
+                    "title": "Education",
+                    "items": [
+                        {
+                            "id": "finance_degree",
+                            "title": "Bachelor of Science in Finance",
+                            "organization": "Harbor University",
+                            "date_range": "2023",
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["education_fact"],
+                        }
+                    ],
+                },
+                {
+                    "key": "skill",
+                    "title": "Skills",
+                    "items": [
+                        {
+                            "id": "financial_modeling",
+                            "title": "Financial Modeling",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["skill_fact"],
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+
+    draft = await provider.generate_draft(
+        language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=supports,
+        answers=[],
+    )
+
+    assert draft.professional_summary == provider_summary
+    assert draft.summary_evidence_handles == ["skill_fact"]
+
+
 def test_legacy_trading_role_without_source_section_keeps_its_own_section() -> None:
     support = ResumeEvidence(
         handle="legacy_trading_fact",
@@ -872,6 +948,303 @@ async def test_fact_order_and_complete_responsibilities_survive_draft_and_pdf_pr
     ]
     if missing_preview_numbers:
         failures.append(f"PDF preview omitted numbers {missing_preview_numbers}")
+
+    assert not failures, "\n".join(failures)
+
+
+@pytest.mark.asyncio
+async def test_source_order_headline_and_summary_survive_reversed_provider_draft_and_pdf() -> None:
+    training_sentence = (
+        "Trained 1,200+ students in trading strategy execution, market analysis, and risk "
+        "management."
+    )
+    training_program_sentence = (
+        "Designed structured educational programs covering strategy logic, psychology, and "
+        "discipline."
+    )
+    guest_lecturer_sentence = (
+        "Guest lecturer on trading and risk management at GTU."
+    )
+    us_trading_sentence = (
+        "Active trader in U.S. and regional equity markets since 2018."
+    )
+
+    def confirmed_experience(
+        *,
+        title: str,
+        source_handle: str,
+        date_range: str,
+        organization: str | None,
+        responsibilities: list[str],
+        source_section: str = "Professional Experience",
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=uuid4(),
+            category=FactCategory.EXPERIENCE,
+            label=title,
+            detail=None,
+            structured_value={
+                "schema_version": "resume_record.v1",
+                "record_type": "experience",
+                "source_handles": [source_handle],
+                "source_section": source_section,
+                "title": title,
+                "organization": organization,
+                "date_range": date_range,
+                "responsibilities": responsibilities,
+            },
+            source_excerpt=f"{source_section}\n{date_range}\n{title}",
+            verification_status=VerificationStatus.CONFIRMED,
+        )
+
+    cost_control_responsibilities = [
+        "Performed monthly variance analysis, cost control, and internal financial reviews",
+        "Supported audit processes, compliance checks, and management reporting",
+    ]
+    trainee_responsibilities = [
+        "Supported month-end and year-end financial closing, reconciliations, and journal posting",
+        "Prepared reports on financial performance, liquidity, and variance analysis",
+    ]
+    instructor_responsibilities = [
+        training_sentence.rstrip("."),
+        training_program_sentence.rstrip("."),
+        guest_lecturer_sentence.rstrip("."),
+    ]
+    trading_responsibilities = [
+        us_trading_sentence.rstrip("."),
+        "Built trading strategies validated using 4,000+ backtesting samples",
+    ]
+    # The intake response arrived in the wrong chronology. Segment handles still encode the
+    # candidate's real top-to-bottom source order: Cost (4), Trainee (5), Instructor (6),
+    # Trading (7).
+    facts = [
+        confirmed_experience(
+            title="Financial Markets Instructor",
+            source_handle="segment_6",
+            date_range="2022 - 2025",
+            organization="MarketLearn",
+            responsibilities=instructor_responsibilities,
+        ),
+        confirmed_experience(
+            title="Finance Trainee",
+            source_handle="segment_5",
+            date_range="2024/01 - 2024/08",
+            organization="Meridian Petrochemical",
+            responsibilities=trainee_responsibilities,
+        ),
+        confirmed_experience(
+            title="Cost Control & Finance Analyst",
+            source_handle="segment_4",
+            date_range="2025 - Present",
+            organization="Northstar Consumer Brands",
+            responsibilities=cost_control_responsibilities,
+        ),
+        confirmed_experience(
+            title="Investment & Trading Professional",
+            source_handle="segment_7",
+            date_range="2018 - Present",
+            organization=None,
+            responsibilities=trading_responsibilities,
+            source_section="Investment & Trading Experience",
+        ),
+    ]
+    resume_evidence = build_resume_evidence(facts)
+    assert [item.source_handles for item in resume_evidence] == [
+        ("segment_6",),
+        ("segment_5",),
+        ("segment_4",),
+        ("segment_7",),
+    ]
+    assert [
+        item.label
+        for item in sorted(
+            resume_evidence,
+            key=lambda item: int(item.source_handles[0].removeprefix("segment_")),
+        )
+    ] == [
+        "Cost Control & Finance Analyst",
+        "Finance Trainee",
+        "Financial Markets Instructor",
+        "Investment & Trading Professional",
+    ]
+    handles = {item.label: item.handle for item in resume_evidence}
+
+    def provider_item(
+        *,
+        item_id: str,
+        title: str,
+        organization: str | None,
+        date_range: str,
+        bullets: list[str],
+    ) -> dict[str, object]:
+        return {
+            "id": item_id,
+            "title": title,
+            "organization": organization,
+            "date_range": date_range,
+            "location": None,
+            "bullets": bullets,
+            "evidence_handles": [handles[title]],
+        }
+
+    provider = CapturingResumeWriter(
+        {
+            "headline": "Instructor",
+            "professional_summary": (
+                f"{training_sentence} {training_program_sentence} "
+                f"{guest_lecturer_sentence} {us_trading_sentence}"
+            ),
+            "summary_evidence_handles": [
+                handles["Financial Markets Instructor"],
+                handles["Investment & Trading Professional"],
+            ],
+            "sections": [
+                {
+                    "key": "trading_experience",
+                    "title": "Investment & Trading Experience",
+                    "items": [
+                        provider_item(
+                            item_id="investment_trading_professional",
+                            title="Investment & Trading Professional",
+                            organization=None,
+                            date_range="2018 - Present",
+                            bullets=trading_responsibilities,
+                        )
+                    ],
+                },
+                {
+                    "key": "experience",
+                    "title": "Professional Experience",
+                    # The provider reverses the source chronology. Completion owns final order.
+                    "items": [
+                        provider_item(
+                            item_id="financial_markets_instructor",
+                            title="Financial Markets Instructor",
+                            organization="MarketLearn",
+                            date_range="2022 - 2025",
+                            bullets=instructor_responsibilities,
+                        ),
+                        provider_item(
+                            item_id="finance_trainee",
+                            title="Finance Trainee",
+                            organization="Meridian Petrochemical",
+                            date_range="2024/01 - 2024/08",
+                            bullets=trainee_responsibilities,
+                        ),
+                        provider_item(
+                            item_id="cost_control_finance_analyst",
+                            title="Cost Control & Finance Analyst",
+                            organization="Northstar Consumer Brands",
+                            date_range="2025 - Present",
+                            bullets=cost_control_responsibilities,
+                        ),
+                    ],
+                },
+            ],
+        }
+    )
+
+    draft = await provider.generate_draft(
+        language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=resume_evidence,
+        answers=[],
+    )
+    professional_section = next(
+        section for section in draft.sections if section.key == "experience"
+    )
+    expected_titles = [
+        "Cost Control & Finance Analyst",
+        "Finance Trainee",
+        "Financial Markets Instructor",
+    ]
+    failures: list[str] = []
+    actual_titles = [item.title for item in professional_section.items]
+    if actual_titles != expected_titles:
+        failures.append(
+            f"draft professional order was {actual_titles}, expected {expected_titles}"
+        )
+    expected_headline = (
+        "Cost Control & Finance Analyst | Investment & Trading Professional"
+    )
+    if draft.headline != expected_headline:
+        failures.append(
+            f"draft headline was {draft.headline!r}, expected {expected_headline!r}"
+        )
+    summary_units = resume_writer_module._claim_units(draft.professional_summary)
+    normalized_units = [" ".join(unit.casefold().split()) for unit in summary_units]
+    if len(normalized_units) != len(set(normalized_units)):
+        failures.append(f"draft summary repeated a claim: {summary_units}")
+    expected_summary_sentences = [
+        f"{cost_control_responsibilities[0]}.",
+        f"{trainee_responsibilities[0]}.",
+        us_trading_sentence,
+    ]
+    for sentence in expected_summary_sentences:
+        if sentence not in draft.professional_summary:
+            failures.append(f"draft summary omitted source-priority claim {sentence!r}")
+    expected_summary_handles = [
+        handles["Cost Control & Finance Analyst"],
+        handles["Finance Trainee"],
+        handles["Investment & Trading Professional"],
+    ]
+    if draft.summary_evidence_handles != expected_summary_handles:
+        failures.append(
+            "draft summary handles were not limited to Cost, Trainee, and Trading: "
+            f"{draft.summary_evidence_handles}"
+        )
+    instructor_handle = handles["Financial Markets Instructor"]
+    instructor_summary_sentences = [
+        training_sentence,
+        training_program_sentence,
+        guest_lecturer_sentence,
+    ]
+    if instructor_handle in draft.summary_evidence_handles or any(
+        sentence in draft.professional_summary
+        for sentence in instructor_summary_sentences
+    ):
+        failures.append("draft summary remained centered on the Instructor record")
+    try:
+        validate_claim_grounding(
+            draft.professional_summary,
+            draft.summary_evidence_handles,
+            resume_evidence,
+        )
+    except ResumeWriterError as exc:
+        failures.append(f"draft summary was not grounded: {exc}")
+
+    preview = render_resume_pdf(
+        profile_name="Synthetic Candidate",
+        city=None,
+        language=PreferredLanguage.EN,
+        draft=draft,
+        contact=ResumeExportContact(),
+    )
+    preview_text = " ".join(
+        " ".join((page.extract_text() or "").split())
+        for page in PdfReader(BytesIO(preview)).pages
+    )
+    experience_position = preview_text.find("Professional Experience")
+    professional_positions = [
+        preview_text.find(title, max(0, experience_position)) for title in expected_titles
+    ]
+    if (
+        experience_position < 0
+        or -1 in professional_positions
+        or professional_positions != sorted(professional_positions)
+    ):
+        failures.append(
+            "PDF professional order was not Cost Control, Trainee, Instructor: "
+            f"{professional_positions}"
+        )
+    summary_preview = preview_text[: max(0, experience_position)]
+    if expected_headline not in summary_preview:
+        failures.append("PDF header did not contain the completed finance/trading headline")
+    for sentence in expected_summary_sentences:
+        if sentence not in summary_preview:
+            failures.append(f"PDF summary omitted source-priority claim {sentence!r}")
+    if any(sentence in summary_preview for sentence in instructor_summary_sentences):
+        failures.append("PDF summary remained centered on the Instructor record")
 
     assert not failures, "\n".join(failures)
 

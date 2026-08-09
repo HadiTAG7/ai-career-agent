@@ -457,6 +457,7 @@ class ResumeEvidence:
     structured_value: dict[str, Any] = field(default_factory=dict)
     source_excerpt: str | None = None
     source_handles: tuple[str, ...] = ()
+    source_group: str | None = None
 
     @property
     def text(self) -> str:
@@ -767,6 +768,11 @@ def build_resume_evidence(facts: list[CareerFact]) -> tuple[ResumeEvidence, ...]
                 structured_value=structured_value,
                 source_excerpt=source_excerpt,
                 source_handles=source_handles,
+                source_group=(
+                    str(fact.source_id)
+                    if getattr(fact, "source_id", None) is not None
+                    else None
+                ),
             )
         )
         if len(evidence) >= MAX_RESUME_FACTS:
@@ -2090,66 +2096,171 @@ def _remove_redundant_metadata_bullets(
     return result
 
 
+_SOURCE_SEGMENT_HANDLE_PATTERN = re.compile(r"^segment_(\d+)(?:__\d+)?$")
+
+
+def _evidence_in_source_order(
+    evidence: tuple[ResumeEvidence, ...],
+) -> tuple[ResumeEvidence, ...]:
+    """Recover the uploaded resume's order even when upgraded facts retain older DB IDs."""
+
+    group_positions: dict[str | None, int] = {}
+    for item in evidence:
+        group_positions.setdefault(item.source_group, len(group_positions))
+
+    def source_position(
+        indexed: tuple[int, ResumeEvidence],
+    ) -> tuple[int, int, int, int]:
+        original_index, item = indexed
+        positions = [
+            int(match.group(1))
+            for handle in item.source_handles
+            if (match := _SOURCE_SEGMENT_HANDLE_PATTERN.fullmatch(handle)) is not None
+        ]
+        if positions:
+            return (
+                group_positions[item.source_group],
+                0,
+                min(positions),
+                original_index,
+            )
+        return (
+            group_positions[item.source_group],
+            1,
+            original_index,
+            original_index,
+        )
+
+    return tuple(item for _, item in sorted(enumerate(evidence), key=source_position))
+
+
 def _complete_professional_summary(
     draft: ResumeDraftContent,
     evidence: tuple[ResumeEvidence, ...],
     language: PreferredLanguage,
 ) -> tuple[str, list[str]]:
-    """Fill a thin model summary with a few literal, grounded experience highlights."""
+    """Build a concise summary with one grounded highlight per priority role."""
 
-    summary = draft.professional_summary.strip()
-    handles = list(dict.fromkeys(draft.summary_evidence_handles))
-    if len(_claim_units(summary)) >= 3:
-        return summary, handles
-
+    ordered_source_evidence = _evidence_in_source_order(evidence)
     professional = [
         item
-        for item in evidence
+        for item in ordered_source_evidence
         if item.category == "experience" and _evidence_section_key(item) == "experience"
     ]
     trading = [
         item
-        for item in evidence
+        for item in ordered_source_evidence
         if item.category == "experience"
         and _evidence_section_key(item) == "trading_experience"
     ]
     remaining = [
         item
-        for item in evidence
+        for item in ordered_source_evidence
         if item.category in {"experience", "project", "achievement"}
         and item not in professional
         and item not in trading
     ]
     ordered_evidence = [
-        *professional[:1],
+        *professional[:2],
         *trading[:1],
-        *professional[1:],
+        *professional[2:],
         *trading[1:],
         *remaining,
     ]
+    original_handles = list(dict.fromkeys(draft.summary_evidence_handles))
+    if not ordered_evidence:
+        return draft.professional_summary.strip(), original_handles
+    provider_units = _claim_units(draft.professional_summary)
+    used_provider_units: set[int] = set()
+    summary_units: list[str] = []
+    handles: list[str] = []
+
+    def summary_contains(unit: str) -> bool:
+        unit_key = _presentation_key(unit)
+        return bool(unit_key) and any(
+            _presentation_key(existing) == unit_key for existing in summary_units
+        )
+
+    def append_summary_unit(unit: str, support: ResumeEvidence) -> bool:
+        sentence = unit.strip()
+        if not sentence or summary_contains(sentence):
+            return False
+        if not _uses_requested_language(sentence, language, allow_short=True):
+            return False
+        proposed_units = [*summary_units, sentence]
+        proposed_summary = " ".join(
+            value if value[-1:] in {".", "!", "?", "\u061f"} else f"{value}."
+            for value in proposed_units
+        )
+        if len(proposed_summary) > 2_500:
+            return False
+        summary_units.append(sentence)
+        handles.append(support.handle)
+        return True
+
     for support in ordered_evidence:
-        if len(_claim_units(summary)) >= 3:
+        if len(summary_units) >= 3:
             break
+        provider_match: tuple[int, str] | None = None
+        for index, unit in enumerate(provider_units):
+            if index in used_provider_units:
+                continue
+            try:
+                validate_claim_grounding(unit, [support.handle], evidence)
+            except ResumeWriterError:
+                continue
+            provider_match = (index, unit)
+            break
+        if provider_match is not None:
+            index, unit = provider_match
+            if append_summary_unit(unit, support):
+                used_provider_units.add(index)
+                continue
         source_bullet = next(
             (
                 bullet
                 for bullet in _source_item_bullets(support)
-                if not _bullet_covers_source(bullet, [summary])
+                if not summary_contains(bullet)
                 and _uses_requested_language(bullet, language, allow_short=True)
             ),
             None,
         )
-        if not source_bullet:
-            continue
-        sentence = source_bullet.strip()
-        if sentence[-1:] not in {".", "!", "?", "؟"}:
-            sentence += "."
-        proposed = f"{summary} {sentence}".strip()
-        if len(proposed) > 2_500:
-            continue
-        summary = proposed
-        handles.append(support.handle)
-    return summary, list(dict.fromkeys(handles))[:15]
+        if source_bullet:
+            append_summary_unit(source_bullet, support)
+
+    if len(summary_units) < 3:
+        for support in ordered_evidence:
+            for index, unit in enumerate(provider_units):
+                if len(summary_units) >= 3:
+                    break
+                if index in used_provider_units:
+                    continue
+                try:
+                    validate_claim_grounding(unit, [support.handle], evidence)
+                except ResumeWriterError:
+                    continue
+                if append_summary_unit(unit, support):
+                    used_provider_units.add(index)
+            if len(summary_units) >= 3:
+                break
+
+    if len(summary_units) < 3:
+        for support in ordered_evidence:
+            for source_bullet in _source_item_bullets(support):
+                if len(summary_units) >= 3:
+                    break
+                append_summary_unit(source_bullet, support)
+            if len(summary_units) >= 3:
+                break
+
+    if not summary_units:
+        return draft.professional_summary.strip(), original_handles
+
+    summary = " ".join(
+        sentence if sentence[-1:] in {".", "!", "?", "\u061f"} else f"{sentence}."
+        for sentence in summary_units
+    ).strip()
+    return summary, list(dict.fromkeys(handles))
 
 
 def _complete_headline(
@@ -2177,10 +2288,11 @@ def _complete_headline(
         "skills",
         "work",
     }
+    ordered_source_evidence = _evidence_in_source_order(evidence)
     professional = next(
         (
             item
-            for item in evidence
+            for item in ordered_source_evidence
             if item.category == "experience"
             and _evidence_section_key(item) == "experience"
             and _uses_requested_language(item.label, language, allow_short=True)
@@ -2190,7 +2302,7 @@ def _complete_headline(
     trading = next(
         (
             item
-            for item in evidence
+            for item in ordered_source_evidence
             if item.category == "experience"
             and _evidence_section_key(item) == "trading_experience"
             and _uses_requested_language(item.label, language, allow_short=True)
@@ -2280,8 +2392,9 @@ def _complete_draft_from_evidence(
     """Keep the writer's prose while deterministically retaining confirmed source records."""
 
     evidence_by_handle = {item.handle: item for item in evidence}
+    ordered_source_evidence = _evidence_in_source_order(evidence)
     evidence_position = {
-        item.handle: index for index, item in enumerate(evidence)
+        item.handle: index for index, item in enumerate(ordered_source_evidence)
     }
     buckets: dict[ResumeDraftSectionKey, list[ResumeDraftItem]] = {
         key: [] for key in RESUME_DRAFT_SECTION_ORDER
@@ -2435,7 +2548,7 @@ def _complete_draft_from_evidence(
         evidence,
         language,
     )
-    return draft.model_copy(
+    completed = draft.model_copy(
         update={
             "headline": _complete_headline(
                 draft.headline,
@@ -2448,6 +2561,7 @@ def _complete_draft_from_evidence(
             "sections": sections,
         }
     )
+    return ResumeDraftContent.model_validate(completed.model_dump(mode="python"))
 
 
 def resume_patch_uses_requested_language(
