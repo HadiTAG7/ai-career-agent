@@ -51,7 +51,7 @@ class UpgradeResumeProvider(StubResumeProvider):
             FactCandidate(
                 category=FactCategory.SKILL,
                 label="Python",
-                detail="AI must not replace confirmed evidence",
+                detail="AI-enriched Python detail",
                 structured_value={"level": "advanced"},
                 source_excerpt=context.segments[0].text,
                 confidence=0.91,
@@ -59,8 +59,12 @@ class UpgradeResumeProvider(StubResumeProvider):
             FactCandidate(
                 category=FactCategory.SKILL,
                 label="SQL",
-                detail="AI must not replace unconfirmed evidence",
-                structured_value={"level": "advanced"},
+                detail="AI-enriched SQL detail",
+                structured_value={
+                    "title": "SQL",
+                    "level": "advanced",
+                    "tool_family": "database",
+                },
                 source_excerpt=context.segments[0].text,
                 confidence=0.9,
             ),
@@ -79,6 +83,30 @@ class UpgradeResumeProvider(StubResumeProvider):
                 structured_value={},
                 source_excerpt=context.segments[1].text,
                 confidence=0.8,
+            ),
+        ]
+
+
+class ThinExperienceUpgradeProvider(UpgradeResumeProvider):
+    async def generate(self, context: ResumeIntakeProviderContext) -> list[FactCandidate]:
+        candidates = await super().generate(context)
+        return [
+            *candidates,
+            FactCandidate(
+                category=FactCategory.EXPERIENCE,
+                label="Operations Analyst",
+                detail="Operations reporting detail",
+                structured_value={
+                    "title": "Operations Analyst",
+                    "organization": "Northstar Logistics",
+                    "date_range": "2022 - 2025",
+                    "responsibilities": [
+                        "Reduced monthly reporting time by 35% through SQL automation.",
+                        "Built Power BI dashboards tracking 12 regional sites.",
+                    ],
+                },
+                source_excerpt="Professional Experience\nOperations Analyst",
+                confidence=0.93,
             ),
         ]
 
@@ -184,7 +212,7 @@ async def test_ai_docx_import_uses_provider_and_returns_existing_ai_analysis_on_
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
-    assert metadata["extractor_version"] == "resume-records-v5"
+    assert metadata["extractor_version"] == "resume-records-v6"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert "Senior Python backend developer" not in str(metadata)
     assert {fact["verification_status"] for fact in result["facts"]} == {"extracted"}
@@ -203,7 +231,7 @@ async def test_ai_docx_import_uses_provider_and_returns_existing_ai_analysis_on_
     assert len(provider.contexts) == 1
 
 
-async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
+async def test_local_import_ai_upgrade_stages_enrichment_for_review(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -253,26 +281,39 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
-    assert metadata["extractor_version"] == "resume-records-v5"
+    assert metadata["extractor_version"] == "resume-records-v6"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert metadata["candidate_fact_count"] == 4
     assert {fact["label"] for fact in result["facts"]} == {
+        "Python",
         "Bachelor of Computer Science",
         "Portfolio project",
     }
 
     all_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts")).json()
     saved_by_label = {fact["label"].casefold(): fact for fact in all_facts}
-    assert saved_by_label["python"]["verification_status"] == "confirmed"
-    assert saved_by_label["python"]["detail"] is None
+    assert saved_by_label["python"]["id"] == facts_by_label["python"]["id"]
+    assert saved_by_label["python"]["verification_status"] == "extracted"
+    assert saved_by_label["python"]["detail"] == "AI-enriched Python detail"
+    assert saved_by_label["python"]["structured_value"]["level"] == "advanced"
+    assert saved_by_label["sql"]["id"] == facts_by_label["sql"]["id"]
     assert saved_by_label["sql"]["verification_status"] == "unconfirmed"
     assert saved_by_label["sql"]["detail"] is None
+    assert "level" not in saved_by_label["sql"]["structured_value"]
     assert saved_by_label["bachelor of computer science"]["verification_status"] == "extracted"
     assert (
         saved_by_label["bachelor of computer science"]["detail"] == "AI-enriched education detail"
     )
     assert saved_by_label["portfolio project"]["verification_status"] == "extracted"
     assert len((await client.get(f"/v1/profiles/{profile['id']}/sources")).json()) == source_count
+
+    reconfirmed_python = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{facts_by_label['python']['id']}/confirm"
+    )
+    assert reconfirmed_python.status_code == 200, reconfirmed_python.text
+    assert reconfirmed_python.json()["id"] == facts_by_label["python"]["id"]
+    assert reconfirmed_python.json()["verification_status"] == "confirmed"
+    assert reconfirmed_python.json()["structured_value"]["level"] == "advanced"
 
     repeated = await client.post(
         f"/v1/profiles/{profile['id']}/imports",
@@ -291,7 +332,7 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
     assert len(provider.contexts) == 1
 
 
-async def test_v4_ai_import_is_reanalyzed_once_by_v5_without_replacing_reviewed_facts(
+async def test_v5_ai_import_is_reanalyzed_once_by_v6_and_enriches_reviewed_facts(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     session_factory,
@@ -316,10 +357,64 @@ async def test_v4_ai_import_is_reanalyzed_once_by_v5_without_replacing_reviewed_
         f"/v1/profiles/{profile['id']}/facts/{facts_by_label['python']['id']}/confirm"
     )
     assert confirmed.status_code == 200, confirmed.text
-    unconfirmed = await client.post(
-        f"/v1/profiles/{profile['id']}/facts/{facts_by_label['sql']['id']}/unconfirm"
+    document_response = await client.post(
+        "/v1/documents",
+        json={
+            "profile_id": profile["id"],
+            "kind": "cv",
+            "language": "en",
+            "title": "Python CV",
+            "claims": [
+                {
+                    "claim_type": "skill",
+                    "text": "Python",
+                    "evidence_fact_ids": [facts_by_label["python"]["id"]],
+                }
+            ],
+        },
     )
-    assert unconfirmed.status_code == 200, unconfirmed.text
+    assert document_response.status_code == 201, document_response.text
+    reviewed_document = await client.post(
+        f"/v1/documents/{document_response.json()['id']}/review"
+    )
+    assert reviewed_document.status_code == 200, reviewed_document.text
+    assert reviewed_document.json()["status"] == "export_ready"
+    corrected_sql = await client.patch(
+        f"/v1/profiles/{profile['id']}/facts/{facts_by_label['sql']['id']}",
+        json={
+            "label": "Advanced SQL",
+            "detail": "User-reviewed SQL detail",
+            "structured_value": {"level": "expert"},
+            "correction_reason": "Keep my reviewed SQL proficiency",
+        },
+    )
+    assert corrected_sql.status_code == 200, corrected_sql.text
+    reconfirmed_sql = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{facts_by_label['sql']['id']}/confirm"
+    )
+    assert reconfirmed_sql.status_code == 200, reconfirmed_sql.text
+    thin_experience = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        json={
+            "source_id": source_id,
+            "category": "experience",
+            "label": "Operations Analyst",
+            "detail": "Operations reporting detail",
+            "structured_value": {
+                "title": "Operations Analyst",
+                "organization": "Northstar Logistics",
+                "date_range": "2022 - 2025",
+                "responsibilities": [],
+            },
+            "source_excerpt": "Professional Experience\nOperations Analyst",
+        },
+    )
+    assert thin_experience.status_code == 201, thin_experience.text
+    thin_experience_id = thin_experience.json()["id"]
+    confirmed_experience = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{thin_experience_id}/confirm"
+    )
+    assert confirmed_experience.status_code == 200, confirmed_experience.text
     stale_extracted_id = facts_by_label["docker"]["id"]
 
     async with session_factory() as session:
@@ -328,13 +423,13 @@ async def test_v4_ai_import_is_reanalyzed_once_by_v5_without_replacing_reviewed_
         source.source_metadata = {
             **source.source_metadata,
             "ai_enhanced": True,
-            "extractor_version": "resume-records-v4",
+            "extractor_version": "resume-records-v5",
             "ai_provider": "mistral",
             "ai_model": "legacy-resume-model",
         }
         await session.commit()
 
-    provider = UpgradeResumeProvider()
+    provider = ThinExperienceUpgradeProvider()
     monkeypatch.setattr(
         router_module,
         "get_resume_intake_provider",
@@ -352,18 +447,68 @@ async def test_v4_ai_import_is_reanalyzed_once_by_v5_without_replacing_reviewed_
     assert upgraded_result["analysis_status"] == "ai_upgraded"
     assert upgraded_result["source"]["id"] == source_id
     assert upgraded_result["source"]["source_metadata"]["extractor_version"] == (
-        "resume-records-v5"
+        "resume-records-v6"
     )
+    assert upgraded_result["source"]["source_metadata"]["candidate_fact_count"] == 5
     assert len(provider.contexts) == 1
 
     current_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts")).json()
     current_by_id = {fact["id"]: fact for fact in current_facts}
     assert stale_extracted_id not in current_by_id
-    assert current_by_id[facts_by_label["python"]["id"]]["verification_status"] == ("confirmed")
-    assert current_by_id[facts_by_label["python"]["id"]]["detail"] is None
-    assert current_by_id[facts_by_label["sql"]["id"]]["verification_status"] == ("unconfirmed")
-    assert current_by_id[facts_by_label["sql"]["id"]]["detail"] is None
+    assert current_by_id[facts_by_label["python"]["id"]]["verification_status"] == ("extracted")
+    assert (
+        current_by_id[facts_by_label["python"]["id"]]["detail"]
+        == "AI-enriched Python detail"
+    )
+    assert current_by_id[facts_by_label["python"]["id"]]["structured_value"]["level"] == (
+        "advanced"
+    )
+    reviewed_sql = current_by_id[facts_by_label["sql"]["id"]]
+    assert reviewed_sql["verification_status"] == "extracted"
+    assert reviewed_sql["label"] == "Advanced SQL"
+    assert reviewed_sql["detail"] == "User-reviewed SQL detail"
+    assert reviewed_sql["structured_value"] == {
+        "title": "Advanced SQL",
+        "level": "expert",
+        "tool_family": "database",
+    }
+    enriched_experience = current_by_id[thin_experience_id]
+    assert enriched_experience["id"] == thin_experience_id
+    assert enriched_experience["label"] == "Operations Analyst"
+    assert enriched_experience["detail"] == "Operations reporting detail"
+    assert enriched_experience["verification_status"] == "extracted"
+    assert enriched_experience["structured_value"]["responsibilities"] == [
+        "Reduced monthly reporting time by 35% through SQL automation.",
+        "Built Power BI dashboards tracking 12 regional sites.",
+    ]
+    assert enriched_experience["original_extraction"]["structured_value"][
+        "responsibilities"
+    ] == []
+    invalidated_document = await client.get(
+        f"/v1/documents/{document_response.json()['id']}"
+    )
+    assert invalidated_document.status_code == 200, invalidated_document.text
+    assert invalidated_document.json()["status"] == "draft"
+    assert invalidated_document.json()["review_hash"] is None
+    assert invalidated_document.json()["reviewed_at"] is None
     assert "Portfolio project" in {fact["label"] for fact in current_facts}
+
+    for reviewed_fact_id in (
+        facts_by_label["python"]["id"],
+        facts_by_label["sql"]["id"],
+        thin_experience_id,
+    ):
+        reconfirmed = await client.post(
+            f"/v1/profiles/{profile['id']}/facts/{reviewed_fact_id}/confirm"
+        )
+        assert reconfirmed.status_code == 200, reconfirmed.text
+        assert reconfirmed.json()["id"] == reviewed_fact_id
+        assert reconfirmed.json()["verification_status"] == "confirmed"
+        if reviewed_fact_id == thin_experience_id:
+            assert reconfirmed.json()["structured_value"]["responsibilities"] == [
+                "Reduced monthly reporting time by 35% through SQL automation.",
+                "Built Power BI dashboards tracking 12 regional sites.",
+            ]
 
     repeated = await client.post(
         f"/v1/profiles/{profile['id']}/imports",

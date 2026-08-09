@@ -22,7 +22,11 @@ from career_agent_api.models.enums import (
     ResumeMessageStatus,
 )
 from career_agent_api.schemas.api import ResumeDraftContent, ResumeQuestionRead
-from career_agent_api.services.resume_writer import RESUME_SECTION_ORDER, ResumeWriterProvider
+from career_agent_api.services.resume_writer import (
+    RESUME_SECTION_ORDER,
+    ResumeWriterError,
+    ResumeWriterProvider,
+)
 
 
 class StubWorkspaceProvider(ResumeWriterProvider):
@@ -1161,6 +1165,49 @@ async def test_explicit_generation_uses_existing_evidence_without_saving_a_negat
     facts = await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
     assert facts.status_code == 200
     assert len(facts.json()) == len(facts_before.json())
+
+
+@pytest.mark.parametrize("provider_failure", ["request timed out", "401 unauthorized"])
+async def test_workspace_maps_mistral_transport_failures_to_retryable_503(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_failure: str,
+) -> None:
+    profile, source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    await add_confirmed_experience(client, profile, source, headers)
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "en", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+
+    async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        raise ResumeWriterError(provider_failure)
+
+    monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
+    failed = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Generate my resume.",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+
+    assert failed.status_code == 503, failed.text
+    detail = failed.json()["detail"]
+    assert detail["code"] == "resume_writer_unavailable"
+    assert detail["message"] == (
+        "The AI resume writer is temporarily unavailable; retry the command"
+    )
+    assert UUID(detail["request_id"])
+    assert provider_failure not in failed.text
 
 
 async def test_correcting_understanding_invalidates_all_dependent_ai_output_and_source(

@@ -113,7 +113,7 @@ router.include_router(career_path_router)
 router.include_router(resume_router)
 router.include_router(resume_workspace_router)
 
-RESUME_EXTRACTOR_VERSION = "resume-records-v5"
+RESUME_EXTRACTOR_VERSION = "resume-records-v6"
 
 POST_SUBMISSION_STATUSES = {
     ApplicationStatus.SUBMITTED,
@@ -227,8 +227,18 @@ def _matching_source_fact(
         and _normalized_resume_fact_match(fact.source_excerpt) == candidate_excerpt
     ]
     candidate_label = _normalized_resume_fact_match(candidate.label)
-    for fact in excerpt_matches:
+
+    def label_matches(fact: CareerFact) -> bool:
         if _normalized_resume_fact_match(fact.label) == candidate_label:
+            return True
+        original = fact.original_extraction
+        return bool(
+            isinstance(original, dict)
+            and _normalized_resume_fact_match(original.get("label")) == candidate_label
+        )
+
+    for fact in excerpt_matches:
+        if label_matches(fact):
             return fact
     if len(excerpt_matches) == 1:
         return excerpt_matches[0]
@@ -236,10 +246,31 @@ def _matching_source_fact(
         (
             fact
             for fact in category_matches
-            if candidate_label and _normalized_resume_fact_match(fact.label) == candidate_label
+            if candidate_label and label_matches(fact)
         ),
         None,
     )
+
+
+def _merge_missing_structured_value(existing: Any, candidate: Any) -> Any:
+    """Add newly extracted structure without replacing reviewed user values."""
+
+    if isinstance(existing, dict) and isinstance(candidate, dict):
+        merged = dict(existing)
+        for key, candidate_value in candidate.items():
+            if key in merged:
+                merged[key] = _merge_missing_structured_value(
+                    merged[key],
+                    candidate_value,
+                )
+            elif candidate_value not in (None, "", [], {}):
+                merged[key] = candidate_value
+        return merged
+    if isinstance(existing, str) and existing.strip():
+        return existing
+    if existing not in (None, "", [], {}):
+        return existing
+    return candidate if candidate not in (None, "", [], {}) else existing
 
 
 async def _guard_resume_ai_snapshot(
@@ -925,7 +956,49 @@ async def import_professional_file(
             fact = _matching_source_fact(candidate, existing_facts, matched_fact_ids)
             if fact:
                 matched_fact_ids.add(fact.id)
-                if fact.verification_status is not VerificationStatus.EXTRACTED:
+                if fact.verification_status is VerificationStatus.CONFIRMED:
+                    reviewed_fact_changed = False
+                    if fact.user_corrected_at is None:
+                        reviewed_fact_changed = any(
+                            (
+                                fact.label != candidate.label,
+                                fact.detail != candidate.detail,
+                                fact.structured_value != candidate.structured_value,
+                                fact.source_excerpt != candidate.source_excerpt,
+                            )
+                        )
+                    else:
+                        enriched = _merge_missing_structured_value(
+                            fact.structured_value,
+                            candidate.structured_value,
+                        )
+                        if isinstance(enriched, dict) and "title" in enriched:
+                            enriched["title"] = fact.label
+                        reviewed_fact_changed = enriched != fact.structured_value
+                    if reviewed_fact_changed:
+                        if fact.original_extraction is None:
+                            fact.original_extraction = {
+                                "category": fact.category.value,
+                                "label": fact.label,
+                                "detail": fact.detail,
+                                "structured_value": fact.structured_value,
+                                "source_excerpt": fact.source_excerpt,
+                                "source_id": str(fact.source_id),
+                            }
+                        if fact.user_corrected_at is None:
+                            fact.label = candidate.label
+                            fact.detail = candidate.detail
+                            fact.structured_value = candidate.structured_value
+                            fact.source_excerpt = candidate.source_excerpt
+                        else:
+                            fact.structured_value = enriched
+                        fact.verification_status = VerificationStatus.EXTRACTED
+                        fact.confirmed_at = None
+                        fact.extraction_confidence = candidate.confidence
+                        await _invalidate_fact_documents(session, fact.id)
+                        changed_facts.append(fact)
+                    continue
+                if fact.verification_status is VerificationStatus.UNCONFIRMED:
                     continue
                 fact.label = candidate.label
                 fact.detail = candidate.detail

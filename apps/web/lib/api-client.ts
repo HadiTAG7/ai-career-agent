@@ -987,7 +987,9 @@ export async function sendResumeWorkspaceMessage(
       expected_revision: input.expectedRevision,
       quick_action: input.quickAction || null,
     }),
-    timeoutMs: 30_000,
+    // One turn can include both Mistral understanding and a full grounded draft. Production
+    // runs regularly exceed 30 seconds, while the server may still finish and persist the draft.
+    timeoutMs: 120_000,
   });
 }
 
@@ -1001,7 +1003,7 @@ export async function confirmResumeUnderstanding(
     {
       method: "POST",
       body: JSON.stringify({ expected_revision: expectedRevision }),
-      timeoutMs: 60_000,
+      timeoutMs: 120_000,
     },
   );
 }
@@ -1019,7 +1021,7 @@ export async function correctResumeUnderstanding(
         expected_revision: input.expectedRevision,
         corrected_text: input.correctedText.trim(),
       }),
-      timeoutMs: 90_000,
+      timeoutMs: 120_000,
     },
   );
 }

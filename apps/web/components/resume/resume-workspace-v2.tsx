@@ -100,6 +100,57 @@ const coverageCopy: Record<string, { ar: string; en: string }> = {
   achievement: { ar: "الإنجازات", en: "Achievements" },
 };
 
+const structuredReviewLabels: Record<string, { ar: string; en: string }> = {
+  degree: { ar: "الدرجة العلمية", en: "Degree" },
+  institution: { ar: "الجامعة أو الجهة التعليمية", en: "Institution" },
+  organization: { ar: "الجهة", en: "Organization" },
+  issuer: { ar: "الجهة المانحة", en: "Issuer" },
+  date_range: { ar: "الفترة", en: "Date range" },
+  location: { ar: "الموقع", en: "Location" },
+  proficiency: { ar: "المستوى", en: "Proficiency" },
+  level: { ar: "المستوى", en: "Level" },
+  gpa_score: { ar: "المعدل", en: "GPA" },
+  gpa_scale: { ar: "مقياس المعدل", en: "GPA scale" },
+  responsibilities: { ar: "المسؤوليات والإنجازات", en: "Responsibilities and achievements" },
+  outcomes: { ar: "النتائج", en: "Outcomes" },
+  tools: { ar: "الأدوات", en: "Tools" },
+  coursework: { ar: "المقررات ذات الصلة", en: "Relevant coursework" },
+};
+
+const hiddenStructuredReviewKeys = new Set([
+  "record_type",
+  "record_version",
+  "schema_version",
+  "source_handles",
+  "source_section",
+  "title",
+  "profile_field",
+  "gpa_display_recommended",
+]);
+
+function structuredReviewRows(fact: ApiCareerFact, locale: "ar" | "en") {
+  return Object.entries(fact.structured_value ?? {}).flatMap(([key, value]) => {
+    if (hiddenStructuredReviewKeys.has(key) || value == null) return [];
+    const rawValues = Array.isArray(value) ? value : [value];
+    const values = rawValues.flatMap((item) => {
+      if (typeof item === "string") return item.trim() ? [item.trim()] : [];
+      if (typeof item === "number") return [String(item)];
+      if (typeof item === "boolean") {
+        return [item ? (locale === "ar" ? "نعم" : "Yes") : (locale === "ar" ? "لا" : "No")];
+      }
+      if (typeof item === "object" && item) return [JSON.stringify(item)];
+      return [];
+    });
+    if (!values.length) return [];
+    const fallbackLabel = key.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+    return [{
+      key,
+      label: structuredReviewLabels[key]?.[locale] ?? fallbackLabel,
+      values: [...new Set(values)],
+    }];
+  });
+}
+
 const stageCopy = {
   understanding: { ar: "نفهم قصتك", en: "Understand your story" },
   writing: { ar: "نكتب السيرة", en: "Write the resume" },
@@ -679,11 +730,28 @@ function ExtractedFactsReview({
         {facts.map((fact) => {
           const category = coverageCopy[fact.category]?.[locale] ?? fact.category;
           const confirming = confirmingFactId === fact.id;
+          const structuredRows = structuredReviewRows(fact, locale);
           return (
             <article className="border-t border-border py-3 first:border-t-0" key={fact.id}>
               <span className="text-[10px] font-bold uppercase tracking-wide text-primary-text">{category}</span>
               <h4 className="mt-1 text-sm font-bold text-foreground">{fact.label}</h4>
               {fact.detail ? <p className="mt-1 whitespace-pre-wrap text-xs leading-6 text-muted">{fact.detail}</p> : null}
+              {structuredRows.length ? (
+                <dl className="mt-3 space-y-2 border-s border-primary/40 ps-3 text-xs">
+                  {structuredRows.map((row) => (
+                    <div key={row.key}>
+                      <dt className="font-bold text-foreground">{row.label}</dt>
+                      <dd className="mt-1 text-muted">
+                        {row.values.length === 1 ? row.values[0] : (
+                          <ul className="list-disc space-y-1 ps-5">
+                            {row.values.map((value) => <li key={value}>{value}</li>)}
+                          </ul>
+                        )}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : null}
               {fact.source_excerpt ? (
                 <p className="mt-2 border-s border-border ps-2 text-[11px] leading-5 text-muted">
                   {locale === "ar" ? "من الملف: " : "From the file: "}{fact.source_excerpt}

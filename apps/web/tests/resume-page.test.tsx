@@ -139,6 +139,14 @@ const extractedFact: ApiCareerFact = {
   ...fact,
   id: "fact-imported-1",
   source_id: "source-imported-1",
+  structured_value: {
+    organization: "Data Company",
+    date_range: "2023 - Present",
+    responsibilities: [
+      "Reduced monthly reporting time by 35% through SQL automation.",
+      "Built Power BI dashboards tracking 12 regional sites.",
+    ],
+  },
   verification_status: "extracted",
   label: "لوحات Power BI",
   detail: "بنيت لوحات Power BI لمتابعة مؤشرات الأداء.",
@@ -725,6 +733,8 @@ describe("resume workspace v2", () => {
     expect(await screen.findByText("تم استخراج معلومات من resume.pdf")).toBeVisible();
     const review = screen.getByRole("heading", { name: "راجع المعلومات المستخرجة" }).closest("section");
     expect(review).not.toBeNull();
+    expect(within(review!).getByText("Reduced monthly reporting time by 35% through SQL automation.")).toBeVisible();
+    expect(within(review!).getByText("Built Power BI dashboards tracking 12 regional sites.")).toBeVisible();
     expect(within(review!).getByText("لوحات Power BI")).toBeVisible();
     expect(within(review!).queryByText("معلومة من استيراد أقدم")).not.toBeInTheDocument();
     expect(apiMocks.confirmCareerFact).not.toHaveBeenCalled();

@@ -127,6 +127,28 @@ def test_clerk_token_requires_azp_when_allowlist_is_configured(
     assert exc_info.value.status_code == 401
 
 
+def test_clerk_jwks_connection_failure_is_not_reported_as_an_expired_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableJwkClient:
+        def get_signing_key_from_jwt(self, _token: str) -> object:
+            raise auth.PyJWKClientConnectionError("JWKS temporarily unavailable")
+
+    monkeypatch.setattr(auth, "_jwk_client", lambda _url: UnavailableJwkClient())
+    settings = Settings(
+        _env_file=None,
+        ai_provider="deterministic",
+        clerk_jwks_url="https://clerk.example/.well-known/jwks.json",
+        clerk_issuer="https://clerk.example",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        auth._validate_clerk_token("token", settings)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Authentication keys are temporarily unavailable"
+
+
 def _external_provider_production_settings(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
         "_env_file": None,

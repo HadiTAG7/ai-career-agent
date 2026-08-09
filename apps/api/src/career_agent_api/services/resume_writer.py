@@ -3644,10 +3644,17 @@ class MistralResumeWriterProvider(_StructuredResumeWriterProvider):
     ) -> BaseModel:
         response = None
         started_at = perf_counter()
+        # Draft validation may retry once. Keep each provider call bounded so both attempts
+        # finish before the web client's 120-second request deadline.
         client = self._get_client()
         if schema_name == "adaptive_resume_interview_turn":
             client = client.with_options(
                 timeout=min(self._timeout_seconds, 15.0),
+                max_retries=0,
+            )
+        else:
+            client = client.with_options(
+                timeout=min(self._timeout_seconds, 45.0),
                 max_retries=0,
             )
         try:
@@ -3749,6 +3756,11 @@ class OpenAIResumeWriterProvider(_StructuredResumeWriterProvider):
         if schema_name == "adaptive_resume_interview_turn":
             client = client.with_options(
                 timeout=min(self._timeout_seconds, 15.0),
+                max_retries=0,
+            )
+        else:
+            client = client.with_options(
+                timeout=min(self._timeout_seconds, 45.0),
                 max_retries=0,
             )
         try:

@@ -7,7 +7,7 @@ import jwt
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
-from jwt.exceptions import PyJWKClientError
+from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 from career_agent_api.core.config import Settings, get_settings
 
@@ -40,6 +40,11 @@ def _validate_clerk_token(token: str, settings: Settings) -> str:
             issuer=settings.clerk_issuer,
             options=options,
         )
+    except PyJWKClientConnectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication keys are temporarily unavailable",
+        ) from exc
     except (jwt.PyJWTError, PyJWKClientError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

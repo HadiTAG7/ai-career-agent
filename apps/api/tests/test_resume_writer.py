@@ -2145,7 +2145,10 @@ async def test_mistral_provider_reuses_client_and_bounds_interactive_failures(
     assert draft.value == "ok"
     assert len(FakeAsyncOpenAI.instances) == 1
     client = FakeAsyncOpenAI.instances[0]
-    assert client.options == [{"timeout": 15.0, "max_retries": 0}]
+    assert client.options == [
+        {"timeout": 15.0, "max_retries": 0},
+        {"timeout": 45.0, "max_retries": 0},
+    ]
     assert len(client.completions.calls) == 2
 
     client.completions.delay = 0.05
