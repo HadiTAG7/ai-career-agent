@@ -1,6 +1,6 @@
 import io
 import zipfile
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -8,7 +8,7 @@ from conftest import create_profile_and_source
 from fastapi import HTTPException
 
 import career_agent_api.api.router as router_module
-from career_agent_api.models.domain import EvidenceSource
+from career_agent_api.models.domain import CareerFact, EvidenceSource
 from career_agent_api.models.enums import FactCategory
 from career_agent_api.services import imports
 from career_agent_api.services.imports import FactCandidate, _facts_from_cv_text
@@ -109,6 +109,43 @@ class ThinExperienceUpgradeProvider(UpgradeResumeProvider):
                 confidence=0.93,
             ),
         ]
+
+
+def test_resume_upgrade_prefers_current_label_over_an_original_label_match() -> None:
+    profile_id = uuid4()
+    source_id = uuid4()
+    shared_excerpt = "Skills: SQL"
+    corrected = CareerFact(
+        id=uuid4(),
+        profile_id=profile_id,
+        source_id=source_id,
+        category=FactCategory.SKILL,
+        label="Advanced SQL",
+        structured_value={},
+        source_excerpt=shared_excerpt,
+        original_extraction={"label": "SQL"},
+    )
+    current = CareerFact(
+        id=uuid4(),
+        profile_id=profile_id,
+        source_id=source_id,
+        category=FactCategory.SKILL,
+        label="SQL",
+        structured_value={},
+        source_excerpt=shared_excerpt,
+    )
+    candidate = FactCandidate(
+        category=FactCategory.SKILL,
+        label="SQL",
+        detail=None,
+        structured_value={},
+        source_excerpt=shared_excerpt,
+        confidence=0.9,
+    )
+
+    matched = router_module._matching_source_fact(candidate, [corrected, current], set())
+
+    assert matched is current
 
 
 def minimal_docx(text: str = "Skills: Python and SQL\nBachelor of Computer Science") -> bytes:

@@ -228,9 +228,7 @@ def _matching_source_fact(
     ]
     candidate_label = _normalized_resume_fact_match(candidate.label)
 
-    def label_matches(fact: CareerFact) -> bool:
-        if _normalized_resume_fact_match(fact.label) == candidate_label:
-            return True
+    def original_label_matches(fact: CareerFact) -> bool:
         original = fact.original_extraction
         return bool(
             isinstance(original, dict)
@@ -238,18 +236,20 @@ def _matching_source_fact(
         )
 
     for fact in excerpt_matches:
-        if label_matches(fact):
+        if _normalized_resume_fact_match(fact.label) == candidate_label:
             return fact
+    original_excerpt_matches = [fact for fact in excerpt_matches if original_label_matches(fact)]
+    if len(original_excerpt_matches) == 1:
+        return original_excerpt_matches[0]
     if len(excerpt_matches) == 1:
         return excerpt_matches[0]
-    return next(
-        (
-            fact
-            for fact in category_matches
-            if candidate_label and label_matches(fact)
-        ),
-        None,
-    )
+    for fact in category_matches:
+        if candidate_label and _normalized_resume_fact_match(fact.label) == candidate_label:
+            return fact
+    original_category_matches = [
+        fact for fact in category_matches if candidate_label and original_label_matches(fact)
+    ]
+    return original_category_matches[0] if len(original_category_matches) == 1 else None
 
 
 def _merge_missing_structured_value(existing: Any, candidate: Any) -> Any:
