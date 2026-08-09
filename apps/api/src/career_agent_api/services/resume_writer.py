@@ -2383,6 +2383,76 @@ def _evidence_item_fields(
     )
 
 
+_EXACT_ITEM_DEDUP_SECTION_KEYS = frozenset({"skill", "certification", "language"})
+
+
+def _merge_compatible_duplicate_items(
+    items: list[ResumeDraftItem],
+) -> list[ResumeDraftItem]:
+    """Merge exact repeatable facts while keeping distinct jobs and conflicting records apart."""
+
+    merged: list[ResumeDraftItem] = []
+    indexes: dict[str, list[int]] = {}
+
+    def information_score(item: ResumeDraftItem) -> tuple[int, int]:
+        metadata = sum(
+            value not in (None, "")
+            for value in (item.organization, item.date_range, item.location)
+        )
+        return (metadata + len(item.bullets), sum(len(value) for value in item.bullets))
+
+    def compatible(left: ResumeDraftItem, right: ResumeDraftItem) -> bool:
+        return all(
+            not left_value
+            or not right_value
+            or _presentation_key(left_value) == _presentation_key(right_value)
+            for left_value, right_value in (
+                (left.organization, right.organization),
+                (left.date_range, right.date_range),
+                (left.location, right.location),
+            )
+        )
+
+    for item in items:
+        item_key = " ".join(unicodedata.normalize("NFKC", item.title).casefold().split())
+        existing_index = next(
+            (
+                index
+                for index in indexes.get(item_key, [])
+                if compatible(merged[index], item)
+            ),
+            None,
+        )
+        if existing_index is None or not item_key:
+            merged.append(item)
+            indexes.setdefault(item_key, []).append(len(merged) - 1)
+            continue
+        existing = merged[existing_index]
+        combined_bullets = list(dict.fromkeys([*existing.bullets, *item.bullets]))
+        combined_handles = list(
+            dict.fromkeys([*existing.evidence_handles, *item.evidence_handles])
+        )
+        if len(combined_bullets) > 20 or len(combined_handles) > 12:
+            merged.append(item)
+            indexes.setdefault(item_key, []).append(len(merged) - 1)
+            continue
+        primary, secondary = (
+            (item, existing)
+            if information_score(item) > information_score(existing)
+            else (existing, item)
+        )
+        merged[existing_index] = primary.model_copy(
+            update={
+                "organization": primary.organization or secondary.organization,
+                "date_range": primary.date_range or secondary.date_range,
+                "location": primary.location or secondary.location,
+                "bullets": combined_bullets,
+                "evidence_handles": combined_handles,
+            }
+        )
+    return merged
+
+
 def _complete_draft_from_evidence(
     draft: ResumeDraftContent,
     evidence: tuple[ResumeEvidence, ...],
@@ -2534,15 +2604,20 @@ def _complete_draft_from_evidence(
             default=len(evidence_position),
         )
 
-    sections = [
-        ResumeDraftSection(
-            key=key,
-            title=_CANONICAL_DRAFT_SECTION_TITLES[key][language],
-            items=sorted(buckets[key], key=item_position),
+    sections: list[ResumeDraftSection] = []
+    for key in RESUME_DRAFT_SECTION_ORDER:
+        if not buckets[key]:
+            continue
+        items = sorted(buckets[key], key=item_position)
+        if key in _EXACT_ITEM_DEDUP_SECTION_KEYS:
+            items = _merge_compatible_duplicate_items(items)
+        sections.append(
+            ResumeDraftSection(
+                key=key,
+                title=_CANONICAL_DRAFT_SECTION_TITLES[key][language],
+                items=items,
+            )
         )
-        for key in RESUME_DRAFT_SECTION_ORDER
-        if buckets[key]
-    ]
     professional_summary, summary_evidence_handles = _complete_professional_summary(
         draft,
         evidence,

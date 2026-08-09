@@ -544,6 +544,349 @@ async def test_education_and_skills_only_keep_grounded_provider_summary() -> Non
     assert draft.summary_evidence_handles == ["skill_fact"]
 
 
+@pytest.mark.asyncio
+async def test_completion_merges_exact_compact_fact_duplicates_and_keeps_richer_language() -> None:
+    supports = (
+        ResumeEvidence(
+            handle="english_plain",
+            category="language",
+            label="English",
+            detail=None,
+            verification_status="confirmed",
+        ),
+        ResumeEvidence(
+            handle="english_fluent",
+            category="language",
+            label="English",
+            detail="Fluent",
+            verification_status="confirmed",
+            structured_value={"proficiency": "Fluent"},
+        ),
+        ResumeEvidence(
+            handle="arabic_native",
+            category="language",
+            label="Arabic",
+            detail="Native",
+            verification_status="confirmed",
+            structured_value={"proficiency": "Native"},
+        ),
+        ResumeEvidence(
+            handle="skill_primary",
+            category="skill",
+            label="Financial Modeling",
+            detail="Financial modeling supports practical scenario analysis",
+            verification_status="confirmed",
+        ),
+        ResumeEvidence(
+            handle="skill_duplicate",
+            category="skill",
+            label="Financial Modeling",
+            detail="Financial modeling supports practical scenario analysis",
+            verification_status="confirmed",
+        ),
+        ResumeEvidence(
+            handle="cert_primary",
+            category="certification",
+            label="CME-1 Certification",
+            detail="CME-1 Certification",
+            verification_status="confirmed",
+        ),
+        ResumeEvidence(
+            handle="cert_duplicate",
+            category="certification",
+            label="CME-1 Certification",
+            detail="CME-1 Certification",
+            verification_status="confirmed",
+        ),
+    )
+    provider = CapturingResumeWriter(
+        {
+            "headline": "Financial Modeling",
+            "professional_summary": (
+                "Financial modeling supports practical scenario analysis."
+            ),
+            "summary_evidence_handles": ["skill_primary"],
+            "sections": [
+                {
+                    "key": "certification",
+                    "title": "Certifications",
+                    "items": [
+                        {
+                            "id": "cme_1_primary",
+                            "title": "CME-1 Certification",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["cert_primary"],
+                        },
+                        {
+                            "id": "cme_1_duplicate",
+                            "title": "CME-1 Certification",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["cert_duplicate"],
+                        },
+                    ],
+                },
+                {
+                    "key": "skill",
+                    "title": "Skills",
+                    "items": [
+                        {
+                            "id": "financial_modeling_primary",
+                            "title": "Financial Modeling",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["skill_primary"],
+                        },
+                        {
+                            "id": "financial_modeling_duplicate",
+                            "title": "Financial Modeling",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["skill_duplicate"],
+                        },
+                    ],
+                },
+                {
+                    "key": "language",
+                    "title": "Languages",
+                    "items": [
+                        {
+                            "id": "english_plain",
+                            "title": "English",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["english_plain"],
+                        },
+                        {
+                            "id": "english_fluent",
+                            "title": "English",
+                            "organization": "Fluent",
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["english_fluent"],
+                        },
+                        {
+                            "id": "arabic_native",
+                            "title": "Arabic",
+                            "organization": "Native",
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["arabic_native"],
+                        },
+                    ],
+                },
+            ],
+        }
+    )
+
+    draft = await provider.generate_draft(
+        language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=supports,
+        answers=[],
+    )
+    sections = {section.key: section for section in draft.sections}
+
+    assert [
+        (item.title, item.organization) for item in sections["language"].items
+    ] == [("English", "Fluent"), ("Arabic", "Native")]
+    assert set(sections["language"].items[0].evidence_handles) == {
+        "english_plain",
+        "english_fluent",
+    }
+    assert sections["language"].items[1].evidence_handles == ["arabic_native"]
+    assert [item.title for item in sections["skill"].items] == ["Financial Modeling"]
+    assert set(sections["skill"].items[0].evidence_handles) == {
+        "skill_primary",
+        "skill_duplicate",
+    }
+    assert [item.title for item in sections["certification"].items] == [
+        "CME-1 Certification"
+    ]
+    assert set(sections["certification"].items[0].evidence_handles) == {
+        "cert_primary",
+        "cert_duplicate",
+    }
+
+
+def test_compact_duplicate_merge_refuses_to_truncate_thirteen_handles() -> None:
+    handles = [f"skill_fact_{index}" for index in range(13)]
+    items = [
+        resume_writer_module.ResumeDraftItem(
+            id="financial_modeling_a",
+            title="Financial Modeling",
+            evidence_handles=handles[:7],
+        ),
+        resume_writer_module.ResumeDraftItem(
+            id="financial_modeling_b",
+            title="Financial Modeling",
+            evidence_handles=handles[7:],
+        ),
+    ]
+
+    completed = resume_writer_module._merge_compatible_duplicate_items(items)
+
+    assert len(completed) == 2
+    assert [handle for item in completed for handle in item.evidence_handles] == handles
+
+
+def test_compact_duplicate_merge_refuses_to_truncate_twenty_one_bullets() -> None:
+    claims = [f"Grounded language claim {index:02d}" for index in range(21)]
+    items = [
+        resume_writer_module.ResumeDraftItem(
+            id="english_a",
+            title="English",
+            organization="Fluent",
+            bullets=claims[:11],
+            evidence_handles=["english_fact_a"],
+        ),
+        resume_writer_module.ResumeDraftItem(
+            id="english_b",
+            title="English",
+            organization="Fluent",
+            bullets=claims[11:],
+            evidence_handles=["english_fact_b"],
+        ),
+    ]
+
+    completed = resume_writer_module._merge_compatible_duplicate_items(items)
+
+    assert len(completed) == 2
+    assert [claim for item in completed for claim in item.bullets] == claims
+
+
+def test_compact_dedupe_preserves_symbolic_skills_and_merges_three_compatible_items() -> None:
+    items = [
+        resume_writer_module.ResumeDraftItem(
+            id="skill_c",
+            title="C",
+            evidence_handles=["c_fact"],
+        ),
+        resume_writer_module.ResumeDraftItem(
+            id="skill_c_sharp",
+            title="C#",
+            evidence_handles=["c_sharp_fact"],
+        ),
+        *[
+            resume_writer_module.ResumeDraftItem(
+                id=f"skill_sql_{index}",
+                title="SQL",
+                evidence_handles=[f"sql_fact_{index}"],
+            )
+            for index in range(3)
+        ],
+    ]
+
+    completed = resume_writer_module._merge_compatible_duplicate_items(items)
+
+    assert [item.title for item in completed] == ["C", "C#", "SQL"]
+    assert completed[0].evidence_handles == ["c_fact"]
+    assert completed[1].evidence_handles == ["c_sharp_fact"]
+    assert set(completed[2].evidence_handles) == {
+        "sql_fact_0",
+        "sql_fact_1",
+        "sql_fact_2",
+    }
+
+
+def test_completion_never_merges_same_title_experiences_from_different_roles() -> None:
+    supports = (
+        ResumeEvidence(
+            handle="analyst_northstar",
+            category="experience",
+            label="Finance Analyst",
+            detail="Prepared monthly cost reports",
+            verification_status="confirmed",
+            structured_value={
+                "source_section": "Professional Experience",
+                "organization": "Northstar",
+                "date_range": "2025 - Present",
+                "responsibilities": ["Prepared monthly cost reports"],
+            },
+        ),
+        ResumeEvidence(
+            handle="analyst_meridian",
+            category="experience",
+            label="Finance Analyst",
+            detail="Reconciled treasury accounts",
+            verification_status="confirmed",
+            structured_value={
+                "source_section": "Professional Experience",
+                "organization": "Meridian",
+                "date_range": "2024",
+                "responsibilities": ["Reconciled treasury accounts"],
+            },
+        ),
+    )
+    provider_draft = resume_writer_module.ResumeDraftContent.model_validate(
+        {
+            "headline": "Finance Analyst",
+            "professional_summary": (
+                "Prepared monthly cost reports. Reconciled treasury accounts."
+            ),
+            "summary_evidence_handles": [
+                "analyst_northstar",
+                "analyst_meridian",
+            ],
+            "sections": [
+                {
+                    "key": "experience",
+                    "title": "Professional Experience",
+                    "items": [
+                        {
+                            "id": "finance_analyst_northstar",
+                            "title": "Finance Analyst",
+                            "organization": "Northstar",
+                            "date_range": "2025 - Present",
+                            "location": None,
+                            "bullets": ["Prepared monthly cost reports"],
+                            "evidence_handles": ["analyst_northstar"],
+                        },
+                        {
+                            "id": "finance_analyst_meridian",
+                            "title": "Finance Analyst",
+                            "organization": "Meridian",
+                            "date_range": "2024",
+                            "location": None,
+                            "bullets": ["Reconciled treasury accounts"],
+                            "evidence_handles": ["analyst_meridian"],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        provider_draft,
+        supports,
+        PreferredLanguage.EN,
+    )
+    items = next(
+        section.items for section in completed.sections if section.key == "experience"
+    )
+
+    assert [
+        (item.organization, item.date_range, item.evidence_handles) for item in items
+    ] == [
+        ("Northstar", "2025 - Present", ["analyst_northstar"]),
+        ("Meridian", "2024", ["analyst_meridian"]),
+    ]
+
+
 def test_legacy_trading_role_without_source_section_keeps_its_own_section() -> None:
     support = ResumeEvidence(
         handle="legacy_trading_fact",
