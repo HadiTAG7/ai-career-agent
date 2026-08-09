@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const emptyWorkspace = {
@@ -93,6 +93,69 @@ describe("career path conversation", () => {
     const requestBody = JSON.parse(String(postCall?.[1]?.body));
     expect(requestBody).toMatchObject({ content: "أحب الأرقام والتحليل", expected_revision: 0, data_sharing_acknowledged: true });
     expect(requestBody.client_turn_id).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it("deletes the current path only after an explicit confirmation", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/career-path") && !init?.method) return jsonResponse(responseWorkspace);
+      if (url.endsWith("/v1/career-path/conversation") && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    await renderCareerPathPage();
+
+    const deleteTrigger = await screen.findByRole("button", { name: "حذف مساري" });
+    expect(screen.getByRole("heading", { name: "محلل أعمال" })).toBeVisible();
+    await user.click(deleteTrigger);
+
+    const dialog = screen.getByRole("alertdialog", { name: "حذف مسارك الحالي والبدء من جديد؟" });
+    expect(within(dialog).getByText(/ستبقى سيرتك الذاتية وحقائق ملفك المهني/)).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "إلغاء" })).toHaveFocus();
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(fetchMock.mock.calls.some((call) => call[1]?.method === "DELETE")).toBe(false);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(deleteTrigger).toHaveFocus();
+
+    await user.click(deleteTrigger);
+    await user.click(screen.getByRole("button", { name: "احذف المسار" }));
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "DELETE")).toHaveLength(1);
+    });
+    expect(screen.queryByRole("heading", { name: "محلل أعمال" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "حذف مساري" })).not.toBeInTheDocument();
+    expect(screen.getByText("خلّنا نبدأ بما يهمك في يوم العمل.")).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: /موافقة مشاركة البيانات/ })).toBeVisible();
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]).endsWith("/v1/career-path"))).toHaveLength(1);
+  });
+
+  it("keeps the path and confirmation open when deletion fails", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/career-path") && !init?.method) return jsonResponse(responseWorkspace);
+      if (url.endsWith("/v1/career-path/conversation") && init?.method === "DELETE") {
+        return jsonResponse({ detail: "Delete failed" }, 500);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    const user = userEvent.setup();
+    await renderCareerPathPage();
+
+    await user.click(await screen.findByRole("button", { name: "حذف مساري" }));
+    await user.click(screen.getByRole("button", { name: "احذف المسار" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "حذف مسارك الحالي والبدء من جديد؟" });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Delete failed");
+    expect(within(dialog).getByRole("button", { name: "احذف المسار" })).toBeEnabled();
+    expect(screen.getByText("محلل أعمال")).toBeInTheDocument();
   });
 
   it("shows an explicit provider-disabled state without a composer or fake suggestions", async () => {

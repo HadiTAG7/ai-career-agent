@@ -568,6 +568,76 @@ describe("resume workspace v2", () => {
     await waitFor(() => expect(apiMocks.confirmResumeUnderstanding).toHaveBeenCalledWith(profile.id, "understanding-1", 1));
   });
 
+  it("shows a sent answer immediately while the AI request is still running", async () => {
+    const user = userEvent.setup();
+    const answer = "حللت المبيعات الأسبوعية باستخدام Power BI.";
+    let resolveMessage!: (workspace: ApiResumeWorkspace) => void;
+    const request = new Promise<ApiResumeWorkspace>((resolve) => {
+      resolveMessage = resolve;
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.sendResumeWorkspaceMessage.mockReturnValue(request);
+    await renderResumePage();
+
+    const input = await screen.findByLabelText("اكتب رسالتك");
+    await user.type(input, answer);
+    await user.click(screen.getByRole("button", { name: "إرسال الرسالة" }));
+
+    expect(input).toHaveValue("");
+    expect(screen.getByText(answer)).toBeVisible();
+    expect(screen.getByText(/تم إرسال إجابتك/)).toBeVisible();
+
+    await act(async () => {
+      resolveMessage(makeWorkspace({
+        revision: 1,
+        messages: [
+          assistantQuestion,
+          {
+            id: "message-optimistic-confirmed",
+            sequence: 2,
+            role: "user",
+            kind: "text",
+            content: answer,
+            structured_payload: {},
+            status: "sent",
+            client_turn_id: "confirmed-turn",
+            created_at: "2026-08-08T10:01:00Z",
+          },
+        ],
+      }));
+      await request;
+    });
+
+    await waitFor(() => expect(screen.queryByText(/تم إرسال إجابتك/)).not.toBeInTheDocument());
+    expect(screen.getAllByText(answer)).toHaveLength(1);
+  });
+
+  it("restores a typed answer when the AI request fails", async () => {
+    const user = userEvent.setup();
+    const answer = "أنشأت تقريرًا ماليًا أسبوعيًا.";
+    let rejectMessage!: (error: Error) => void;
+    const request = new Promise<ApiResumeWorkspace>((_resolve, reject) => {
+      rejectMessage = reject;
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.sendResumeWorkspaceMessage.mockReturnValue(request);
+    await renderResumePage();
+
+    const input = await screen.findByLabelText("اكتب رسالتك");
+    await user.type(input, answer);
+    await user.click(screen.getByRole("button", { name: "إرسال الرسالة" }));
+    expect(input).toHaveValue("");
+
+    await act(async () => {
+      rejectMessage(new Error("provider unavailable"));
+      await request.catch(() => undefined);
+    });
+
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(input).toHaveValue(answer);
+    expect(screen.getAllByText(answer)).toHaveLength(1);
+  });
+
   it("offers full AI generation without exposing provider internals or failed turns", async () => {
     const user = userEvent.setup();
     apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({

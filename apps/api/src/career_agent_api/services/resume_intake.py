@@ -21,6 +21,7 @@ from career_agent_api.services.imports import (
 MISTRAL_API_BASE_URL = "https://api.mistral.ai/v1"
 MAX_RESUME_SEGMENTS = 400
 MAX_RESUME_TEXT_CHARS = 60_000
+MAX_RESUME_SEGMENT_CHARS = 4_000
 RESUME_MAX_OUTPUT_TOKENS = 2_500
 
 _EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
@@ -184,6 +185,14 @@ Security and evidence rules:
     fact. Never emit a sentence that ends in a dangling conjunction or is visibly truncated.
 16. Keep a complete entry together: use label for its stable title/name and detail for the explicit
     organization, dates, responsibilities, tools, outcomes, GPA, honors, issuer, or proficiency.
+17. A source segment may contain a whole section with multiple lines. Read the lines together:
+    - experience label = role/title, never a year, date range, employer, or section heading;
+    - education label = degree/qualification and field when stated, never the institution alone;
+    - skill label = one specific skill, never a grouping heading such as Financial Skills;
+    - detail = the remaining explicit organization, institution, dates, location, responsibilities,
+      outcomes, tools, GPA, honors, issuer, or proficiency from that same segment.
+18. If a section has only a heading, a date, a grouping label, or an institution without an explicit
+    qualification, omit it. Do not manufacture the missing role, skill, degree, or field.
 """.strip()
 
 
@@ -484,12 +493,37 @@ _RESUME_SECTION_HEADINGS: dict[str, FactCategory] = {
     "الخبرة العملية": FactCategory.EXPERIENCE,
     "projects": FactCategory.PROJECT,
     "project experience": FactCategory.PROJECT,
+    "volunteering": FactCategory.PROJECT,
+    "volunteer experience": FactCategory.PROJECT,
+    "voluntary experience": FactCategory.PROJECT,
+    "volunteer work": FactCategory.PROJECT,
     "المشاريع": FactCategory.PROJECT,
+    "التطوع": FactCategory.PROJECT,
+    "الخبرة التطوعية": FactCategory.PROJECT,
+    "العمل التطوعي": FactCategory.PROJECT,
     "المشاريع والتطوع": FactCategory.PROJECT,
     "skills": FactCategory.SKILL,
     "technical skills": FactCategory.SKILL,
+    "financial skills": FactCategory.SKILL,
+    "professional skills": FactCategory.SKILL,
+    "core skills": FactCategory.SKILL,
+    "key skills": FactCategory.SKILL,
+    "soft skills": FactCategory.SKILL,
+    "hard skills": FactCategory.SKILL,
+    "business skills": FactCategory.SKILL,
+    "analytical skills": FactCategory.SKILL,
+    "digital skills": FactCategory.SKILL,
+    "areas of expertise": FactCategory.SKILL,
+    "competencies": FactCategory.SKILL,
+    "core competencies": FactCategory.SKILL,
+    "technical competencies": FactCategory.SKILL,
     "المهارات": FactCategory.SKILL,
     "المهارات التقنية": FactCategory.SKILL,
+    "المهارات المالية": FactCategory.SKILL,
+    "المهارات المهنية": FactCategory.SKILL,
+    "المهارات الشخصية": FactCategory.SKILL,
+    "المهارات الأساسية": FactCategory.SKILL,
+    "الكفاءات": FactCategory.SKILL,
     "certifications": FactCategory.CERTIFICATION,
     "certificates": FactCategory.CERTIFICATION,
     "الشهادات": FactCategory.CERTIFICATION,
@@ -505,7 +539,7 @@ _TRAILING_FRAGMENT_PATTERN = re.compile(
     r"(?:[,;:/|—–-]|\b(?:and|or|with|using|for|to|as|including|و|أو|مع|باستخدام|إلى|على))\s*$",
     re.IGNORECASE,
 )
-_FIELD_SEPARATOR_PATTERN = re.compile(r"\s*[;؛|]\s*")
+_FIELD_SEPARATOR_PATTERN = re.compile(r"\s*(?:[;؛|]|\r?\n)\s*")
 _LIST_SEPARATOR_PATTERN = re.compile(r"\s*(?:,|،|/|\band\b|\bwith\b)\s*", re.IGNORECASE)
 _RESPONSIBILITY_LEAD_PATTERN = re.compile(
     r"^(?:i\s+)?(?:analysis|analy[sz]ed|built|created|delivered|design|designed|"
@@ -520,6 +554,55 @@ _ORGANIZATION_CUE_PATTERN = re.compile(
     r"institute|institution|llc|ltd|ministry|organization|organisation|project|university)\b"
     r"|(?:أكاديمية|الأكاديمية|بنك|جامعة|الجامعة|جمعية|شركة|الشركة|مشروع|المشروع|مستشفى|"
     r"مؤسسة|المؤسسة|وزارة|الوزارة|هيئة|الهيئة)",
+    re.IGNORECASE,
+)
+
+_DATE_YEAR_SOURCE = r"(?:19|20)\d{2}"
+_DATE_MONTH_SOURCE = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?|يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|"
+    r"اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)"
+)
+_DATE_POINT_SOURCE = (
+    rf"(?:{_DATE_YEAR_SOURCE}|{_DATE_MONTH_SOURCE}(?:\s+{_DATE_YEAR_SOURCE})?|"
+    rf"\d{{1,2}}[./-]{_DATE_YEAR_SOURCE}|{_DATE_YEAR_SOURCE}[./-]\d{{1,2}}|"
+    rf"\d{{1,2}}[./-]\d{{1,2}}[./-]{_DATE_YEAR_SOURCE}|"
+    r"present|current|now|ongoing|الآن|حتى الآن|حاليًا|الحالي)"
+)
+_DATE_ONLY_PATTERN = re.compile(
+    rf"^\s*{_DATE_POINT_SOURCE}(?:\s*(?:-|–|—|\?|�|to|until|through|إلى|حتى|/)"
+    rf"\s*{_DATE_POINT_SOURCE})?\s*$",
+    re.IGNORECASE,
+)
+_DATE_POINT_ONLY_PATTERN = re.compile(rf"^\s*{_DATE_POINT_SOURCE}\s*$", re.IGNORECASE)
+_ROLE_TITLE_CUE_PATTERN = re.compile(
+    r"\b(?:accountant|administrator|advisor|adviser|analyst|architect|assistant|associate|"
+    r"auditor|banker|consultant|controller|coordinator|designer|developer|director|engineer|"
+    r"executive|founder|head|intern|lead|manager|officer|operator|owner|planner|president|"
+    r"recruiter|representative|researcher|scientist|specialist|supervisor|technician|trader|"
+    r"trainee)\b"
+    r"|(?:محاسب|مسؤول|محلل|معماري|مساعد|مستشار|منسق|مصمم|مطور|مدير|مهندس|"
+    r"تنفيذي|متدرب|قائد|باحث|أخصائي|مشرف|فني|متداول|مؤسس|رئيس|مدقق|مراجع)",
+    re.IGNORECASE,
+)
+_ROLE_ACTION_LEAD_PATTERN = re.compile(
+    r"^(?:assisted|built|collaborated|conducted|coordinated|created|delivered|designed|"
+    r"developed|implemented|led|maintained|managed|oversaw|performed|prepared|produced|"
+    r"responsible|supported|used|worked|أدرت|أعددت|استخدمت|أنشأت|بنيت|تعاونت|حللت|"
+    r"دعمت|صممت|طورت|قدت|نسقت|نفذت|كنت مسؤول)\b",
+    re.IGNORECASE,
+)
+_DEGREE_CUE_PATTERN = re.compile(
+    r"\b(?:associate(?:'s)?|bachelor(?:'s)?|master(?:'s)?|doctorate|doctoral|"
+    r"ph\.?d\.?|mba|b\.?sc\.?|b\.?s\.?|b\.?a\.?|m\.?sc\.?|m\.?s\.?|m\.?a\.?|"
+    r"degree|diploma|certificate of higher education)\b"
+    r"|(?:بكالوريوس|ماجستير|دكتوراه|دبلوم|درجة علمية|شهادة جامعية)",
+    re.IGNORECASE,
+)
+_EDUCATION_INSTITUTION_CUE_PATTERN = re.compile(
+    r"\b(?:academy|college|institute|school|university)\b"
+    r"|(?:أكاديمية|الأكاديمية|جامعة|الجامعة|كلية|الكلية|معهد|المعهد)",
     re.IGNORECASE,
 )
 
@@ -934,49 +1017,196 @@ def _looks_incomplete(value: str) -> bool:
     return bool(_TRAILING_FRAGMENT_PATTERN.search(clean))
 
 
-def _coalesce_wrapped_resume_lines(lines: list[str]) -> list[str]:
-    """Preserve section context and repair conservative PDF/DOCX line wraps.
+def _looks_like_date_only(value: str) -> bool:
+    normalized = value.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    return bool(_DATE_ONLY_PATTERN.fullmatch(normalized.strip()))
 
-    A heading is never emitted as a professional fact by itself.  It is attached to each following
-    entry until the next recognized heading, making even a one-line entry category-addressable.
-    Only lines with an explicit continuation signal are joined; ambiguous rows remain independent.
+
+def _looks_like_role_title(value: str) -> bool:
+    clean = value.strip(" •*-\t")
+    if (
+        not clean
+        or len(clean) > 140
+        or len(clean.split()) > 12
+        or _looks_like_date_only(clean)
+        or _ROLE_ACTION_LEAD_PATTERN.search(clean)
+        or _looks_like_responsibility(clean)
+        or clean.endswith((".", ";", "؛"))
+    ):
+        return False
+    return bool(_ROLE_TITLE_CUE_PATTERN.search(clean))
+
+
+def _is_low_information_fact(
+    category: FactCategory,
+    label: str,
+    detail: str | None,
+) -> bool:
+    """Reject fragments that cannot stand alone as a reviewable professional fact."""
+
+    if _is_heading_only(label) or _looks_like_date_only(label):
+        return True
+    combined = " ".join(part for part in (label, detail or "") if part).strip()
+    if category == FactCategory.EDUCATION:
+        # A university, major, or year is useful context only after the source states an actual
+        # qualification.  Requiring that cue prevents an institution row from becoming a degree.
+        return not bool(_DEGREE_CUE_PATTERN.search(combined))
+    if category == FactCategory.EXPERIENCE:
+        return _looks_like_responsibility(label)
+    return False
+
+
+def _section_record_blocks(section_heading: str, lines: list[str]) -> list[str]:
+    """Split multi-entry experience/education sections before they reach the provider."""
+
+    category = _heading_category(section_heading)
+    if category == FactCategory.EXPERIENCE:
+        record_indexes = [index for index, line in enumerate(lines) if _looks_like_role_title(line)]
+    elif category == FactCategory.EDUCATION:
+        record_indexes = [
+            index for index, line in enumerate(lines) if _DEGREE_CUE_PATTERN.search(line)
+        ]
+    else:
+        record_indexes = []
+
+    if len(record_indexes) <= 1:
+        return [f"{section_heading}:\n" + "\n".join(lines)]
+
+    starts = [0]
+    for index in record_indexes[1:]:
+        date_start = index
+        while date_start > starts[-1] and _looks_like_date_only(lines[date_start - 1]):
+            date_start -= 1
+
+        start = index
+        if date_start < index:
+            previous_has_date = any(
+                _looks_like_date_only(line) for line in lines[starts[-1] : date_start]
+            )
+            date_cluster = lines[date_start:index]
+            normalized_cluster = [
+                value.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")) for value in date_cluster
+            ]
+            trailing_points = 0
+            for value in reversed(normalized_cluster):
+                if not _DATE_POINT_ONLY_PATTERN.fullmatch(value):
+                    break
+                trailing_points += 1
+
+            if previous_has_date:
+                start = date_start
+            elif trailing_points >= 2:
+                # A split ``2025`` / ``Present`` pair belongs to the record that follows it.
+                start = index - trailing_points
+            elif len(date_cluster) >= 2:
+                # Mixed layouts can put the previous record's trailing range immediately before
+                # the next record's leading range.  Only the final complete range moves forward.
+                start = index - 1
+        if start <= starts[-1]:
+            start = index
+        starts.append(start)
+
+    blocks: list[str] = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        record_lines = lines[start:end]
+        if record_lines:
+            blocks.append(f"{section_heading}:\n" + "\n".join(record_lines))
+    return blocks
+
+
+def _coalesce_wrapped_resume_lines(lines: list[str]) -> list[str]:
+    """Keep complete resume sections together and repair conservative line wraps.
+
+    PDF extraction commonly separates a role, employer, dates, and bullets into adjacent lines.
+    Sending each line as an independent evidence handle prevents the model from reconstructing the
+    record and can turn the first row after a heading into a fake fact.  A section block gives the
+    provider the surrounding evidence while preserving the source line boundaries.
     """
 
     grouped: list[str] = []
     section_heading: str | None = None
+    section_lines: list[str] = []
     pending: str | None = None
+
+    def append_candidate(candidate: str) -> None:
+        if section_heading is not None:
+            section_lines.append(candidate)
+        else:
+            grouped.append(candidate)
+
+    def flush_pending() -> None:
+        nonlocal pending
+        if pending:
+            append_candidate(pending)
+            pending = None
+
+    def flush_section() -> None:
+        nonlocal section_heading, section_lines
+        if section_heading and section_lines:
+            grouped.extend(_section_record_blocks(section_heading, section_lines))
+        section_heading = None
+        section_lines = []
+
     for line in lines:
+        inline_section: tuple[str, str] | None = None
+        for separator in (":", "："):
+            if separator not in line:
+                continue
+            possible_heading, first_value = line.split(separator, 1)
+            if _heading_category(possible_heading) is not None:
+                inline_section = (
+                    possible_heading.strip(" :：—–-"),
+                    first_value.strip(),
+                )
+            break
+        if inline_section is not None:
+            flush_pending()
+            flush_section()
+            section_heading, first_value = inline_section
+            if first_value:
+                if _looks_incomplete(first_value):
+                    pending = first_value
+                else:
+                    section_lines.append(first_value)
+            continue
+
         if _is_heading_only(line):
-            if pending:
-                grouped.append(pending)
-                pending = None
+            flush_pending()
+            flush_section()
             section_heading = line.strip(" :：—–-")
             continue
+
         candidate = line
         if pending is not None:
             candidate = f"{pending} {candidate}".strip()
             pending = None
-        parsed_field = _parse_guided_field(candidate)
         if (
-            parsed_field is not None
-            and parsed_field.answer
-            and _looks_incomplete(parsed_field.answer)
+            section_heading is not None
+            and _heading_category(section_heading) != FactCategory.EDUCATION
+            and _DEGREE_CUE_PATTERN.search(candidate)
         ):
-            pending = candidate
+            # Some compact resumes put ``Skills: ...`` on one row and begin the qualification on
+            # the next row without an Education heading.  Do not absorb that degree into Skills.
+            flush_section()
+            section_heading = "Education"
+            section_lines.append(candidate)
             continue
+        parsed_field = _parse_guided_field(candidate)
         if parsed_field is not None:
-            grouped.append(candidate)
+            flush_section()
+            if parsed_field.answer and _looks_incomplete(parsed_field.answer):
+                pending = candidate
+            else:
+                grouped.append(candidate)
             continue
         if _looks_incomplete(candidate):
             pending = candidate
             continue
-        if section_heading and _parse_guided_field(candidate) is None:
-            candidate = f"{section_heading}: {candidate}"
-        grouped.append(candidate)
-    if pending:
-        if section_heading and _parse_guided_field(pending) is None:
-            pending = f"{section_heading}: {pending}"
-        grouped.append(pending)
+        append_candidate(candidate)
+
+    flush_pending()
+    flush_section()
     return grouped
 
 
@@ -986,6 +1216,14 @@ def _coalesce_guided_lines(lines: list[str]) -> list[str]:
     coalesced: list[str] = []
     pending_heading: str | None = None
     for line in lines:
+        # A resume section heading is document structure, not a guided-builder question. Leave it
+        # intact so the next stage can retain all adjacent record fields in one evidence block.
+        if _is_heading_only(line):
+            if pending_heading is not None:
+                coalesced.append(pending_heading)
+                pending_heading = None
+            coalesced.append(line)
+            continue
         parsed = _parse_guided_field(line)
         if pending_heading is not None:
             if parsed is None:
@@ -1003,6 +1241,87 @@ def _coalesce_guided_lines(lines: list[str]) -> list[str]:
     return coalesced
 
 
+def _bounded_resume_segment_texts(value: str) -> list[str]:
+    """Split provider evidence at line boundaries while retaining its section heading.
+
+    ``source_excerpt`` is capped at the same size.  Keeping every provider segment within that
+    bound guarantees that a stored excerpt still contains the evidence used to accept the fact.
+    """
+
+    clean = value.strip()
+    if not clean:
+        return []
+    if len(clean) <= MAX_RESUME_SEGMENT_CHARS:
+        return [clean]
+
+    lines = clean.splitlines()
+    section_heading = lines[0] if len(lines) > 1 and _heading_category(lines[0]) else None
+    content_lines = lines[1:] if section_heading else lines
+    content_units = content_lines
+    if section_heading and _heading_category(section_heading) == FactCategory.PROJECT:
+        # Keep a project title with the action/date rows that follow it.  Otherwise a chunk edge
+        # can make ``Built ...`` look like the title of a second project.
+        project_units: list[str] = []
+        current_project: list[str] = []
+        for line in content_lines:
+            inline_title = False
+            for separator in (":", "："):
+                if separator not in line:
+                    continue
+                possible_title, inline_detail = line.split(separator, 1)
+                inline_title = bool(
+                    inline_detail.strip()
+                    and not _looks_like_structured_detail(line)
+                    and not _looks_like_date_only(possible_title)
+                    and not _looks_like_responsibility(possible_title)
+                )
+                break
+            is_detail = not inline_title and (
+                _looks_like_date_only(line)
+                or _looks_like_responsibility(line)
+                or _looks_like_structured_detail(line)
+            )
+            if current_project and not is_detail:
+                project_units.append("\n".join(current_project))
+                current_project = []
+            current_project.append(line)
+        if current_project:
+            project_units.append("\n".join(current_project))
+        content_units = project_units
+    heading_prefix = f"{section_heading}\n" if section_heading else ""
+    content_limit = MAX_RESUME_SEGMENT_CHARS - len(heading_prefix)
+    if content_limit <= 0:
+        return [
+            clean[index : index + MAX_RESUME_SEGMENT_CHARS]
+            for index in range(0, len(clean), MAX_RESUME_SEGMENT_CHARS)
+        ]
+
+    chunks: list[str] = []
+    current = ""
+    for line in content_units:
+        remaining = line
+        while remaining:
+            separator = "\n" if current else ""
+            available = content_limit - len(current) - len(separator)
+            if available <= 0:
+                chunks.append(f"{heading_prefix}{current}")
+                current = ""
+                continue
+            if len(remaining) <= available:
+                current = f"{current}{separator}{remaining}"
+                remaining = ""
+                continue
+            if current:
+                chunks.append(f"{heading_prefix}{current}")
+                current = ""
+                continue
+            chunks.append(f"{heading_prefix}{remaining[:content_limit]}")
+            remaining = remaining[content_limit:]
+    if current:
+        chunks.append(f"{heading_prefix}{current}")
+    return [chunk for chunk in chunks if chunk and chunk != section_heading]
+
+
 def build_resume_segments(text: str) -> tuple[ResumeSegment, ...]:
     """Build bounded evidence segments after removing names, references, addresses and contacts."""
 
@@ -1010,16 +1329,19 @@ def build_resume_segments(text: str) -> tuple[ResumeSegment, ...]:
     segments: list[ResumeSegment] = []
     accepted_chars = 0
     coalesced = _coalesce_guided_lines(clean_lines)
-    for clean_line in _coalesce_wrapped_resume_lines(coalesced):
-        remaining_chars = MAX_RESUME_TEXT_CHARS - accepted_chars
-        if remaining_chars <= 0:
-            break
-        clean_line = clean_line[:remaining_chars].rstrip()
-        if not clean_line:
-            break
-        segments.append(ResumeSegment(handle=f"segment_{len(segments) + 1}", text=clean_line))
-        accepted_chars += len(clean_line)
-        if len(segments) >= MAX_RESUME_SEGMENTS:
+    for grouped_text in _coalesce_wrapped_resume_lines(coalesced):
+        for clean_line in _bounded_resume_segment_texts(grouped_text):
+            remaining_chars = MAX_RESUME_TEXT_CHARS - accepted_chars
+            if remaining_chars <= 0:
+                break
+            clean_line = clean_line[:remaining_chars].rstrip()
+            if not clean_line:
+                break
+            segments.append(ResumeSegment(handle=f"segment_{len(segments) + 1}", text=clean_line))
+            accepted_chars += len(clean_line)
+            if len(segments) >= MAX_RESUME_SEGMENTS:
+                break
+        if accepted_chars >= MAX_RESUME_TEXT_CHARS or len(segments) >= MAX_RESUME_SEGMENTS:
             break
     return tuple(segments)
 
@@ -1036,22 +1358,34 @@ def _sanitized_segments(
     sanitized: list[ResumeSegment] = []
     accepted_chars = 0
     seen_handles: set[str] = set()
+    seen_input_handles: set[str] = set()
     for (handle, _), safe_lines in zip(candidates, safe_groups, strict=True):
-        if not handle or handle in seen_handles:
+        if not handle or handle in seen_input_handles:
             continue
+        seen_input_handles.add(handle)
         text = "\n".join(safe_lines).strip()
         if not text:
             continue
-        remaining_chars = MAX_RESUME_TEXT_CHARS - accepted_chars
-        if remaining_chars <= 0:
-            break
-        text = text[:remaining_chars].rstrip()
-        if not text:
-            break
-        sanitized.append(ResumeSegment(handle=handle, text=text))
-        seen_handles.add(handle)
-        accepted_chars += len(text)
-        if len(sanitized) >= MAX_RESUME_SEGMENTS:
+        for chunk_index, chunk in enumerate(_bounded_resume_segment_texts(text), start=1):
+            remaining_chars = MAX_RESUME_TEXT_CHARS - accepted_chars
+            if remaining_chars <= 0:
+                break
+            chunk = chunk[:remaining_chars].rstrip()
+            if not chunk:
+                break
+            suffix = "" if chunk_index == 1 else f"__{chunk_index}"
+            chunk_handle = f"{handle[: 80 - len(suffix)]}{suffix}"
+            collision_index = chunk_index
+            while chunk_handle in seen_handles:
+                collision_index += 1
+                suffix = f"__{collision_index}"
+                chunk_handle = f"{handle[: 80 - len(suffix)]}{suffix}"
+            sanitized.append(ResumeSegment(handle=chunk_handle, text=chunk))
+            seen_handles.add(chunk_handle)
+            accepted_chars += len(chunk)
+            if len(sanitized) >= MAX_RESUME_SEGMENTS:
+                break
+        if accepted_chars >= MAX_RESUME_TEXT_CHARS or len(sanitized) >= MAX_RESUME_SEGMENTS:
             break
     return tuple(sanitized)
 
@@ -1087,6 +1421,18 @@ def _looks_like_responsibility(value: str) -> bool:
     lowered = clean.casefold()
     return len(clean.split()) >= 4 and any(
         marker in lowered for marker in (" using ", " by ", " عبر ", " باستخدام ")
+    )
+
+
+def _has_explicit_project_title(value: str) -> bool:
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(lines) < 2 or _heading_category(lines[0]) != FactCategory.PROJECT:
+        return False
+    return any(
+        not _looks_like_date_only(line)
+        and not _looks_like_responsibility(line)
+        and not _looks_like_structured_detail(line)
+        for line in lines[1:]
     )
 
 
@@ -1178,7 +1524,9 @@ def _record_from_candidate(
         if not field_name or not field_value:
             unkeyed.append(fragment)
             continue
-        if field_name in {"responsibilities", "outcomes", "tools"}:
+        if field_name in {"responsibilities", "outcomes"}:
+            values[field_name].append(field_value)
+        elif field_name == "tools":
             values[field_name].extend(_split_list_value(field_value))
         elif field_name == "gpa":
             score, scale = _parse_gpa(field_value)
@@ -1187,10 +1535,49 @@ def _record_from_candidate(
         else:
             values[field_name] = field_value
 
+    date_fragments: list[str] = []
+    non_date_fragments: list[str] = []
+    for fragment in unkeyed:
+        if _looks_like_date_only(fragment):
+            date_fragments.append(fragment)
+        else:
+            non_date_fragments.append(fragment)
+    unkeyed = non_date_fragments
+    if "date_range" not in values and date_fragments:
+        normalized_dates = [
+            value.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")) for value in date_fragments
+        ]
+        if len(date_fragments) == 2 and all(
+            _DATE_POINT_ONLY_PATTERN.fullmatch(value) for value in normalized_dates
+        ):
+            values["date_range"] = f"{date_fragments[0]} – {date_fragments[1]}"
+        else:
+            # A complete range remains one fragment.  More than two independent date rows are
+            # ambiguous, so keep the first instead of combining unrelated dates.
+            values["date_range"] = date_fragments[0]
+
     if category == FactCategory.EDUCATION:
-        values.setdefault("degree", label)
-        if unkeyed and "institution" not in values:
-            values["institution"] = unkeyed[0]
+        if _DEGREE_CUE_PATTERN.search(label):
+            values.setdefault("degree", label)
+        elif _EDUCATION_INSTITUTION_CUE_PATTERN.search(label):
+            values.setdefault("institution", label)
+        degree_fragment = next(
+            (fragment for fragment in unkeyed if _DEGREE_CUE_PATTERN.search(fragment)),
+            None,
+        )
+        if degree_fragment and "degree" not in values:
+            values["degree"] = degree_fragment
+            unkeyed.remove(degree_fragment)
+        institution_fragment = next(
+            (
+                fragment
+                for fragment in unkeyed
+                if _EDUCATION_INSTITUTION_CUE_PATTERN.search(fragment)
+            ),
+            unkeyed[0] if unkeyed else None,
+        )
+        if institution_fragment and "institution" not in values:
+            values["institution"] = institution_fragment
     elif category in {FactCategory.EXPERIENCE, FactCategory.PROJECT}:
         if unkeyed and "organization" not in values and _looks_like_organization(unkeyed[0]):
             values["organization"] = unkeyed[0]
@@ -1269,7 +1656,7 @@ def _resolve_generated_facts(
 ) -> list[FactCandidate]:
     source_text = {segment.handle: segment.text for segment in segments}
     resolved: list[FactCandidate] = []
-    seen: set[tuple[str, str, str | None]] = set()
+    seen: set[tuple[str, str, str | None, str]] = set()
     for fact in generated.facts:
         excerpt = source_text.get(fact.source_handle)
         if excerpt is None:
@@ -1301,14 +1688,23 @@ def _resolve_generated_facts(
             _looks_incomplete(detail) or not _is_grounded_generated_text(detail, excerpt)
         ):
             detail = None
-        key = (fact.category, label.casefold(), detail)
+        category = FactCategory(fact.category)
+        if (
+            category == FactCategory.PROJECT
+            and _looks_like_responsibility(label)
+            and _has_explicit_project_title(excerpt)
+        ):
+            continue
+        if _is_low_information_fact(category, label, detail):
+            continue
+        key = (fact.category, label.casefold(), detail, fact.source_handle)
         if key in seen:
             continue
         seen.add(key)
         resolved.append(
             _structured_candidate(
                 FactCandidate(
-                    category=FactCategory(fact.category),
+                    category=category,
                     label=label,
                     detail=detail,
                     structured_value={},
@@ -1339,7 +1735,9 @@ def _guided_baseline_candidate(
             detail = possible_detail.strip()
         break
     clean_label = label[:500]
-    if _is_heading_only(clean_label) or _looks_incomplete(clean_label):
+    if _looks_incomplete(clean_label) or _is_low_information_fact(
+        guided_field.category, clean_label, detail
+    ):
         return None
     return _structured_candidate(
         FactCandidate(
@@ -1354,12 +1752,131 @@ def _guided_baseline_candidate(
     )
 
 
+def _split_candidate_label_detail(value: str) -> tuple[str, str | None]:
+    for separator in (" — ", " – ", " - "):
+        if separator not in value:
+            continue
+        possible_label, possible_detail = value.split(separator, 1)
+        if 1 <= len(possible_label.strip()) <= 200 and possible_detail.strip():
+            return possible_label.strip(), possible_detail.strip()
+        break
+    return value.strip(), None
+
+
+def _looks_like_structured_detail(value: str) -> bool:
+    for separator in (":", "："):
+        if separator not in value:
+            continue
+        raw_name, raw_value = value.split(separator, 1)
+        return bool(
+            raw_value.strip() and _normalize_guided_label(raw_name) in _STRUCTURED_FIELD_ALIASES
+        )
+    return False
+
+
+def _section_baseline_candidates(segment: ResumeSegment) -> list[FactCandidate] | None:
+    """Build conservative complete records from an explicitly headed upload section."""
+
+    lines = [line.strip() for line in segment.text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    category = _heading_category(lines[0])
+    if category is None:
+        return None
+    body = lines[1:]
+    candidates: list[FactCandidate] = []
+
+    def add(label: str, detail: str | None = None) -> None:
+        clean_label = label.strip()[:500]
+        clean_detail = detail.strip()[:4_000] if detail and detail.strip() else None
+        if _looks_incomplete(clean_label) or _is_low_information_fact(
+            category, clean_label, clean_detail
+        ):
+            return
+        candidates.append(
+            _structured_candidate(
+                FactCandidate(
+                    category=category,
+                    label=clean_label,
+                    detail=clean_detail,
+                    structured_value={},
+                    source_excerpt=segment.text[:4_000],
+                    confidence=0.65,
+                ),
+                source_handle=segment.handle,
+            )
+        )
+
+    if category == FactCategory.EXPERIENCE:
+        role_indexes = [index for index, line in enumerate(body) if _looks_like_role_title(line)]
+        if len(role_indexes) != 1:
+            return candidates
+        role_index = role_indexes[0]
+        label, inline_detail = _split_candidate_label_detail(body[role_index])
+        details = [*body[:role_index], *body[role_index + 1 :]]
+        if inline_detail:
+            details.insert(0, inline_detail)
+        add(label, "; ".join(details))
+        return candidates
+
+    if category == FactCategory.EDUCATION:
+        degree_indexes = [
+            index for index, line in enumerate(body) if _DEGREE_CUE_PATTERN.search(line)
+        ]
+        if len(degree_indexes) != 1:
+            return candidates
+        degree_index = degree_indexes[0]
+        label, inline_detail = _split_candidate_label_detail(body[degree_index])
+        details = [*body[:degree_index], *body[degree_index + 1 :]]
+        if inline_detail:
+            details.insert(0, inline_detail)
+        add(label, "; ".join(details))
+        return candidates
+
+    if category in {FactCategory.SKILL, FactCategory.LANGUAGE}:
+        for line in body:
+            for item in re.split(r"\s*(?:[,،|•]|\s+/\s+|\s+and\s+)\s*", line, flags=re.IGNORECASE):
+                if item.strip():
+                    label, detail = _split_candidate_label_detail(item)
+                    add(label, detail)
+        return candidates
+
+    if category == FactCategory.PROJECT:
+        if len(body) == 1:
+            label, detail = _split_candidate_label_detail(body[0])
+            add(label, detail)
+        elif (
+            len(body) <= 12
+            and not _looks_like_date_only(body[0])
+            and not _looks_like_responsibility(body[0])
+            and all(
+                _looks_like_date_only(line)
+                or _looks_like_responsibility(line)
+                or _looks_like_structured_detail(line)
+                for line in body[1:]
+            )
+        ):
+            add(body[0], "; ".join(body[1:]))
+        return candidates
+
+    if category not in {FactCategory.CERTIFICATION, FactCategory.ACHIEVEMENT}:
+        return candidates
+    for line in body:
+        label, detail = _split_candidate_label_detail(line)
+        add(label, detail)
+    return candidates
+
+
 def _local_grounded_baseline(
     segments: tuple[ResumeSegment, ...],
 ) -> list[FactCandidate]:
     guided: list[FactCandidate] = []
     unstructured_lines: list[str] = []
     for segment in segments:
+        section_candidates = _section_baseline_candidates(segment)
+        if section_candidates is not None:
+            guided.extend(section_candidates)
+            continue
         field = _parse_guided_field(segment.text)
         if field is None:
             unstructured_lines.append(segment.text)
@@ -1368,7 +1885,9 @@ def _local_grounded_baseline(
             guided.append(candidate)
     local: list[FactCandidate] = []
     for candidate in _facts_from_cv_text("\n".join(unstructured_lines)):
-        if _is_heading_only(candidate.label) or _looks_incomplete(candidate.label):
+        if _looks_incomplete(candidate.label) or _is_low_information_fact(
+            candidate.category, candidate.label, candidate.detail
+        ):
             continue
         source = next(
             (
@@ -1385,6 +1904,31 @@ def _local_grounded_baseline(
     return [*guided, *local]
 
 
+def _candidate_information_score(candidate: FactCandidate) -> int:
+    """Prefer a grounded complete record over a provider fragment from the same section."""
+
+    record = candidate.structured_value
+    score = 1 + (2 if candidate.detail else 0)
+    for field, weight in {
+        "organization": 4,
+        "date_range": 3,
+        "location": 1,
+        "degree": 4,
+        "institution": 4,
+        "issuer": 3,
+        "gpa_score": 1,
+        "honors": 1,
+        "proficiency": 2,
+    }.items():
+        if record.get(field):
+            score += weight
+    for field in ("responsibilities", "outcomes", "tools"):
+        values = record.get(field)
+        if isinstance(values, list):
+            score += min(len(values), 3) * 2
+    return score
+
+
 def _merge_grounded_baseline(
     generated: list[FactCandidate],
     segments: tuple[ResumeSegment, ...],
@@ -1395,19 +1939,50 @@ def _merge_grounded_baseline(
     A model result wins whenever it already covered the same category and exact source excerpt.
     """
 
-    covered = {(candidate.category, candidate.source_excerpt.casefold()) for candidate in generated}
-    covered_labels = {(candidate.category, candidate.label.casefold()) for candidate in generated}
+    provider_source_keys = {
+        (candidate.category, candidate.source_excerpt.casefold()) for candidate in generated
+    }
     merged = list(generated)
     for candidate in _local_grounded_baseline(segments):
-        key = (candidate.category, candidate.source_excerpt.casefold())
-        label_key = (candidate.category, candidate.label.casefold())
-        if key in covered or label_key in covered_labels:
+        matching_indexes = [
+            index
+            for index, existing in enumerate(merged)
+            if existing.category == candidate.category
+            and existing.label.casefold() == candidate.label.casefold()
+            and existing.source_excerpt.casefold() == candidate.source_excerpt.casefold()
+        ]
+        if matching_indexes:
+            best_index = max(
+                matching_indexes,
+                key=lambda index: _candidate_information_score(merged[index]),
+            )
+            if _candidate_information_score(candidate) > _candidate_information_score(
+                merged[best_index]
+            ):
+                merged[best_index] = candidate
             continue
-        covered.add(key)
-        covered_labels.add(label_key)
+        if (
+            candidate.category not in {FactCategory.SKILL, FactCategory.LANGUAGE}
+            and (candidate.category, candidate.source_excerpt.casefold()) in provider_source_keys
+        ):
+            # The provider already interpreted this record.  A differently named deterministic
+            # fallback is more likely to be a heading/detail duplicate than an omitted fact.
+            continue
         merged.append(candidate)
         if len(merged) >= 200:
             break
+    segment_order = {segment.handle: index for index, segment in enumerate(segments)}
+
+    def source_position(candidate: FactCandidate) -> int:
+        handles = candidate.structured_value.get("source_handles")
+        if not isinstance(handles, list):
+            return len(segment_order)
+        return min(
+            (segment_order[handle] for handle in handles if handle in segment_order),
+            default=len(segment_order),
+        )
+
+    merged.sort(key=source_position)
     return merged
 
 

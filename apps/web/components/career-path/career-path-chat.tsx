@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { AlertCircle, ArrowLeft, CheckCircle2, Compass, FileCheck2, FileUser, LoaderCircle, LockKeyhole, RotateCcw, Send, ServerOff, ShieldCheck, Trash2 } from "lucide-react";
 import { PathSuggestionCard } from "@/components/career-path/path-suggestion-card";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,140 @@ function createClientTurnId() {
   return globalThis.crypto.randomUUID();
 }
 
+function DeleteCareerPathDialog({
+  locale,
+  deleting,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  locale: "ar" | "en";
+  deleting: boolean;
+  error: unknown;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCancelRef = useRef(onCancel);
+  const deletingRef = useRef(deleting);
+
+  useEffect(() => {
+    onCancelRef.current = onCancel;
+  }, [onCancel]);
+
+  useEffect(() => {
+    deletingRef.current = deleting;
+  }, [deleting]);
+
+  useEffect(() => {
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const background = overlayRef.current?.previousElementSibling instanceof HTMLElement
+      ? overlayRef.current.previousElementSibling
+      : null;
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousAriaHidden = background?.getAttribute("aria-hidden") ?? null;
+    const previousInert = background?.inert ?? false;
+
+    document.body.style.overflow = "hidden";
+    if (background) {
+      background.inert = true;
+      background.setAttribute("aria-hidden", "true");
+    }
+    cancelRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !deletingRef.current) {
+        event.preventDefault();
+        onCancelRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => !element.hasAttribute("hidden"));
+      if (!focusable.length) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !panel.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+      if (background) {
+        background.inert = previousInert;
+        if (previousAriaHidden === null) background.removeAttribute("aria-hidden");
+        else background.setAttribute("aria-hidden", previousAriaHidden);
+      }
+      if (previousFocusRef.current?.isConnected) previousFocusRef.current.focus();
+    };
+  }, []);
+
+  return (
+    <div
+      ref={overlayRef}
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-background/85 px-4 py-8 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !deleting) onCancel();
+      }}
+    >
+      <section
+        ref={panelRef}
+        tabIndex={-1}
+        className="w-full max-w-lg border-y border-danger bg-surface px-5 py-6 shadow-panel sm:px-7"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="delete-career-path-title"
+        aria-describedby="delete-career-path-description"
+      >
+        <div className="flex items-start gap-4">
+          <span className="grid h-11 w-11 shrink-0 place-items-center border border-danger text-danger" aria-hidden="true"><Trash2 className="h-5 w-5" /></span>
+          <div>
+            <h2 id="delete-career-path-title" className="text-lg font-bold text-foreground">
+              {locale === "ar" ? "حذف مسارك الحالي والبدء من جديد؟" : "Delete your current path and start over?"}
+            </h2>
+            <p id="delete-career-path-description" className="mt-2 text-sm leading-7 text-muted">
+              {locale === "ar"
+                ? "سيتم حذف محادثة تحديد المسار وجميع اقتراحات المسارات الناتجة عنها نهائيًا. ستبقى سيرتك الذاتية وحقائق ملفك المهني والفرص وطلبات التقديم."
+                : "This permanently deletes the path conversation and every path suggestion created from it. Your resume, confirmed profile facts, jobs, and applications remain unchanged."}
+            </p>
+          </div>
+        </div>
+        {error ? <p className="mt-5 border-y border-danger bg-danger-pale px-3 py-3 text-sm text-danger" role="alert">{apiErrorMessage(error, locale)}</p> : null}
+        <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          <Button ref={cancelRef} variant="secondary" disabled={deleting} onClick={onCancel}>
+            {locale === "ar" ? "إلغاء" : "Cancel"}
+          </Button>
+          <Button variant="danger" disabled={deleting} onClick={onConfirm}>
+            {deleting ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Trash2 className="h-4 w-4" aria-hidden="true" />}
+            {deleting ? (locale === "ar" ? "جارٍ حذف المسار…" : "Deleting path…") : (locale === "ar" ? "احذف المسار" : "Delete path")}
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function CareerPathChat() {
   const { locale } = useLocale();
   const [workspace, setWorkspace] = useState<CareerPathWorkspace | null>(null);
@@ -28,7 +162,9 @@ export function CareerPathChat() {
   const [sendError, setSendError] = useState<unknown>(null);
   const [pendingContent, setPendingContent] = useState<string | null>(null);
   const [failedTurn, setFailedTurn] = useState<FailedTurn | null>(null);
-  const [clearing, setClearing] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<unknown>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -53,7 +189,7 @@ export function CareerPathChat() {
     : ["I enjoy numbers and analysis", "I enjoy communication and decision-making", "I am still unsure"];
   const messages = workspace?.conversation?.messages ?? [];
   const consentMissing = Boolean(workspace?.consent_required && !consentAcknowledged);
-  const canSend = Boolean(workspace?.provider_ready && draft.trim() && !sending && !consentMissing);
+  const canSend = Boolean(workspace?.provider_ready && draft.trim() && !sending && !deleting && !consentMissing);
 
   function retryLoad() {
     setWorkspace(null);
@@ -115,29 +251,33 @@ export function CareerPathChat() {
     void submitMessage();
   }
 
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void submitMessage();
     }
   }
 
-  async function clearConversation() {
-    if (!workspace?.conversation) return;
-    const confirmed = window.confirm(locale === "ar" ? "مسح محادثة اكتشاف المسار؟ لا يمكن التراجع عن ذلك." : "Clear your career-path conversation? This cannot be undone.");
-    if (!confirmed) return;
-    setClearing(true);
+  async function confirmDeletePath() {
+    if (!workspace?.conversation || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
     setSendError(null);
     try {
       await deleteCareerPathConversation();
-      setWorkspace(await getCareerPathWorkspace());
+      setWorkspace((current) => current ? {
+        ...current,
+        conversation: null,
+        consent_required: true,
+      } : current);
       setDraft("");
       setFailedTurn(null);
       setConsentAcknowledged(false);
+      setDeleteDialogOpen(false);
     } catch (error) {
-      setSendError(error);
+      setDeleteError(error);
     } finally {
-      setClearing(false);
+      setDeleting(false);
     }
   }
 
@@ -232,13 +372,22 @@ export function CareerPathChat() {
   }
 
   return (
+    <>
     <div className="page-wrap page-enter max-w-[1180px]">
       <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
         {pageHeader}
         {workspace.conversation ? (
-          <Button variant="ghost" className="shrink-0 text-danger hover:bg-danger-pale" disabled={clearing} onClick={() => { void clearConversation(); }}>
-            {clearing ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Trash2 className="h-4 w-4" aria-hidden="true" />}
-            {locale === "ar" ? "مسح المحادثة" : "Clear conversation"}
+          <Button
+            variant="ghost"
+            className="shrink-0 text-danger hover:bg-danger-pale"
+            disabled={deleting || sending}
+            onClick={() => {
+              setDeleteError(null);
+              setDeleteDialogOpen(true);
+            }}
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+            {locale === "ar" ? "حذف مساري" : "Delete my path"}
           </Button>
         ) : null}
       </div>
@@ -249,7 +398,7 @@ export function CareerPathChat() {
             <ServerOff className="mt-0.5 h-5 w-5 shrink-0 text-amber" aria-hidden="true" />
             <div>
               <h2 className="font-bold">{locale === "ar" ? "المستشار الذكي متوقف مؤقتًا" : "The AI adviser is temporarily unavailable"}</h2>
-              <p className="mt-1 text-sm text-muted">{locale === "ar" ? "يمكنك قراءة محادثتك السابقة أو مسحها، لكن إرسال رسالة جديدة متوقف حتى يُعاد تفعيل المزود على الخادم." : "You can still read or clear your previous conversation, but new messages are disabled until the server provider is enabled again."}</p>
+              <p className="mt-1 text-sm text-muted">{locale === "ar" ? "يمكنك قراءة مسارك السابق أو حذفه، لكن إرسال رسالة جديدة متوقف حتى يُعاد تفعيل المزود على الخادم." : "You can still read or delete your previous path, but new messages are disabled until the server provider is enabled again."}</p>
             </div>
           </div>
         </section>
@@ -320,7 +469,7 @@ export function CareerPathChat() {
               className="field-control min-h-28 resize-y py-3"
               value={draft}
               maxLength={3000}
-              disabled={sending || !workspace.provider_ready}
+              disabled={sending || deleting || !workspace.provider_ready}
               onChange={(event) => { setDraft(event.target.value); setSendError(null); }}
               onKeyDown={handleComposerKeyDown}
               placeholder={locale === "ar" ? "مثال: أحب التحليل، لكني لا أعرف هل يناسبني العمل المالي أو التقني…" : "Example: I enjoy analysis, but I am unsure whether finance or technology fits me better…"}
@@ -377,7 +526,7 @@ export function CareerPathChat() {
             <h2 id="adviser-boundaries-title" className="mt-3 font-bold">{locale === "ar" ? "حدود واضحة" : "Clear boundaries"}</h2>
             <ul className="mt-3 space-y-3 text-sm text-muted">
               <li className="flex gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" aria-hidden="true" /><span>{locale === "ar" ? "لا نعرض نسبة ملاءمة أو ضمانًا وظيفيًا." : "No fit percentage or employment guarantee."}</span></li>
-              <li className="flex gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" aria-hidden="true" /><span>{locale === "ar" ? "يمكنك تعديل رأيك أو مسح المحادثة." : "You can change your mind or clear the conversation."}</span></li>
+              <li className="flex gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" aria-hidden="true" /><span>{locale === "ar" ? "يمكنك تعديل رأيك أو حذف المسار والبدء من جديد." : "You can change your mind or delete the path and start over."}</span></li>
               <li className="flex gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" aria-hidden="true" /><span>{locale === "ar" ? "اختبر المسار عمليًا قبل اعتماده." : "Test a path in practice before committing."}</span></li>
             </ul>
           </section>
@@ -386,5 +535,17 @@ export function CareerPathChat() {
         </aside>
       </div>
     </div>
+    {deleteDialogOpen ? (
+      <DeleteCareerPathDialog
+        locale={locale}
+        deleting={deleting}
+        error={deleteError}
+        onCancel={() => {
+          if (!deleting) setDeleteDialogOpen(false);
+        }}
+        onConfirm={() => { void confirmDeletePath(); }}
+      />
+    ) : null}
+    </>
   );
 }

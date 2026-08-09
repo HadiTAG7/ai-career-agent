@@ -14,14 +14,15 @@ from career_agent_api.models.domain import (
     ResumeWorkspace,
 )
 from career_agent_api.models.enums import (
+    FactCategory,
     PreferredLanguage,
     ResumeDraftVersionReason,
     ResumeMessageKind,
     ResumeMessageRole,
     ResumeMessageStatus,
 )
-from career_agent_api.schemas.api import ResumeDraftContent
-from career_agent_api.services.resume_writer import ResumeWriterProvider
+from career_agent_api.schemas.api import ResumeDraftContent, ResumeQuestionRead
+from career_agent_api.services.resume_writer import RESUME_SECTION_ORDER, ResumeWriterProvider
 
 
 class StubWorkspaceProvider(ResumeWriterProvider):
@@ -30,11 +31,61 @@ class StubWorkspaceProvider(ResumeWriterProvider):
     available = True
 
     def __init__(self) -> None:
+        self.question_calls: list[dict[str, object]] = []
         self.draft_calls: list[dict[str, object]] = []
         self.adaptive_calls: list[dict[str, object]] = []
 
-    async def generate_questions(self, **_: object) -> list:
-        return []
+    async def generate_questions(self, **kwargs: object) -> list[ResumeQuestionRead]:
+        self.question_calls.append(kwargs)
+        category = str(kwargs.get("required_category") or "experience")
+        language = kwargs.get("language")
+        arabic_questions = {
+            "experience": "ما نوع الخبرة العملية التي تريد إبرازها، وما أهم نتيجة حققتها فيها؟",
+            "education": "بناءً على خبرتك، ما تخصصك وفي أي جامعة درست ومتى تخرجت؟",
+            "project": "ما المشروع الذي يثبت مهاراتك، وما مساهمتك المحددة فيه؟",
+            "skill": "أي مهارة استخدمتها فعليًا في هذه التجربة، وكيف استخدمتها؟",
+            "certification": "هل لديك شهادة مهنية مرتبطة بمجالك، ومن أي جهة؟",
+            "language": "ما اللغات التي تستخدمها، وما مستوى إجادتك الفعلي؟",
+            "achievement": "ما الإنجاز الآخر الذي يستحق الظهور في سيرتك؟",
+        }
+        english_questions = {
+            "experience": (
+                "Tell me about the experience you want to highlight and its strongest outcome."
+            ),
+            "education": (
+                "Based on your background, what did you study, where, and when did you graduate?"
+            ),
+            "project": "Which project best demonstrates your skills, and what did you contribute?",
+            "skill": "Which skill did you use in that work, and how did you apply it?",
+            "certification": (
+                "Do you hold a relevant professional certification, and who issued it?"
+            ),
+            "language": "Which languages do you use, and what is your actual proficiency?",
+            "achievement": "What other achievement deserves a place on your resume?",
+        }
+        question = (
+            arabic_questions[category]
+            if language is PreferredLanguage.AR
+            else english_questions[category]
+        )
+        return [
+            ResumeQuestionRead(
+                id=f"ai_{category}_test",
+                category=FactCategory(category),
+                question=question,
+                why_it_matters=(
+                    "لجمع تفاصيل دقيقة ومفيدة للسيرة."
+                    if language is PreferredLanguage.AR
+                    else "It collects precise, useful resume evidence."
+                ),
+                placeholder=(
+                    "اكتب التفاصيل بطريقتك."
+                    if language is PreferredLanguage.AR
+                    else "Answer in your own words."
+                ),
+                required=False,
+            )
+        ]
 
     async def generate_draft(self, **kwargs: object) -> ResumeDraftContent:
         self.draft_calls.append(kwargs)
@@ -143,6 +194,54 @@ async def add_confirmed_experience(client, profile: dict, source: dict, headers:
     )
     assert confirmed.status_code == 200, confirmed.text
     return confirmed.json()
+
+
+async def test_workspace_opens_with_an_ai_generated_question_in_resume_order(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+
+    response = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "ar",
+            "data_sharing_acknowledged": True,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    workspace = response.json()
+    assert stub_provider.question_calls[0]["required_category"] == "experience"
+    assert stub_provider.question_calls[0]["max_questions"] == 1
+    assert workspace["provider_metadata"]["current_question"]["generation_source"] == "ai"
+    assert workspace["provider_metadata"]["current_question"]["category"] == "experience"
+    assert workspace["provider_metadata"]["section_order"] == list(RESUME_SECTION_ORDER)
+    assert workspace["messages"][0]["content"] == (
+        "ما نوع الخبرة العملية التي تريد إبرازها، وما أهم نتيجة حققتها فيها؟"
+    )
+
+
+async def test_workspace_ai_question_starts_at_first_uncovered_resume_section(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    await add_confirmed_experience(client, profile, source, headers)
+
+    response = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+        json={"language": "ar", "data_sharing_acknowledged": True},
+    )
+
+    assert response.status_code == 201, response.text
+    assert stub_provider.question_calls[-1]["required_category"] == "education"
+    assert response.json()["provider_metadata"]["current_question"]["category"] == "education"
 
 
 async def create_generated_workspace(client) -> tuple[dict, str, dict, dict]:
@@ -255,6 +354,9 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
     assert "conversation_1" not in item_handles
     assert workspace["draft_revision"] == 1
     assert workspace["versions"][0]["reason"] == "initial_generation"
+    assert workspace["provider_metadata"]["current_question"]["category"] == "education"
+    assert workspace["messages"][-1]["kind"] == "question"
+    assert workspace["messages"][-1]["structured_payload"]["question"]["category"] == "education"
 
     rewrite = await client.post(
         f"{base}/draft/rewrite",
@@ -1174,7 +1276,6 @@ async def test_guidance_quick_actions_never_create_facts_or_understandings(
     stub_provider: StubWorkspaceProvider,
     action: str,
 ) -> None:
-    del stub_provider
     profile, _ = await create_profile_and_source(client)
     headers = {"X-User-Id": "demo-user"}
     base = f"/v1/profiles/{profile['id']}/resume-workspace"
@@ -1198,6 +1299,12 @@ async def test_guidance_quick_actions_never_create_facts_or_understandings(
     )
     assert response.status_code == 200, response.text
     assert response.json()["pending_understanding"] is None
+    if action in {"skip", "continue"}:
+        assert stub_provider.question_calls[-1]["required_category"] == "education"
+        assert (
+            response.json()["provider_metadata"]["current_question"]["category"]
+            == "education"
+        )
     facts_after = (
         await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
     ).json()

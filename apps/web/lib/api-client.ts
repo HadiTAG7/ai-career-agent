@@ -983,7 +983,7 @@ export async function sendResumeWorkspaceMessage(
       expected_revision: input.expectedRevision,
       quick_action: input.quickAction || null,
     }),
-    timeoutMs: 120_000,
+    timeoutMs: 30_000,
   });
 }
 

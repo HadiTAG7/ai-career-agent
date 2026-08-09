@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -7,12 +8,16 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel, SecretStr, ValidationError
 
+import career_agent_api.services.resume_writer as resume_writer_module
 from career_agent_api.core.config import Settings
 from career_agent_api.models.enums import FactCategory, PreferredLanguage, VerificationStatus
 from career_agent_api.schemas.api import ResumeQuestionRead
 from career_agent_api.services.resume_writer import (
+    RESUME_SECTION_ORDER,
+    MistralResumeWriterProvider,
     ResumeEvidence,
     ResumeWriterError,
+    _adaptive_answer_category,
     _GeneratedDraft,
     _redact_resume_text,
     _restore_open_ended_number_qualifiers,
@@ -111,6 +116,44 @@ class CapturingResumeWriter(_StructuredResumeWriterProvider):
         if isinstance(response, ResumeWriterError):
             raise response
         return schema.model_validate(response)
+
+
+@pytest.mark.asyncio
+async def test_generated_question_uses_required_section_order_and_conversation() -> None:
+    provider = CapturingResumeWriter(
+        {
+            "questions": [
+                {
+                    "id": "petroleum_graduation_date",
+                    "category": "education",
+                    "question": "متى تخرجت من جامعة البترول، وما الدرجة التي حصلت عليها؟",
+                    "why_it_matters": "يكمل تاريخ التعليم والدرجة من دون تكرار اسم الجامعة.",
+                    "placeholder": "سنة التخرج والدرجة العلمية.",
+                    "required": False,
+                }
+            ]
+        }
+    )
+
+    questions = await provider.generate_questions(
+        language=PreferredLanguage.AR,
+        target_role=None,
+        evidence=evidence(category="education"),
+        conversation=[
+            {"role": "user", "content": "درست في جامعة البترول تخصص مالية."}
+        ],
+        required_category="education",
+        max_questions=1,
+    )
+
+    assert questions[0].question.startswith("متى تخرجت من جامعة البترول")
+    payload = provider.calls[0]["payload"]
+    assert payload["section_order"] == list(RESUME_SECTION_ORDER)
+    assert payload["required_category"] == "education"
+    assert payload["max_questions"] == 1
+    assert payload["conversation"] == [
+        {"role": "user", "content": "درست في جامعة البترول تخصص مالية."}
+    ]
 
 
 def test_grounded_draft_allows_professional_rewording_and_target_positioning() -> None:
@@ -702,7 +745,7 @@ async def test_generate_draft_retries_invalid_structured_output_once() -> None:
 async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_one_call() -> None:
     response = {
         "understanding": {
-            "summary": "You built an inventory dashboard with Python and weekly reports.",
+            "summary": "أنشأت لوحة Inventory باستخدام Python وأعددت تقارير أسبوعية.",
             "confidence": "high",
             "evidence_handles": ["answer_turn_7"],
             "confirmation_question": "هل فهمت إجابتك بشكل صحيح؟",
@@ -711,17 +754,17 @@ async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_
             {
                 "record_type": "project",
                 "source_handles": ["answer_turn_7"],
-                "title": "Inventory dashboard",
-                "responsibilities": ["Built weekly reports"],
+                "title": "لوحة Inventory",
+                "responsibilities": ["أعددت تقارير أسبوعية"],
                 "tools": ["Python"],
             }
         ],
         "next_question": {
             "id": "inventory_outcome",
             "category": "project",
-            "question": "What concrete outcome did the dashboard produce?",
-            "why_it_matters": "It makes the project contribution clearer.",
-            "placeholder": "Describe the outcome or skip if unknown.",
+            "question": "ما النتيجة الملموسة التي حققتها اللوحة؟",
+            "why_it_matters": "توضح النتيجة قيمة مساهمتك في المشروع.",
+            "placeholder": "اذكر النتيجة، أو تجاوز السؤال إن لم تكن معروفة.",
             "required": False,
         },
         "draft_patch": {
@@ -753,7 +796,7 @@ async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_
             "fields_requested": ["action", "tools"],
             "quick_replies": ["skip"],
         },
-        answer="I built an Inventory dashboard with Python and produced weekly reports.",
+        answer="أنشأت لوحة Inventory باستخدام Python وأعددت تقارير أسبوعية.",
         answer_handle="answer_turn_7",
     )
 
@@ -765,11 +808,631 @@ async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_
     assert len(provider.calls) == 1
     assert provider.calls[0]["model_name"] == "interview-model"
     assert provider.calls[0]["schema_name"] == "adaptive_resume_interview_turn"
+    assert provider.calls[0]["max_tokens"] == 1_000
     assert provider.calls[0]["payload"]["conversation_language"] == "ar"
     assert provider.calls[0]["payload"]["output_language"] == "en"
+    assert provider.calls[0]["payload"]["section_order"] == list(RESUME_SECTION_ORDER)
+    assert provider.calls[0]["payload"]["active_section"] == "project"
+    assert provider.calls[0]["payload"]["allowed_next_question_categories"] == [
+        "project",
+        "skill",
+    ]
     instructions = provider.calls[0]["system_instructions"]
     assert "conversation_language" in instructions
     assert "output_language" in instructions
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_safely_handles_an_arabic_answer_that_changes_topic() -> None:
+    answer = "خلينا نبدأ بالجامعة، أنا متخرج من جامعة البترول وتخصصي مالية"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": (
+                    "The user likely earned a Bachelor of Science in Finance from "
+                    "Petroleum Institute."
+                ),
+                "confidence": "medium",
+                "evidence_handles": ["answer_education"],
+                "confirmation_question": "Did I understand your education correctly?",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "education",
+                    "source_handles": ["answer_education"],
+                    "title": "Bachelor of Science in Finance",
+                    "institution": "Petroleum Institute",
+                }
+            ],
+            "next_question": {
+                "id": "experience_details",
+                "category": "experience",
+                "question": "What company did you work for?",
+                "why_it_matters": "It completes the experience record.",
+                "placeholder": "Company name.",
+                "required": True,
+            },
+            "draft_patch": None,
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن تجربة عمل أو مشروع تفتخر به.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="التجربة، دورك، والأثر.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_education",
+    )
+
+    assert result.understanding.summary == answer
+    assert result.understanding.evidence_handles == ["answer_education"]
+    assert result.proposed_records[0].record_type == "education"
+    assert result.proposed_records[0].title == answer
+    assert result.next_question is not None
+    assert result.next_question.category is FactCategory.EDUCATION
+    assert "الدرجة" in result.next_question.question
+    assert result.draft_patch is None
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_does_not_store_a_negative_answer_as_resume_content() -> None:
+    answer = "لا، ما عندي خبرة للحين"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_no_experience"],
+                "confirmation_question": "هل فهمت إجابتك بشكل صحيح؟",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "experience",
+                    "source_handles": ["answer_no_experience"],
+                    "title": answer,
+                }
+            ],
+            "next_question": {
+                "id": "project_story",
+                "category": "project",
+                "question": "هل لديك مشروع جامعي أو شخصي تود إضافته؟",
+                "why_it_matters": "يمكن للمشروع أن يثبت مهاراتك حتى دون خبرة وظيفية.",
+                "placeholder": "اذكر المشروع أو تخطّ السؤال.",
+                "required": False,
+            },
+            "draft_patch": {
+                "section_key": "experience",
+                "title": answer,
+                "bullet_candidates": [answer],
+                "evidence_handles": ["answer_no_experience"],
+            },
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن خبرتك العملية.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="المسمى، الشركة، والمسؤوليات.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.AR,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_no_experience",
+    )
+
+    assert result.understanding.summary == answer
+    assert result.proposed_records == []
+    assert result.draft_patch is None
+    assert result.next_question is not None
+    assert result.next_question.category is FactCategory.EDUCATION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["لا أملك خبرة حتى الآن", "ما اشتغلت للحين"])
+async def test_adaptive_turn_recognizes_common_arabic_negative_answers(answer: str) -> None:
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_no_experience"],
+                "confirmation_question": "هل هذا يلخص ما تقصده بدقة؟",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "experience",
+                    "source_handles": ["answer_no_experience"],
+                    "title": answer,
+                }
+            ],
+            "next_question": {
+                "id": "project_story",
+                "category": "project",
+                "question": "هل لديك مشروع تود إضافته؟",
+                "why_it_matters": "المشروع يقدم دليلًا عمليًا.",
+                "placeholder": "اذكر المشروع أو تخطّ السؤال.",
+                "required": False,
+            },
+            "draft_patch": None,
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن خبرتك العملية.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="المسمى، الشركة، والمسؤوليات.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_no_experience",
+    )
+
+    assert result.proposed_records == []
+    assert result.draft_patch is None
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_keeps_positive_project_after_negative_experience_clause() -> None:
+    answer = "ما عندي خبرة عمل في شركة لكن سويت مشروع بايثون"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_mixed"],
+                "confirmation_question": "هل هذا يلخص ما تقصده بدقة؟",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "project",
+                    "source_handles": ["answer_mixed"],
+                    "title": "سويت مشروع بايثون",
+                    "tools": ["بايثون"],
+                }
+            ],
+            "next_question": {
+                "id": "project_outcome",
+                "category": "project",
+                "question": "ما هدف المشروع وما النتيجة؟",
+                "why_it_matters": "الهدف والنتيجة يوضحان قيمة المشروع.",
+                "placeholder": "اذكر الهدف والنتيجة.",
+                "required": False,
+            },
+            "draft_patch": None,
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن خبرتك العملية.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="المسمى، الشركة، والمسؤوليات.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_mixed",
+    )
+
+    assert len(result.proposed_records) == 1
+    assert result.proposed_records[0].record_type == "project"
+    assert result.proposed_records[0].tools == ["بايثون"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "positive_clause", "record_type"),
+    [
+        (
+            "ما عندي خبرة رسمية لكن كنت أساعد والدي في المتجر",
+            "كنت أساعد والدي في المتجر",
+            "experience",
+        ),
+        (
+            "ما عندي خبرة لكن حللت المبيعات وأعددت تقريرًا",
+            "حللت المبيعات وأعددت تقريرًا",
+            "project",
+        ),
+    ],
+)
+async def test_adaptive_turn_keeps_substantive_positive_clause_without_keywords(
+    answer: str,
+    positive_clause: str,
+    record_type: str,
+) -> None:
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_mixed"],
+                "confirmation_question": "هل هذا يلخص ما تقصده بدقة؟",
+            },
+            "proposed_records": [
+                {
+                    "record_type": record_type,
+                    "source_handles": ["answer_mixed"],
+                    "title": positive_clause,
+                }
+            ],
+            "next_question": {
+                "id": f"{record_type}_details",
+                "category": record_type,
+                "question": "ما دورك بالتحديد وما النتيجة؟",
+                "why_it_matters": "التفاصيل توضح قيمة مساهمتك.",
+                "placeholder": "اذكر دورك والنتيجة.",
+                "required": False,
+            },
+            "draft_patch": None,
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن خبرتك العملية.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="المسمى، الشركة، والمسؤوليات.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_mixed",
+    )
+
+    assert len(result.proposed_records) == 1
+    assert result.proposed_records[0].record_type == record_type
+    assert result.proposed_records[0].title == positive_clause
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_does_not_store_a_request_to_move_to_the_next_question() -> None:
+    answer = "ما عندي خبرة لكن خلينا ننتقل للسؤال التالي"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_move_on"],
+                "confirmation_question": "هل هذا يلخص ما تقصده بدقة؟",
+            },
+            "proposed_records": [],
+            "next_question": None,
+            "draft_patch": {
+                "section_key": "experience",
+                "title": answer,
+                "bullet_candidates": [answer],
+                "evidence_handles": ["answer_move_on"],
+            },
+            "ready_to_generate": True,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن خبرتك العملية.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="المسمى، الشركة، والمسؤوليات.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.AR,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_move_on",
+    )
+
+    assert result.proposed_records == []
+    assert result.draft_patch is None
+    assert result.next_question is not None
+    assert result.ready_to_generate is False
+
+
+@pytest.mark.parametrize(
+    ("answer", "current_category", "expected"),
+    [
+        ("سويت مشروع تخرج في الجامعة باستخدام بايثون", "experience", "project"),
+        ("تدربت في جامعة الملك فهد", "education", "experience"),
+        ("حصلت على شهادة PMP من جامعة الملك فهد", "education", "certification"),
+    ],
+)
+def test_adaptive_answer_category_uses_context_not_the_institution_word(
+    answer: str,
+    current_category: str,
+    expected: str,
+) -> None:
+    assert (
+        _adaptive_answer_category(
+            answer,
+            current_category=current_category,  # type: ignore[arg-type]
+            generated_records=[],
+            answer_handle="answer_context",
+        )
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_treats_bachelor_certificate_as_education() -> None:
+    answer = "عندي شهادة بكالوريوس في المالية"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_degree"],
+                "confirmation_question": "هل هذا يلخص ما تقصده بدقة؟",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "certification",
+                    "source_handles": ["answer_degree"],
+                    "title": answer,
+                }
+            ],
+            "next_question": {
+                "id": "certification_issuer",
+                "category": "certification",
+                "question": "ما الجهة المانحة؟",
+                "why_it_matters": "الجهة تكمل بيانات الشهادة.",
+                "placeholder": "اسم الجهة.",
+                "required": False,
+            },
+            "draft_patch": None,
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="certification_story",
+        category=FactCategory.CERTIFICATION,
+        question="ما الشهادات التي حصلت عليها؟",
+        why_it_matters="نحتاج تفاصيل مؤهلاتك.",
+        placeholder="اسم الشهادة والجهة.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_degree",
+    )
+
+    assert len(result.proposed_records) == 1
+    assert result.proposed_records[0].record_type == "education"
+    assert result.next_question is not None
+    assert result.next_question.category is FactCategory.CERTIFICATION
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_rejects_cross_category_achievement_for_current_answer() -> None:
+    answer = "أنا متخرج من جامعة البترول تخصص مالية"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_education"],
+                "confirmation_question": "هل هذا يلخص ما تقصده بدقة؟",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "achievement",
+                    "source_handles": ["answer_education"],
+                    "title": answer,
+                }
+            ],
+            "next_question": None,
+            "draft_patch": {
+                "section_key": "achievement",
+                "title": answer,
+                "bullet_candidates": [answer],
+                "evidence_handles": ["answer_education"],
+            },
+            "ready_to_generate": True,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن خبرتك العملية.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="المسمى، الشركة، والمسؤوليات.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.AR,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_education",
+    )
+
+    assert len(result.proposed_records) == 1
+    assert result.proposed_records[0].record_type == "education"
+    assert result.draft_patch is None
+    assert result.next_question is not None
+    assert result.next_question.category is FactCategory.EDUCATION
+    assert result.ready_to_generate is False
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_prefers_project_actions_over_a_tool_keyword() -> None:
+    answer = "سويت لوحة ببايثون"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_project"],
+                "confirmation_question": "هل هذا يلخص ما تقصده بدقة؟",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "skill",
+                    "source_handles": ["answer_project"],
+                    "title": answer,
+                }
+            ],
+            "next_question": {
+                "id": "skill_usage",
+                "category": "skill",
+                "question": "كم سنة استخدمت بايثون؟",
+                "why_it_matters": "يوضح مستوى المهارة.",
+                "placeholder": "عدد السنوات.",
+                "required": False,
+            },
+            "draft_patch": {
+                "section_key": "skill",
+                "title": answer,
+                "bullet_candidates": [answer],
+                "evidence_handles": ["answer_project"],
+            },
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="project_story",
+        category=FactCategory.PROJECT,
+        question="احكي لي عن مشروع نفذته.",
+        why_it_matters="نحتاج مثالًا عمليًا.",
+        placeholder="المشروع، دورك، والأدوات.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.AR,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_project",
+    )
+
+    assert len(result.proposed_records) == 1
+    assert result.proposed_records[0].record_type == "project"
+    assert result.proposed_records[0].title == answer
+    assert result.draft_patch is None
+    assert result.next_question is not None
+    assert result.next_question.category is FactCategory.SKILL
+    assert result.next_question.id == "skill_usage"
+
+
+@pytest.mark.asyncio
+async def test_adaptive_turn_checks_each_conversation_field_language() -> None:
+    answer = "عملت على تقارير مالية أسبوعية وراجعت النتائج مع الفريق"
+    provider = CapturingResumeWriter(
+        {
+            "understanding": {
+                "summary": answer,
+                "confidence": "high",
+                "evidence_handles": ["answer_experience"],
+                "confirmation_question": "Correct?",
+            },
+            "proposed_records": [
+                {
+                    "record_type": "experience",
+                    "source_handles": ["answer_experience"],
+                    "title": answer,
+                }
+            ],
+            "next_question": {
+                "id": "experience_outcome",
+                "category": "experience",
+                "question": "ما النتيجة التي حققتها؟",
+                "why_it_matters": "توضح النتيجة أثر عملك.",
+                "placeholder": "Company?",
+                "required": False,
+            },
+            "draft_patch": None,
+            "ready_to_generate": False,
+        }
+    )
+    question = ResumeQuestionRead(
+        id="experience_story",
+        category=FactCategory.EXPERIENCE,
+        question="احكي لي عن تجربة عمل تفتخر بها.",
+        why_it_matters="نحتاج مثالًا مهنيًا واضحًا.",
+        placeholder="التجربة، دورك، والأثر.",
+        required=False,
+    )
+
+    result = await provider.generate_adaptive_turn(
+        conversation_language=PreferredLanguage.AR,
+        output_language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(),
+        conversation=[{"role": "assistant", "content": question.question}],
+        current_question=question,
+        answer=answer,
+        answer_handle="answer_experience",
+    )
+
+    assert result.understanding.confirmation_question == "هل هذا يلخص ما تقصده بدقة؟"
+    assert result.next_question is not None
+    assert result.next_question.category is FactCategory.EXPERIENCE
+    assert "مسماك" in result.next_question.question
 
 
 @pytest.mark.asyncio
@@ -854,3 +1517,134 @@ def test_provider_uses_dedicated_interview_and_writer_models_with_one_key() -> N
 
     assert provider.model == "writer-model"
     assert provider.interview_model == "interview-model"
+
+
+@pytest.mark.asyncio
+async def test_mistral_provider_reuses_client_and_bounds_interactive_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TinyResponse(BaseModel):
+        value: str
+
+    class FakeCompletions:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.delay = 0.0
+
+        async def create(self, **kwargs: Any) -> SimpleNamespace:
+            self.calls.append(kwargs)
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content='{"value":"ok"}'),
+                    )
+                ]
+            )
+
+    class FakeAsyncOpenAI:
+        instances: list[FakeAsyncOpenAI] = []
+
+        def __init__(self, **kwargs: Any) -> None:
+            self.init_kwargs = kwargs
+            self.options: list[dict[str, Any]] = []
+            self.completions = FakeCompletions()
+            self.chat = SimpleNamespace(completions=self.completions)
+            self.closed = False
+            self.instances.append(self)
+
+        def with_options(self, **kwargs: Any) -> FakeAsyncOpenAI:
+            self.options.append(kwargs)
+            return self
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(
+        "career_agent_api.services.resume_writer.AsyncOpenAI",
+        FakeAsyncOpenAI,
+    )
+    provider = MistralResumeWriterProvider(
+        api_key="test-key",
+        model="writer-model",
+        interview_model="interview-model",
+        timeout_seconds=55,
+        max_tokens=4_000,
+    )
+
+    adaptive = await provider._structured_response(
+        schema=TinyResponse,
+        schema_name="adaptive_resume_interview_turn",
+        system_instructions="Return JSON",
+        payload={"turn": 1},
+        max_tokens=1_000,
+        model_name="interview-model",
+    )
+    draft = await provider._structured_response(
+        schema=TinyResponse,
+        schema_name="professional_resume_draft",
+        system_instructions="Return JSON",
+        payload={"draft": 1},
+        max_tokens=4_000,
+        model_name="writer-model",
+    )
+
+    assert adaptive.value == "ok"
+    assert draft.value == "ok"
+    assert len(FakeAsyncOpenAI.instances) == 1
+    client = FakeAsyncOpenAI.instances[0]
+    assert client.options == [{"timeout": 15.0, "max_retries": 0}]
+    assert len(client.completions.calls) == 2
+
+    client.completions.delay = 0.05
+    provider._timeout_seconds = 0.01
+    with pytest.raises(ResumeWriterError, match="provider request failed"):
+        await provider._structured_response(
+            schema=TinyResponse,
+            schema_name="adaptive_resume_interview_turn",
+            system_instructions="Return JSON",
+            payload={"turn": 2},
+            max_tokens=1_000,
+            model_name="interview-model",
+        )
+    assert client.options[-1] == {"timeout": 0.01, "max_retries": 0}
+
+    await provider.aclose()
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_provider_cache_closes_every_settings_scoped_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProvider:
+        provider_name = "fake"
+
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    await resume_writer_module.close_resume_writer_provider()
+    created: list[FakeProvider] = []
+
+    def build(_settings: Settings) -> FakeProvider:
+        provider = FakeProvider()
+        created.append(provider)
+        return provider
+
+    monkeypatch.setattr(resume_writer_module, "_build_resume_writer_provider", build)
+    first_settings = Settings(_env_file=None, environment="test")
+    second_settings = Settings(_env_file=None, environment="test")
+
+    first = resume_writer_module.get_resume_writer_provider(first_settings)
+    assert resume_writer_module.get_resume_writer_provider(first_settings) is first
+    second = resume_writer_module.get_resume_writer_provider(second_settings)
+    assert second is not first
+    assert len(created) == 2
+
+    await resume_writer_module.close_resume_writer_provider()
+    assert [provider.close_count for provider in created] == [1, 1]

@@ -175,6 +175,38 @@ function MessageBubble({ message }: { message: ApiResumeMessage }) {
   );
 }
 
+function ResumeWriterBusyStatus({ locale }: { locale: "ar" | "en" }) {
+  const [phase, setPhase] = useState(0);
+
+  useEffect(() => {
+    const workingTimer = window.setTimeout(() => setPhase(1), 2_500);
+    const delayedTimer = window.setTimeout(() => setPhase(2), 7_000);
+    return () => {
+      window.clearTimeout(workingTimer);
+      window.clearTimeout(delayedTimer);
+    };
+  }, []);
+
+  const copy = locale === "ar"
+    ? [
+      "تم إرسال إجابتك. كاتب السيرة يقرأها الآن…",
+      "كاتب السيرة يحوّل إجابتك إلى معلومات مهنية…",
+      "استغرق الطلب وقتًا أطول من المعتاد، لكن إجابتك ما زالت ظاهرة هنا…",
+    ]
+    : [
+      "Your answer was sent. The resume writer is reading it now…",
+      "The resume writer is turning your answer into professional evidence…",
+      "This is taking longer than usual, but your answer is still visible here…",
+    ];
+
+  return (
+    <div className="flex items-center gap-2 ps-10 text-xs text-muted" role="status">
+      <LoaderCircle className="h-4 w-4 animate-spin text-primary-text" />
+      {copy[phase]}
+    </div>
+  );
+}
+
 function ReadinessBar({ score, locale }: { score: number; locale: "ar" | "en" }) {
   return (
     <div className="flex items-center gap-3 text-sm" aria-label={locale === "ar" ? `جاهزية السيرة ${score}%` : `Resume readiness ${score}%`}>
@@ -675,6 +707,7 @@ function ConversationPanel({
   conversationLanguage,
   workspace,
   message,
+  optimisticMessage,
   error,
   busy,
   importing,
@@ -704,6 +737,7 @@ function ConversationPanel({
   conversationLanguage: "ar" | "en";
   workspace: ApiResumeWorkspace;
   message: string;
+  optimisticMessage: ApiResumeMessage | null;
   error: unknown;
   busy: boolean;
   importing: boolean;
@@ -730,6 +764,12 @@ function ConversationPanel({
   onCorrect: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const conversationEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    conversationEndRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [busy, optimisticMessage?.id, workspace.messages.length]);
+
   return (
     <section className="relative flex min-h-0 flex-col overflow-hidden border-y border-border xl:border-y-0" aria-label={locale === "ar" ? "محادثة بناء السيرة" : "Resume-building conversation"}>
       <header className="flex min-h-[62px] items-center justify-between gap-3 border-b border-border px-5">
@@ -756,6 +796,7 @@ function ConversationPanel({
         ) : null}
         <ExtractedFactsReview locale={locale} facts={importedFacts} confirmingFactId={confirmingFactId} onConfirm={onConfirmFact} />
         {workspace.messages.filter((item) => item.status !== "failed").map((item) => <MessageBubble key={item.id} message={item} />)}
+        {optimisticMessage ? <MessageBubble message={optimisticMessage} /> : null}
         <UnderstandingCard
           workspace={workspace}
           locale={locale}
@@ -768,8 +809,9 @@ function ConversationPanel({
           onCancelCorrection={onCancelCorrection}
           onCorrect={onCorrect}
         />
-        {busy ? <div className="flex items-center gap-2 ps-10 text-xs text-muted" role="status"><LoaderCircle className="h-4 w-4 animate-spin text-primary-text" />{locale === "ar" ? "المساعد يفهم إجابتك ويحدّث السيرة…" : "The assistant is understanding your answer and updating the resume…"}</div> : null}
+        {busy ? <ResumeWriterBusyStatus locale={locale} /> : null}
         {error ? <p className="rounded-lg border border-danger bg-danger-pale p-3 text-sm text-danger" role="alert"><AlertCircle className="me-2 inline h-4 w-4" />{apiErrorMessage(error, locale)}</p> : null}
+        <div ref={conversationEndRef} aria-hidden="true" />
       </div>
 
       <footer className="space-y-3 border-t border-border p-3 sm:p-4">
@@ -904,6 +946,7 @@ export function ResumeWorkspaceV2({
   const [renewConsentAccepted, setRenewConsentAccepted] = useState(false);
   const [starting, setStarting] = useState(false);
   const [message, setMessage] = useState("");
+  const [optimisticMessage, setOptimisticMessage] = useState<ApiResumeMessage | null>(null);
   const [busy, setBusy] = useState(false);
   const [importing, setImporting] = useState(false);
   const [rewriting, setRewriting] = useState(false);
@@ -1048,23 +1091,41 @@ export function ResumeWorkspaceV2({
     const normalizedContent = content.trim();
     if (!current || (!normalizedContent && !quickAction)) return;
     const operationEpoch = operationEpochRef.current;
+    const clientTurnId = freshTurnId();
+    const restoreMessageOnError = !quickAction && Boolean(normalizedContent);
+    setOptimisticMessage({
+      id: `optimistic-${clientTurnId}`,
+      sequence: current.messages.length + 1,
+      role: "user",
+      kind: "text",
+      content: normalizedContent,
+      structured_payload: quickAction ? { quick_action: quickAction } : {},
+      status: "pending",
+      client_turn_id: clientTurnId,
+      created_at: new Date().toISOString(),
+    });
+    if (restoreMessageOnError) setMessage("");
     setBusy(true);
     setError(null);
     try {
       const next = await sendResumeWorkspaceMessage(profile.id, {
         content: normalizedContent,
-        clientTurnId: freshTurnId(),
+        clientTurnId,
         expectedRevision: current.revision,
         quickAction,
       });
       if (!operationIsCurrent(operationEpoch)) return;
       commitWorkspace(next);
-      setVersions(next.versions ?? versions);
-      setMessage("");
+      setVersions((currentVersions) => next.versions ?? currentVersions);
+      setOptimisticMessage(null);
       setRecentImportName(null);
       if (next.current_draft && next.stage !== "understanding") setMobilePanel("resume");
     } catch (nextError) {
       if (!operationIsCurrent(operationEpoch)) return;
+      setOptimisticMessage(null);
+      if (restoreMessageOnError) {
+        setMessage((currentMessage) => currentMessage || normalizedContent);
+      }
       if (nextError instanceof ApiHttpError && nextError.code === "resume_workspace_revision_conflict") {
         await refreshWorkspace(operationEpoch).catch(() => undefined);
       }
@@ -1513,6 +1574,7 @@ export function ResumeWorkspaceV2({
     setPreviewing(false);
     setExporting(false);
     setMessage("");
+    setOptimisticMessage(null);
     setReviewAcknowledged(false);
     setSaveState("saved");
     setSelection(null);
@@ -1757,6 +1819,7 @@ export function ResumeWorkspaceV2({
                 conversationLanguage={activeConversationLanguage}
                 workspace={workspace}
                 message={message}
+                optimisticMessage={optimisticMessage}
                 error={error}
                 busy={busy || resetting}
                 importing={importing}

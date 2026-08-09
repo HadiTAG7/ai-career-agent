@@ -6,7 +6,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from functools import partial
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
@@ -56,6 +56,8 @@ from career_agent_api.schemas.api import (
 )
 from career_agent_api.services.resume_export import render_resume_pdf
 from career_agent_api.services.resume_writer import (
+    RESUME_SECTION_ORDER,
+    ResumeWriterCategory,
     ResumeWriterError,
     ResumeWriterProvider,
     build_resume_evidence,
@@ -242,7 +244,7 @@ def _coverage(
     confirmed = [fact for fact in facts if fact.verification_status is VerificationStatus.CONFIRMED]
     categories = {fact.category.value for fact in confirmed}
     coverage = {
-        "experience": bool({"experience", "project"} & categories),
+        "experience": "experience" in categories,
         "education": "education" in categories,
         "project": "project" in categories,
         "skill": "skill" in categories,
@@ -269,7 +271,7 @@ def _first_question(
         for fact in facts
         if fact.verification_status is VerificationStatus.CONFIRMED
     }
-    if "experience" not in categories and "project" not in categories:
+    if "experience" not in categories:
         if language is PreferredLanguage.AR:
             question = (
                 "احكِ لي عن تجربة عمل أو مشروع واحد تفخر به: ماذا فعلت، وبأي أداة، وما النتيجة؟"
@@ -299,6 +301,25 @@ def _first_question(
             why = "This completes education and only shows a GPA when it strengthens the resume."
         category = "education"
         fields = ["degree", "field", "institution", "graduation_date", "gpa"]
+    elif "project" not in categories:
+        if language is PreferredLanguage.AR:
+            question = (
+                "حدثني عن مشروع أكاديمي أو شخصي مناسب للسيرة: ما هدفه، وما دورك، "
+                "وما الأدوات التي استخدمتها؟"
+            )
+            placeholder = "اسم المشروع أو فكرته، مساهمتك، الأدوات، والنتيجة إن وجدت."
+            why = "المشروع يثبت قدرتك العملية خصوصًا إذا كانت خبرتك الوظيفية محدودة."
+        else:
+            question = (
+                "Tell me about a relevant academic or personal project: what was its goal, "
+                "what did you contribute, and which tools did you use?"
+            )
+            placeholder = "Project idea, your contribution, tools, and outcome if known."
+            why = (
+                "A project demonstrates practical ability, especially with limited work experience."
+            )
+        category = "project"
+        fields = ["goal", "contribution", "tools", "outcome"]
     elif "skill" not in categories:
         if language is PreferredLanguage.AR:
             question = (
@@ -316,6 +337,30 @@ def _first_question(
             why = "Skills backed by examples are stronger than a keyword list."
         category = "skill"
         fields = ["skills", "evidence"]
+    elif "certification" not in categories:
+        if language is PreferredLanguage.AR:
+            question = "هل لديك شهادة مهنية؟ اذكر اسمها، الجهة المانحة، وسنة الحصول عليها."
+            placeholder = "اسم الشهادة، الجهة المانحة، والسنة؛ أو تخطَّ إن لم توجد."
+            why = "نضيف فقط الشهادات المهنية الدقيقة والقابلة للعرض."
+        else:
+            question = (
+                "Do you have a professional certification? Share its name, issuer, and year earned."
+            )
+            placeholder = "Certification, issuer, and year; or skip if none."
+            why = "Only accurate, resume-ready certifications should be included."
+        category = "certification"
+        fields = ["name", "issuer", "year"]
+    elif "language" not in categories:
+        if language is PreferredLanguage.AR:
+            question = "ما اللغات التي تستخدمها، وما مستواك الفعلي في كل لغة؟"
+            placeholder = "اللغة ومستواك: أساسي، متوسط، متقدم، أو طليق."
+            why = "مستوى واضح يجعل قسم اللغات دقيقًا ومفيدًا."
+        else:
+            question = "Which languages do you use, and what is your actual proficiency in each?"
+            placeholder = "Language and level: basic, intermediate, advanced, or fluent."
+            why = "Clear proficiency makes the language section accurate and useful."
+        category = "language"
+        fields = ["language", "proficiency"]
     else:
         if language is PreferredLanguage.AR:
             question = (
@@ -432,6 +477,67 @@ def _dump(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _dump(item) for key, item in value.items()}
     return value
+
+
+def _first_interview_section(facts: list[CareerFact]) -> ResumeWriterCategory:
+    confirmed_categories = {
+        fact.category.value
+        for fact in facts
+        if fact.verification_status is VerificationStatus.CONFIRMED
+    }
+    return next(
+        (
+            category
+            for category in RESUME_SECTION_ORDER
+            if category not in confirmed_categories
+        ),
+        RESUME_SECTION_ORDER[-1],
+    )
+
+
+def _next_interview_section(category: str) -> ResumeWriterCategory | None:
+    try:
+        index = RESUME_SECTION_ORDER.index(cast(ResumeWriterCategory, category))
+    except ValueError:
+        return RESUME_SECTION_ORDER[0]
+    if index + 1 >= len(RESUME_SECTION_ORDER):
+        return None
+    return RESUME_SECTION_ORDER[index + 1]
+
+
+def _workspace_conversation(workspace: ResumeWorkspace) -> list[dict[str, str]]:
+    return [
+        {"role": message.role.value, "content": message.content}
+        for message in workspace.messages[-12:]
+        if message.role in {ResumeMessageRole.USER, ResumeMessageRole.ASSISTANT}
+        and message.content.strip()
+    ]
+
+
+async def _generate_ordered_question(
+    provider: ResumeWriterProvider,
+    *,
+    language: PreferredLanguage,
+    evidence: tuple[Any, ...],
+    category: ResumeWriterCategory,
+    conversation: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    questions = await provider.generate_questions(
+        language=language,
+        target_role=None,
+        evidence=evidence,
+        conversation=conversation or [],
+        required_category=category,
+        max_questions=1,
+    )
+    if not questions:
+        raise ResumeWriterError("Resume writer returned no interview question")
+    question = _dump(questions[0])
+    if not isinstance(question, dict) or question.get("category") != category:
+        raise ResumeWriterError("Resume writer returned an out-of-order interview question")
+    question["quick_replies"] = ["no_exact_metric", "show_example", "skip"]
+    question["generation_source"] = "ai"
+    return question
 
 
 def _fact_handle(fact: CareerFact) -> str:
@@ -786,7 +892,6 @@ async def _handle_resume_quick_action(
     workspace: ResumeWorkspace,
     provider: ResumeWriterProvider,
     action: str,
-    facts: list[CareerFact],
     evidence: tuple[Any, ...],
     current_question: dict[str, Any],
     user_message: ResumeMessage,
@@ -838,28 +943,41 @@ async def _handle_resume_quick_action(
         assistant_kind = ResumeMessageKind.QUESTION
         structured_payload = {"question": next_question, "quick_action": action}
     elif action in {"skip", "continue"}:
-        questions = await provider.generate_questions(
-            language=conversation_language,
-            target_role=None,
-            evidence=evidence,
-        )
-        current_id = str(current_question.get("id") or "")
-        selected = next(
-            (question for question in questions if question.id != current_id),
-            questions[0] if questions else None,
-        )
-        next_question = (
-            _dump(selected) if selected else _first_question(conversation_language, facts)
-        )
-        assistant_content = str(next_question["question"])
         workspace.pending_understanding = None
-        workspace.provider_metadata = {
-            **workspace.provider_metadata,
-            "current_question": next_question,
-            "pending_question": None,
-        }
-        assistant_kind = ResumeMessageKind.QUESTION
-        structured_payload = {"question": next_question, "quick_action": action}
+        next_category = _next_interview_section(category)
+        if next_category is None:
+            assistant_content = (
+                "اكتملت أقسام المقابلة الأساسية. يمكنك الآن كتابة السيرة ومراجعتها."
+                if conversation_language is PreferredLanguage.AR
+                else (
+                    "The core interview sections are complete. "
+                    "You can now write and review the resume."
+                )
+            )
+            workspace.provider_metadata = {
+                **workspace.provider_metadata,
+                "current_question": None,
+                "pending_question": None,
+                "interview_complete": True,
+            }
+            structured_payload = {"quick_action": action, "interview_complete": True}
+        else:
+            next_question = await _generate_ordered_question(
+                provider,
+                language=conversation_language,
+                evidence=evidence,
+                category=next_category,
+                conversation=_workspace_conversation(workspace),
+            )
+            assistant_content = str(next_question["question"])
+            workspace.provider_metadata = {
+                **workspace.provider_metadata,
+                "current_question": next_question,
+                "pending_question": None,
+                "interview_complete": False,
+            }
+            assistant_kind = ResumeMessageKind.QUESTION
+            structured_payload = {"question": next_question, "quick_action": action}
     elif action in {"generate", "improve", "review"}:
         if not evidence:
             raise _api_error(
@@ -973,7 +1091,30 @@ async def start_resume_workspace(
                     "Start a new resume workspace to change the conversation language",
                 )
             facts = await _profile_facts(session, profile_id)
-            question = _first_question(conversation_language, facts)
+            evidence = build_resume_evidence(facts)
+            if provider.available and (
+                payload.data_sharing_acknowledged
+                or _has_current_consent(workspace, provider)
+            ):
+                try:
+                    question = await _generate_ordered_question(
+                        provider,
+                        language=conversation_language,
+                        evidence=evidence,
+                        category=_first_interview_section(facts),
+                    )
+                except ResumeWriterError as exc:
+                    logger.warning("Initial AI resume question failed: %s", exc)
+                    raise _api_error(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "resume_writer_unavailable",
+                        (
+                            "The AI resume writer is temporarily unavailable; "
+                            "retry starting the interview"
+                        ),
+                    ) from exc
+            else:
+                question = _first_question(conversation_language, facts)
             assistant_question = await session.scalar(
                 select(ResumeMessage)
                 .where(
@@ -1012,10 +1153,65 @@ async def start_resume_workspace(
                 "current_question": question,
                 "pending_question": None,
             }
+        elif (
+            provider.available
+            and payload.data_sharing_acknowledged
+            and not workspace.pending_understanding
+            and (
+                workspace.provider_metadata.get("current_question") or {}
+            ).get("generation_source")
+            != "ai"
+        ):
+            user_message_count = await session.scalar(
+                select(func.count(ResumeMessage.id)).where(
+                    ResumeMessage.workspace_id == workspace.id,
+                    ResumeMessage.role == ResumeMessageRole.USER,
+                )
+            )
+            if not user_message_count:
+                facts = await _profile_facts(session, profile_id)
+                try:
+                    question = await _generate_ordered_question(
+                        provider,
+                        language=conversation_language,
+                        evidence=build_resume_evidence(facts),
+                        category=_first_interview_section(facts),
+                    )
+                except ResumeWriterError as exc:
+                    logger.warning("Initial AI resume question refresh failed: %s", exc)
+                    raise _api_error(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "resume_writer_unavailable",
+                        (
+                            "The AI resume writer is temporarily unavailable; "
+                            "retry starting the interview"
+                        ),
+                    ) from exc
+                assistant_question = await session.scalar(
+                    select(ResumeMessage)
+                    .where(
+                        ResumeMessage.workspace_id == workspace.id,
+                        ResumeMessage.role == ResumeMessageRole.ASSISTANT,
+                        ResumeMessage.kind == ResumeMessageKind.QUESTION,
+                    )
+                    .order_by(ResumeMessage.sequence.desc())
+                    .limit(1)
+                )
+                if assistant_question:
+                    assistant_question.content = str(question["question"])
+                    assistant_question.structured_payload = {"question": question}
+                    assistant_question.status = ResumeMessageStatus.SENT
+                workspace.revision += 1
+                workspace.provider_metadata = {
+                    **workspace.provider_metadata,
+                    "current_question": question,
+                    "pending_question": None,
+                }
         workspace.language = payload.language
         workspace.provider_metadata = {
             **workspace.provider_metadata,
             "conversation_language": conversation_language.value,
+            "section_order": list(RESUME_SECTION_ORDER),
         }
         workspace.contact = payload.contact.model_dump(mode="json", exclude_none=True)
         workspace.provider = provider.provider_name
@@ -1031,7 +1227,24 @@ async def start_resume_workspace(
 
     facts = await _profile_facts(session, profile_id)
     conversation_language = payload.conversation_language or payload.language
-    question = _first_question(conversation_language, facts)
+    evidence = build_resume_evidence(facts)
+    if provider.available and payload.data_sharing_acknowledged:
+        try:
+            question = await _generate_ordered_question(
+                provider,
+                language=conversation_language,
+                evidence=evidence,
+                category=_first_interview_section(facts),
+            )
+        except ResumeWriterError as exc:
+            logger.warning("Initial AI resume question failed: %s", exc)
+            raise _api_error(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "resume_writer_unavailable",
+                "The AI resume writer is temporarily unavailable; retry starting the interview",
+            ) from exc
+    else:
+        question = _first_question(conversation_language, facts)
     workspace = ResumeWorkspace(
         profile_id=profile_id,
         language=payload.language,
@@ -1044,6 +1257,7 @@ async def start_resume_workspace(
             "current_question": question,
             "prompt_version": CONSENT_VERSION,
             "conversation_language": conversation_language.value,
+            "section_order": list(RESUME_SECTION_ORDER),
         },
         consent_version=(
             _provider_consent_version(provider) if payload.data_sharing_acknowledged else None
@@ -1214,7 +1428,6 @@ async def send_resume_message(
                 workspace=workspace,
                 provider=provider,
                 action=payload.quick_action,
-                facts=facts,
                 evidence=evidence,
                 current_question=current_question,
                 user_message=user_message,
@@ -1259,13 +1472,18 @@ async def send_resume_message(
             draft_patch = _dump(getattr(result, "draft_patch", None))
             ready_to_generate = bool(getattr(result, "ready_to_generate", False))
         else:
-            questions = await provider.generate_questions(
-                language=conversation_language,
-                target_role=None,
-                evidence=evidence,
+            raw_category = str(current_question.get("category") or "")
+            required_category = (
+                raw_category
+                if raw_category in RESUME_SECTION_ORDER
+                else _first_interview_section(facts)
             )
-            next_question = (
-                _dump(questions[0]) if questions else _first_question(conversation_language, facts)
+            next_question = await _generate_ordered_question(
+                provider,
+                language=conversation_language,
+                evidence=evidence,
+                category=cast(ResumeWriterCategory, required_category),
+                conversation=_workspace_conversation(workspace),
             )
             understanding = answer
             proposed_records = [
@@ -1361,6 +1579,7 @@ async def confirm_resume_understanding(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
         )
+    provider = get_resume_writer_provider(settings)
     await _refresh_workspace(session, workspace)
     if payload.expected_revision != workspace.revision:
         raise _api_error(
@@ -1461,7 +1680,6 @@ async def confirm_resume_understanding(
         workspace.current_draft is None or pending.get("quick_action") in {"generate", "review"}
     )
     if should_generate_full_draft:
-        provider = get_resume_writer_provider(settings)
         try:
             generation_facts = await _profile_facts(session, profile_id)
             draft = await provider.generate_draft(
@@ -1512,10 +1730,33 @@ async def confirm_resume_understanding(
         workspace.stage = ResumeWorkspaceStage.WRITING
     next_question = pending.get("next_question")
     if pending.get("corrected_by_user") and not next_question:
-        next_question = _first_question(
-            _conversation_language(workspace),
-            await _profile_facts(session, profile_id),
+        corrected_facts = await _profile_facts(session, profile_id)
+        raw_category = str((pending.get("question") or {}).get("category") or "")
+        corrected_category = (
+            cast(ResumeWriterCategory, raw_category)
+            if raw_category in RESUME_SECTION_ORDER
+            else _first_interview_section(corrected_facts)
         )
+        if provider.available and _has_current_consent(workspace, provider):
+            try:
+                next_question = await _generate_ordered_question(
+                    provider,
+                    language=_conversation_language(workspace),
+                    evidence=build_resume_evidence(corrected_facts),
+                    category=corrected_category,
+                    conversation=_workspace_conversation(workspace),
+                )
+            except ResumeWriterError as exc:
+                logger.warning("Corrected-answer follow-up generation failed: %s", exc)
+                next_question = _first_question(
+                    _conversation_language(workspace),
+                    corrected_facts,
+                )
+        else:
+            next_question = _first_question(
+                _conversation_language(workspace),
+                corrected_facts,
+            )
     workspace.pending_understanding = None
     workspace.revision += 1
     if isinstance(next_question, dict) and next_question.get("question"):
@@ -1548,7 +1789,7 @@ async def confirm_resume_understanding(
     await session.commit()
     workspace = await _load_workspace(session, profile_id)
     assert workspace is not None
-    return _workspace_read(workspace, get_resume_writer_provider(settings))
+    return _workspace_read(workspace, provider)
 
 
 @router.post(

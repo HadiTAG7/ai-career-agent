@@ -11,6 +11,7 @@ from career_agent_api.core.config import get_settings
 from career_agent_api.db.base import Base
 from career_agent_api.db.session import get_engine, get_session_factory
 from career_agent_api.services.policies import seed_source_policies
+from career_agent_api.services.resume_writer import close_resume_writer_provider
 
 
 @asynccontextmanager
@@ -22,8 +23,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     async with get_session_factory()() as session:
         await seed_source_policies(session)
         await session.commit()
-    yield
-    await get_engine().dispose()
+    try:
+        yield
+    finally:
+        try:
+            await close_resume_writer_provider()
+        finally:
+            await get_engine().dispose()
 
 
 settings = get_settings()

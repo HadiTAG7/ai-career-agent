@@ -12,6 +12,7 @@ import career_agent_api.services.resume_intake as resume_intake
 from career_agent_api.core.config import Settings
 from career_agent_api.models.enums import FactCategory
 from career_agent_api.services.resume_intake import (
+    MAX_RESUME_SEGMENT_CHARS,
     MAX_RESUME_SEGMENTS,
     MAX_RESUME_TEXT_CHARS,
     MISTRAL_API_BASE_URL,
@@ -321,7 +322,44 @@ def test_build_resume_segments_enforces_segment_and_character_caps() -> None:
 
     large_segments = build_resume_segments("x" * 40_000 + "\n" + "y" * 40_000)
     assert sum(len(segment.text) for segment in large_segments) == MAX_RESUME_TEXT_CHARS
-    assert large_segments[1].text == "y" * 20_000
+    assert all(len(segment.text) <= MAX_RESUME_SEGMENT_CHARS for segment in large_segments)
+    assert "".join(segment.text for segment in large_segments) == ("x" * 40_000 + "y" * 20_000)
+
+
+def test_build_resume_segments_chunks_large_sections_without_losing_context() -> None:
+    entries = [
+        f"Portfolio analytics contribution {index}: Built scenario analysis using Python and SQL."
+        for index in range(100)
+    ]
+
+    segments = build_resume_segments("Projects\n" + "\n".join(entries))
+
+    assert len(segments) > 1
+    assert all(len(segment.text) <= MAX_RESUME_SEGMENT_CHARS for segment in segments)
+    assert all(segment.text.startswith("Projects:\n") for segment in segments)
+    observed_entries = [line for segment in segments for line in segment.text.splitlines()[1:]]
+    assert observed_entries == entries
+
+
+def test_project_title_and_description_do_not_split_across_segment_boundary() -> None:
+    filler = []
+    for index in range(55):
+        filler.extend(
+            [
+                f"Filler Project {index}",
+                "Built a compact analysis with Python and documented the result.",
+            ]
+        )
+    target_title = "Portfolio Risk Dashboard"
+    target_detail = "Built an interactive dashboard in Power BI."
+
+    segments = build_resume_segments(
+        "Projects\n" + "\n".join([*filler, target_title, target_detail])
+    )
+
+    target_segment = next(segment for segment in segments if target_title in segment.text)
+    assert target_detail in target_segment.text
+    assert all(segment.text.splitlines()[1] != target_detail for segment in segments)
 
 
 def test_build_resume_segments_joins_a_standalone_guided_label_to_its_answer() -> None:
@@ -348,11 +386,105 @@ def test_build_resume_segments_keeps_section_context_and_repairs_wrapped_sentenc
         ResumeSegment(
             handle="segment_1",
             text=(
-                "Professional Experience : Data Analyst — Acme; responsibilities: Built and "
-                "maintained weekly reports; tools: Python, Power BI"
+                "Professional Experience:\n"
+                "Data Analyst — Acme; responsibilities: Built and maintained weekly reports; "
+                "tools: Python, Power BI"
             ),
         ),
     )
+
+
+def test_build_resume_segments_keeps_related_resume_fields_in_complete_sections() -> None:
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        2025 – Present
+        Investment Analyst
+        Asset Management Company
+        Managed global equity portfolios and analyzed markets.
+        Skills
+        Financial Skills
+        Portfolio Management
+        Equity Research
+        Education
+        Bachelor of Science in Finance
+        King Fahd University of Petroleum and Minerals, Dhahran, Saudi Arabia
+        2024
+        """
+    )
+
+    assert segments == (
+        ResumeSegment(
+            handle="segment_1",
+            text=(
+                "Professional Experience:\n"
+                "2025 – Present\n"
+                "Investment Analyst\n"
+                "Asset Management Company\n"
+                "Managed global equity portfolios and analyzed markets."
+            ),
+        ),
+        ResumeSegment(
+            handle="segment_2",
+            text="Financial Skills:\nPortfolio Management\nEquity Research",
+        ),
+        ResumeSegment(
+            handle="segment_3",
+            text=(
+                "Education:\n"
+                "Bachelor of Science in Finance\n"
+                "King Fahd University of Petroleum and Minerals, Dhahran, Saudi Arabia\n"
+                "2024"
+            ),
+        ),
+    )
+
+
+def test_inline_section_values_keep_the_following_record_fields_together() -> None:
+    segments = build_resume_segments(
+        """
+        Professional Experience : 2025 – Present
+        Investment Analyst
+        Asset Management Company
+        Managed global equity portfolios.
+        Skills : Financial Skills
+        Portfolio Management
+        Education : Bachelor of Science in Finance
+        King Fahd University of Petroleum and Minerals
+        2024
+        """
+    )
+
+    assert [segment.text for segment in segments] == [
+        (
+            "Professional Experience:\n"
+            "2025 – Present\n"
+            "Investment Analyst\n"
+            "Asset Management Company\n"
+            "Managed global equity portfolios."
+        ),
+        "Skills:\nFinancial Skills\nPortfolio Management",
+        (
+            "Education:\n"
+            "Bachelor of Science in Finance\n"
+            "King Fahd University of Petroleum and Minerals\n"
+            "2024"
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Jan 2023 – Present",
+        "September 2021 – Dec 2023",
+        "09/2021 – 06/2024",
+        "يناير 2023 – الآن",
+        "٢٠٢٥",
+    ],
+)
+def test_common_resume_date_formats_are_recognized(value: str) -> None:
+    assert resume_intake._looks_like_date_only(value)
 
 
 def test_generated_headings_and_dangling_fragments_are_not_facts() -> None:
@@ -427,6 +559,35 @@ def test_short_name_like_context_can_still_be_an_organization() -> None:
     assert record.responsibilities == ["Built weekly reports"]
 
 
+def test_a_single_responsibility_is_not_split_at_a_natural_conjunction() -> None:
+    responsibility = "Built portfolio dashboards and automated monthly reporting"
+
+    record = resume_intake._record_from_candidate(
+        category=FactCategory.EXPERIENCE,
+        label="Data Analyst",
+        detail=f"Acme Company; responsibilities: {responsibility}",
+        source_handle="segment_1",
+        source_excerpt=f"Data Analyst — Acme Company; responsibilities: {responsibility}",
+    )
+
+    assert record.responsibilities == [responsibility]
+
+
+def test_institution_only_education_is_never_stored_as_a_degree() -> None:
+    institution = "King Fahd University of Petroleum and Minerals, Dhahran, Saudi Arabia"
+
+    record = resume_intake._record_from_candidate(
+        category=FactCategory.EDUCATION,
+        label=institution,
+        detail=None,
+        source_handle="segment_1",
+        source_excerpt=f"Education:\n{institution}",
+    )
+
+    assert record.institution == institution
+    assert record.degree is None
+
+
 @pytest.mark.asyncio
 async def test_section_scoped_local_fallback_creates_a_complete_record(
     monkeypatch: pytest.MonkeyPatch,
@@ -452,6 +613,495 @@ async def test_section_scoped_local_fallback_creates_a_complete_record(
     assert experience.detail == "Acme; responsibilities: Built weekly reports; tools: Python"
     assert experience.structured_value["organization"] == "Acme"
     assert experience.structured_value["responsibilities"] == ["Built weekly reports"]
+
+
+@pytest.mark.asyncio
+async def test_multi_entry_experience_keeps_date_before_and_after_with_the_right_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(content=json.dumps({"facts": []}))
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        Jan 2021 – Dec 2022
+        Data Analyst
+        Acme Company
+        Built monthly sales dashboards.
+        Senior Investment Analyst
+        Beta Bank
+        Jan 2023 – Present
+        Led equity research and prepared investment reports.
+        """
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [segment.text for segment in segments] == [
+        (
+            "Professional Experience:\n"
+            "Jan 2021 – Dec 2022\n"
+            "Data Analyst\n"
+            "Acme Company\n"
+            "Built monthly sales dashboards."
+        ),
+        (
+            "Professional Experience:\n"
+            "Senior Investment Analyst\n"
+            "Beta Bank\n"
+            "Jan 2023 – Present\n"
+            "Led equity research and prepared investment reports."
+        ),
+    ]
+    assert [fact.label for fact in result] == ["Data Analyst", "Senior Investment Analyst"]
+    assert result[0].structured_value["organization"] == "Acme Company"
+    assert result[0].structured_value["date_range"] == "Jan 2021 – Dec 2022"
+    assert result[0].structured_value["responsibilities"] == ["Built monthly sales dashboards"]
+    assert result[1].structured_value["organization"] == "Beta Bank"
+    assert result[1].structured_value["date_range"] == "Jan 2023 – Present"
+    assert result[1].structured_value["responsibilities"] == [
+        "Led equity research and prepared investment reports"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mixed_date_layout_keeps_the_second_leading_date_with_the_second_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(content=json.dumps({"facts": []}))
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        Data Analyst
+        Acme Company
+        2021 – 2022
+        Built dashboards.
+        2023 – Present
+        Senior Investment Analyst
+        Beta Bank
+        Led equity research.
+        """
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert "2023 – Present" not in segments[0].text
+    assert segments[1].text.startswith(
+        "Professional Experience:\n2023 – Present\nSenior Investment Analyst"
+    )
+    assert [fact.structured_value.get("date_range") for fact in result] == [
+        "2021 – 2022",
+        "2023 – Present",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_split_year_and_present_lines_form_one_experience_date_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(content=json.dumps({"facts": []}))
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        2025
+        Present
+        Investment Analyst
+        Asset Management Company
+        Analyzed global equity portfolios.
+        """
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [(fact.category, fact.label) for fact in result] == [
+        (FactCategory.EXPERIENCE, "Investment Analyst")
+    ]
+    record = result[0].structured_value
+    assert record["date_range"] == "2025 – Present"
+    assert record["organization"] == "Asset Management Company"
+    assert record["responsibilities"] == ["Analyzed global equity portfolios"]
+
+
+@pytest.mark.asyncio
+async def test_grounded_baseline_does_not_duplicate_generated_projects_languages_or_skills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "project",
+                        "label": "Portfolio Risk Dashboard",
+                        "detail": "Built an interactive dashboard in Power BI",
+                        "source_handle": "segment_1",
+                    },
+                    {
+                        "category": "skill",
+                        "label": "Python",
+                        "detail": None,
+                        "source_handle": "segment_2",
+                    },
+                    {
+                        "category": "skill",
+                        "label": "SQL",
+                        "detail": None,
+                        "source_handle": "segment_2",
+                    },
+                    {
+                        "category": "skill",
+                        "label": "Power BI",
+                        "detail": None,
+                        "source_handle": "segment_2",
+                    },
+                    {
+                        "category": "language",
+                        "label": "Arabic",
+                        "detail": None,
+                        "source_handle": "segment_3",
+                    },
+                    {
+                        "category": "language",
+                        "label": "English",
+                        "detail": None,
+                        "source_handle": "segment_3",
+                    },
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        """
+        Projects
+        Portfolio Risk Dashboard
+        Built an interactive dashboard in Power BI.
+        Skills
+        Python / SQL / Power BI
+        Languages
+        Arabic / English
+        """
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [(fact.category, fact.label) for fact in result] == [
+        (FactCategory.PROJECT, "Portfolio Risk Dashboard"),
+        (FactCategory.SKILL, "Python"),
+        (FactCategory.SKILL, "SQL"),
+        (FactCategory.SKILL, "Power BI"),
+        (FactCategory.LANGUAGE, "Arabic"),
+        (FactCategory.LANGUAGE, "English"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grounded_baseline_fills_specific_skills_the_provider_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "skill",
+                        "label": "Python",
+                        "detail": None,
+                        "source_handle": "segment_1",
+                    }
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments("Skills\nPython / SQL / Power BI")
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [fact.label for fact in result] == ["Python", "SQL", "Power BI"]
+
+
+@pytest.mark.asyncio
+async def test_project_action_sentence_cannot_replace_the_explicit_project_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = "Built an interactive dashboard in Power BI"
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "project",
+                        "label": action,
+                        "detail": None,
+                        "source_handle": "segment_1",
+                    }
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(f"Projects\nPortfolio Risk Dashboard\n{action}.")
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [(fact.label, fact.detail) for fact in result] == [
+        ("Portfolio Risk Dashboard", f"{action}.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_same_role_at_two_employers_stays_as_two_separate_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        Data Analyst
+        Acme Company
+        2021 – 2023
+        Built sales reports.
+        Data Analyst
+        Beta Bank
+        2023 – Present
+        Built portfolio reports.
+        """
+    )
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "experience",
+                        "label": "Data Analyst",
+                        "detail": "Acme Company",
+                        "source_handle": "segment_1",
+                    }
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [fact.label for fact in result] == ["Data Analyst", "Data Analyst"]
+    assert [fact.structured_value["organization"] for fact in result] == [
+        "Acme Company",
+        "Beta Bank",
+    ]
+    assert [fact.structured_value["date_range"] for fact in result] == [
+        "2021 – 2023",
+        "2023 – Present",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cross_paired_employers_are_removed_and_repaired_from_each_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        Data Analyst
+        Acme Company
+        2021 – 2023
+        Built sales reports.
+        Portfolio Manager
+        Beta Bank
+        2023 – Present
+        Managed equity portfolios.
+        """
+    )
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "experience",
+                        "label": "Data Analyst",
+                        "detail": "Beta Bank",
+                        "source_handle": "segment_1",
+                    },
+                    {
+                        "category": "experience",
+                        "label": "Portfolio Manager",
+                        "detail": "Acme Company",
+                        "source_handle": "segment_2",
+                    },
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [fact.structured_value["organization"] for fact in result] == [
+        "Acme Company",
+        "Beta Bank",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_heading_date_skill_group_and_institution_fragments_are_all_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    institution = "King Fahd University of Petroleum and Minerals"
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "experience",
+                        "label": "2025",
+                        "detail": "Present",
+                        "source_handle": "segment_1",
+                    },
+                    {
+                        "category": "skill",
+                        "label": "Financial Skills",
+                        "detail": None,
+                        "source_handle": "segment_2",
+                    },
+                    {
+                        "category": "education",
+                        "label": institution,
+                        "detail": None,
+                        "source_handle": "segment_3",
+                    },
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        f"Professional Experience : 2025 – Present\n"
+        "Skills : Financial Skills\n"
+        f"Education : {institution}"
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_upload_replaces_heading_and_date_fragments_with_complete_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "experience",
+                        "label": "2025",
+                        "detail": "Present",
+                        "source_handle": "segment_1",
+                    },
+                    {
+                        "category": "experience",
+                        "label": "Investment Analyst",
+                        "detail": None,
+                        "source_handle": "segment_1",
+                    },
+                    {
+                        "category": "skill",
+                        "label": "Financial Skills",
+                        "detail": None,
+                        "source_handle": "segment_2",
+                    },
+                    {
+                        "category": "education",
+                        "label": (
+                            "King Fahd University of Petroleum and Minerals, Dhahran, Saudi Arabia"
+                        ),
+                        "detail": None,
+                        "source_handle": "segment_3",
+                    },
+                    {
+                        "category": "education",
+                        "label": "Bachelor of Science in Finance",
+                        "detail": None,
+                        "source_handle": "segment_3",
+                    },
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        """
+        Professional Experience
+        2025 – Present
+        Investment Analyst
+        Asset Management Company
+        Managed global equity portfolios and analyzed markets.
+        Skills
+        Financial Skills
+        Portfolio Management
+        Equity Research
+        Education
+        Bachelor of Science in Finance
+        King Fahd University of Petroleum and Minerals, Dhahran, Saudi Arabia
+        2024
+        """
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [(fact.category, fact.label) for fact in result] == [
+        (FactCategory.EXPERIENCE, "Investment Analyst"),
+        (FactCategory.SKILL, "Portfolio Management"),
+        (FactCategory.SKILL, "Equity Research"),
+        (FactCategory.EDUCATION, "Bachelor of Science in Finance"),
+    ]
+    experience = result[0].structured_value
+    assert experience["organization"] == "Asset Management Company"
+    assert experience["date_range"] == "2025 – Present"
+    assert experience["responsibilities"] == [
+        "Managed global equity portfolios and analyzed markets"
+    ]
+    education = result[-1].structured_value
+    assert education["degree"] == "Bachelor of Science in Finance"
+    assert education["institution"] == (
+        "King Fahd University of Petroleum and Minerals, Dhahran, Saudi Arabia"
+    )
+    assert education["date_range"] == "2024"
+    assert len(capture.create_calls) == 1
 
 
 @pytest.mark.asyncio

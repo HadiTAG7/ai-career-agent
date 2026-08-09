@@ -1,5 +1,6 @@
 import io
 import zipfile
+from uuid import UUID
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ from conftest import create_profile_and_source
 from fastapi import HTTPException
 
 import career_agent_api.api.router as router_module
+from career_agent_api.models.domain import EvidenceSource
 from career_agent_api.models.enums import FactCategory
 from career_agent_api.services import imports
 from career_agent_api.services.imports import FactCandidate, _facts_from_cv_text
@@ -83,9 +85,7 @@ class UpgradeResumeProvider(StubResumeProvider):
 
 def minimal_docx(text: str = "Skills: Python and SQL\nBachelor of Computer Science") -> bytes:
     stream = io.BytesIO()
-    paragraphs = "".join(
-        f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in text.splitlines()
-    )
+    paragraphs = "".join(f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in text.splitlines())
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
       <w:body>{paragraphs}</w:body>
@@ -184,6 +184,7 @@ async def test_ai_docx_import_uses_provider_and_returns_existing_ai_analysis_on_
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
+    assert metadata["extractor_version"] == "resume-records-v3"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert "Senior Python backend developer" not in str(metadata)
     assert {fact["verification_status"] for fact in result["facts"]} == {"extracted"}
@@ -228,9 +229,7 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
         f"/v1/profiles/{profile['id']}/facts/{facts_by_label['sql']['id']}/unconfirm"
     )
     assert unconfirmed.status_code == 200, unconfirmed.text
-    source_count = len(
-        (await client.get(f"/v1/profiles/{profile['id']}/sources")).json()
-    )
+    source_count = len((await client.get(f"/v1/profiles/{profile['id']}/sources")).json())
 
     provider = UpgradeResumeProvider()
     monkeypatch.setattr(
@@ -254,6 +253,7 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
+    assert metadata["extractor_version"] == "resume-records-v3"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert metadata["candidate_fact_count"] == 4
     assert {fact["label"] for fact in result["facts"]} == {
@@ -261,9 +261,7 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
         "Portfolio project",
     }
 
-    all_facts = (
-        await client.get(f"/v1/profiles/{profile['id']}/facts")
-    ).json()
+    all_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts")).json()
     saved_by_label = {fact["label"].casefold(): fact for fact in all_facts}
     assert saved_by_label["python"]["verification_status"] == "confirmed"
     assert saved_by_label["python"]["detail"] is None
@@ -271,8 +269,7 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
     assert saved_by_label["sql"]["detail"] is None
     assert saved_by_label["bachelor of computer science"]["verification_status"] == "extracted"
     assert (
-        saved_by_label["bachelor of computer science"]["detail"]
-        == "AI-enriched education detail"
+        saved_by_label["bachelor of computer science"]["detail"] == "AI-enriched education detail"
     )
     assert saved_by_label["portfolio project"]["verification_status"] == "extracted"
     assert len((await client.get(f"/v1/profiles/{profile['id']}/sources")).json()) == source_count
@@ -291,6 +288,91 @@ async def test_local_import_can_be_ai_upgraded_without_replacing_reviewed_facts(
         "bachelor of computer science",
         "portfolio project",
     }
+    assert len(provider.contexts) == 1
+
+
+async def test_v2_ai_import_is_reanalyzed_once_by_v3_without_replacing_reviewed_facts(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    document = minimal_docx("Skills: Python and SQL and Docker\nBachelor of Computer Science")
+    upload = {
+        "file": (
+            "resume.docx",
+            document,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    }
+
+    imported = await client.post(f"/v1/profiles/{profile['id']}/imports", files=upload)
+    assert imported.status_code == 201, imported.text
+    imported_result = imported.json()
+    source_id = imported_result["source"]["id"]
+    facts_by_label = {fact["label"].casefold(): fact for fact in imported_result["facts"]}
+
+    confirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{facts_by_label['python']['id']}/confirm"
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    unconfirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{facts_by_label['sql']['id']}/unconfirm"
+    )
+    assert unconfirmed.status_code == 200, unconfirmed.text
+    stale_extracted_id = facts_by_label["docker"]["id"]
+
+    async with session_factory() as session:
+        source = await session.get(EvidenceSource, UUID(source_id))
+        assert source is not None
+        source.source_metadata = {
+            **source.source_metadata,
+            "ai_enhanced": True,
+            "extractor_version": "resume-records-v2",
+            "ai_provider": "mistral",
+            "ai_model": "legacy-resume-model",
+        }
+        await session.commit()
+
+    provider = UpgradeResumeProvider()
+    monkeypatch.setattr(
+        router_module,
+        "get_resume_intake_provider",
+        lambda _settings: provider,
+    )
+    form = {"use_ai": "true", "data_sharing_acknowledged": "true"}
+
+    upgraded = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        files=upload,
+        data=form,
+    )
+    assert upgraded.status_code == 201, upgraded.text
+    upgraded_result = upgraded.json()
+    assert upgraded_result["analysis_status"] == "ai_upgraded"
+    assert upgraded_result["source"]["id"] == source_id
+    assert upgraded_result["source"]["source_metadata"]["extractor_version"] == (
+        "resume-records-v3"
+    )
+    assert len(provider.contexts) == 1
+
+    current_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts")).json()
+    current_by_id = {fact["id"]: fact for fact in current_facts}
+    assert stale_extracted_id not in current_by_id
+    assert current_by_id[facts_by_label["python"]["id"]]["verification_status"] == ("confirmed")
+    assert current_by_id[facts_by_label["python"]["id"]]["detail"] is None
+    assert current_by_id[facts_by_label["sql"]["id"]]["verification_status"] == ("unconfirmed")
+    assert current_by_id[facts_by_label["sql"]["id"]]["detail"] is None
+    assert "Portfolio project" in {fact["label"] for fact in current_facts}
+
+    repeated = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        files=upload,
+        data=form,
+    )
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["analysis_status"] == "already_ai_analyzed"
+    assert repeated.json()["source"]["id"] == source_id
     assert len(provider.contexts) == 1
 
 
@@ -482,9 +564,7 @@ async def test_duplicate_import_is_rejected_without_duplicate_sources_or_revisio
     assert second.json()["detail"]["code"] == "resume_content_duplicate"
     assert second.json()["detail"]["message"] == "This file has already been imported"
     assert (await client.get("/v1/profiles")).json()["evidence_revision"] == revision_after_first
-    duplicate_source_count = len(
-        (await client.get(f"/v1/profiles/{profile['id']}/sources")).json()
-    )
+    duplicate_source_count = len((await client.get(f"/v1/profiles/{profile['id']}/sources")).json())
     assert duplicate_source_count == source_count_after_first
 
 
@@ -500,9 +580,7 @@ def test_negated_or_third_party_skill_lines_do_not_create_positive_facts() -> No
 
 def test_arabic_resume_section_headings_are_recognized() -> None:
     candidates = _facts_from_cv_text(
-        "المشاريع: لوحة بيانات أسبوعية\n"
-        "اللغات: العربية والإنجليزية\n"
-        "التعليم: بكالوريوس نظم معلومات"
+        "المشاريع: لوحة بيانات أسبوعية\nاللغات: العربية والإنجليزية\nالتعليم: بكالوريوس نظم معلومات"
     )
 
     assert {candidate.category for candidate in candidates} >= {
