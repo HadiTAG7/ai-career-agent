@@ -52,6 +52,8 @@ from career_agent_api.schemas.api import (
     ApplicationCreate,
     ApplicationRead,
     ApplicationUpdate,
+    CareerFactBatchConfirmCreate,
+    CareerFactBatchConfirmRead,
     CareerFactCreate,
     CareerFactRead,
     CareerFactUpdate,
@@ -324,12 +326,20 @@ def _career_profile_summary(
     )
 
 
-async def _owned_profile(session: AsyncSession, profile_id: UUID, owner_id: str) -> CareerProfile:
-    profile = await session.scalar(
-        select(CareerProfile).where(
-            CareerProfile.id == profile_id, CareerProfile.owner_id == owner_id
-        )
+async def _owned_profile(
+    session: AsyncSession,
+    profile_id: UUID,
+    owner_id: str,
+    *,
+    for_update: bool = False,
+) -> CareerProfile:
+    statement = select(CareerProfile).where(
+        CareerProfile.id == profile_id,
+        CareerProfile.owner_id == owner_id,
     )
+    if for_update:
+        statement = statement.with_for_update()
+    profile = await session.scalar(statement)
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
     return profile
@@ -868,7 +878,10 @@ async def import_professional_file(
         return ImportResultRead(
             source=existing_source,
             facts=existing_facts,
-            requires_user_review=True,
+            requires_user_review=any(
+                fact.verification_status is VerificationStatus.EXTRACTED
+                for fact in existing_facts
+            ),
             analysis_status="already_ai_analyzed",
         )
 
@@ -938,7 +951,10 @@ async def import_professional_file(
             return ImportResultRead(
                 source=existing_source,
                 facts=current_facts,
-                requires_user_review=True,
+                requires_user_review=any(
+                    fact.verification_status is VerificationStatus.EXTRACTED
+                    for fact in current_facts
+                ),
                 analysis_status="already_ai_analyzed",
             )
         existing_facts = list(
@@ -1053,7 +1069,10 @@ async def import_professional_file(
         return ImportResultRead(
             source=existing_source,
             facts=changed_facts,
-            requires_user_review=True,
+            requires_user_review=any(
+                fact.verification_status is VerificationStatus.EXTRACTED
+                for fact in changed_facts
+            ),
             analysis_status="ai_upgraded",
         )
 
@@ -1129,7 +1148,7 @@ async def import_resume_workspace_file(
 ) -> ImportResultRead:
     """Use the canonical import pipeline from inside the conversational workspace."""
 
-    return await import_professional_file(
+    result = await import_professional_file(
         profile_id=profile_id,
         user=user,
         file=file,
@@ -1138,6 +1157,18 @@ async def import_resume_workspace_file(
         settings=settings,
         session=session,
     )
+    workspace = await session.scalar(
+        select(ResumeWorkspace).where(ResumeWorkspace.profile_id == profile_id).with_for_update()
+    )
+    if workspace:
+        workspace.provider_metadata = {
+            **workspace.provider_metadata,
+            "pending_import_source_id": str(result.source.id),
+            "pending_import_filename": result.source.original_filename,
+            "pending_import_analysis_status": result.analysis_status,
+        }
+        await session.commit()
+    return result
 
 
 @router.post(
@@ -1400,6 +1431,148 @@ async def confirm_fact(
     await session.commit()
     await session.refresh(fact)
     return fact
+
+
+@router.post(
+    "/profiles/{profile_id}/facts/confirm-batch",
+    response_model=CareerFactBatchConfirmRead,
+)
+async def confirm_facts_batch(
+    profile_id: UUID,
+    payload: CareerFactBatchConfirmCreate,
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db),
+) -> CareerFactBatchConfirmRead:
+    """Confirm reviewed facts from one import atomically and advance evidence once."""
+
+    profile = await _owned_profile(session, profile_id, user.id, for_update=True)
+    source = await session.scalar(
+        select(EvidenceSource).where(
+            EvidenceSource.id == payload.source_id,
+            EvidenceSource.profile_id == profile_id,
+            EvidenceSource.kind == SourceKind.CV_UPLOAD,
+        ).with_for_update()
+    )
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    source_metadata = source.source_metadata if isinstance(source.source_metadata, dict) else {}
+    requested_fact_ids = sorted(str(fact_id) for fact_id in payload.fact_ids)
+    if (
+        str(source_metadata.get("last_confirm_batch_request_id") or "")
+        == str(payload.client_request_id)
+        and source_metadata.get("last_confirm_batch_fact_ids") == requested_fact_ids
+    ):
+        repeated_facts = list(
+            (
+                await session.scalars(
+                    select(CareerFact).where(
+                        CareerFact.profile_id == profile_id,
+                        CareerFact.source_id == payload.source_id,
+                        CareerFact.id.in_(payload.fact_ids),
+                    )
+                )
+            ).all()
+        )
+        stored_revision = source_metadata.get("last_confirm_batch_evidence_revision")
+        if (
+            stored_revision != profile.evidence_revision
+            or {fact.id for fact in repeated_facts} != set(payload.fact_ids)
+            or any(
+                fact.verification_status is not VerificationStatus.CONFIRMED
+                for fact in repeated_facts
+            )
+        ):
+            raise _resume_ai_error(
+                status.HTTP_409_CONFLICT,
+                "resume_evidence_revision_conflict",
+                "Professional evidence changed after this import review; reload before continuing",
+            )
+        return CareerFactBatchConfirmRead(
+            facts=repeated_facts,
+            evidence_revision=profile.evidence_revision,
+        )
+    if profile.evidence_revision != payload.expected_evidence_revision:
+        raise _resume_ai_error(
+            status.HTTP_409_CONFLICT,
+            "resume_evidence_revision_conflict",
+            "Professional evidence changed; reload the import review",
+        )
+    facts = list(
+        (
+            await session.scalars(
+                select(CareerFact)
+                .where(
+                    CareerFact.profile_id == profile_id,
+                    CareerFact.source_id == payload.source_id,
+                    CareerFact.id.in_(payload.fact_ids),
+                )
+                .with_for_update()
+            )
+        ).all()
+    )
+    if {fact.id for fact in facts} != set(payload.fact_ids):
+        raise _resume_ai_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "resume_import_fact_mismatch",
+            "Every selected fact must belong to the uploaded resume",
+        )
+    if any(fact.verification_status is VerificationStatus.UNCONFIRMED for fact in facts):
+        raise _resume_ai_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_fact_rejected",
+            "A previously rejected fact cannot be confirmed from the import review",
+        )
+    changed = [
+        fact for fact in facts if fact.verification_status is VerificationStatus.EXTRACTED
+    ]
+    if changed:
+        revision_update = await session.execute(
+            update(CareerProfile)
+            .where(
+                CareerProfile.id == profile_id,
+                CareerProfile.owner_id == user.id,
+                CareerProfile.evidence_revision == payload.expected_evidence_revision,
+                CareerProfile.deletion_started_at.is_(None),
+            )
+            .values(evidence_revision=CareerProfile.evidence_revision + 1)
+        )
+        if revision_update.rowcount != 1:
+            raise _resume_ai_error(
+                status.HTTP_409_CONFLICT,
+                "resume_evidence_revision_conflict",
+                "Professional evidence changed; reload the import review",
+            )
+        confirmed_at = datetime.now(UTC)
+        for fact in changed:
+            fact.verification_status = VerificationStatus.CONFIRMED
+            fact.confirmed_at = confirmed_at
+        await session.execute(
+            update(MatchAnalysis)
+            .where(
+                MatchAnalysis.profile_id == profile_id,
+                MatchAnalysis.invalidated_at.is_(None),
+            )
+            .values(
+                invalidated_at=confirmed_at,
+                invalidation_reason="Imported resume facts confirmed",
+            )
+        )
+    source.source_metadata = {
+        **source_metadata,
+        "last_confirm_batch_request_id": str(payload.client_request_id),
+        "last_confirm_batch_fact_ids": requested_fact_ids,
+        "last_confirm_batch_evidence_revision": (
+            payload.expected_evidence_revision + (1 if changed else 0)
+        ),
+    }
+    await session.commit()
+    for fact in facts:
+        await session.refresh(fact)
+    await session.refresh(profile)
+    return CareerFactBatchConfirmRead(
+        facts=facts,
+        evidence_revision=profile.evidence_revision,
+    )
 
 
 @router.post(

@@ -18,6 +18,8 @@ const apiMocks = vi.hoisted(() => ({
   sendResumeWorkspaceMessage: vi.fn(),
   importResumeWorkspaceFile: vi.fn(),
   confirmCareerFact: vi.fn(),
+  confirmCareerFactsBatch: vi.fn(),
+  buildResumeDraftFromImport: vi.fn(),
   confirmResumeUnderstanding: vi.fn(),
   correctResumeUnderstanding: vi.fn(),
   patchResumeWorkspaceDraft: vi.fn(),
@@ -152,18 +154,29 @@ const extractedFact: ApiCareerFact = {
   detail: "بنيت لوحات Power BI لمتابعة مؤشرات الأداء.",
 };
 
-const olderExtractedFact: ApiCareerFact = {
-  ...extractedFact,
-  id: "fact-older-1",
-  source_id: "source-older-1",
-  label: "معلومة من استيراد أقدم",
-};
-
 const previouslyRejectedFact: ApiCareerFact = {
   ...extractedFact,
   id: "fact-rejected-1",
   label: "معلومة مرفوضة سابقًا",
   verification_status: "unconfirmed",
+};
+
+const extractedEducationFact: ApiCareerFact = {
+  ...extractedFact,
+  id: "fact-imported-education-1",
+  category: "education",
+  label: "Bachelor of Finance",
+  detail: "King Fahd University of Petroleum and Minerals",
+  structured_value: {
+    degree: "Bachelor of Finance",
+    institution: "King Fahd University of Petroleum and Minerals",
+    date_range: "2019 - 2023",
+  },
+};
+
+const confirmedImportedFact: ApiCareerFact = {
+  ...extractedFact,
+  verification_status: "confirmed",
 };
 
 async function renderResumePage() {
@@ -193,6 +206,18 @@ describe("resume workspace v2", () => {
       analysis_status: "created",
     });
     apiMocks.confirmCareerFact.mockResolvedValue({ ...extractedFact, verification_status: "confirmed" });
+    apiMocks.confirmCareerFactsBatch.mockResolvedValue({
+      facts: [{ ...extractedFact, verification_status: "confirmed" }],
+      evidence_revision: 2,
+    });
+    apiMocks.buildResumeDraftFromImport.mockResolvedValue(makeWorkspace({
+      stage: "writing",
+      revision: 1,
+      evidence_revision: 2,
+      readiness_score: 100,
+      current_draft: draft,
+      draft_revision: 1,
+    }));
     apiMocks.confirmResumeUnderstanding.mockResolvedValue(makeWorkspace({ revision: 2 }));
     apiMocks.getResumeDraftVersions.mockResolvedValue([]);
     apiMocks.reviewResumeWorkspace.mockResolvedValue({
@@ -787,15 +812,40 @@ describe("resume workspace v2", () => {
     ));
   });
 
-  it("requires explicit import consent, then reviews only facts returned by that upload", async () => {
+  it("groups imported facts for checkbox review, then confirms the selection and builds the draft in one action", async () => {
     const user = userEvent.setup();
     const current = makeWorkspace();
+    const refreshed = makeWorkspace({ readiness_score: 55, evidence_revision: 2 });
+    const generated = makeWorkspace({
+      stage: "writing",
+      revision: 1,
+      evidence_revision: 3,
+      readiness_score: 100,
+      current_draft: draft,
+      draft_revision: 1,
+    });
     apiMocks.getResumeWorkspace
       .mockResolvedValueOnce(current)
-      .mockResolvedValue(makeWorkspace({ readiness_score: 55 }));
+      .mockResolvedValue(refreshed);
     apiMocks.getCareerFacts
-      .mockResolvedValueOnce([olderExtractedFact])
-      .mockResolvedValue([olderExtractedFact, extractedFact]);
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([extractedFact, extractedEducationFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: extractedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [extractedFact, extractedEducationFact],
+      requires_user_review: true,
+      analysis_status: "created",
+    });
+    apiMocks.confirmCareerFactsBatch.mockResolvedValue({
+      facts: [{ ...extractedFact, verification_status: "confirmed" }],
+      evidence_revision: 3,
+    });
+    apiMocks.buildResumeDraftFromImport.mockResolvedValue(generated);
     await renderResumePage();
 
     const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
@@ -812,17 +862,50 @@ describe("resume workspace v2", () => {
       file,
       { dataSharingAcknowledged: true },
     ));
-    expect(await screen.findByText("تم استخراج معلومات من resume.pdf")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "اكتمل تحليل الملف" })).toBeVisible();
+    expect(screen.getByText((content) => content.includes("resume.pdf") && content.includes("تحتاج مراجعة"))).toBeVisible();
     const review = screen.getByRole("heading", { name: "راجع المعلومات المستخرجة" }).closest("section");
     expect(review).not.toBeNull();
+    const educationHeading = within(review!).getByRole("heading", { name: "التعليم" });
+    const experienceHeading = within(review!).getByRole("heading", { name: "الخبرة" });
+    expect(educationHeading.compareDocumentPosition(experienceHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(review!).getByText("Reduced monthly reporting time by 35% through SQL automation.")).toBeVisible();
     expect(within(review!).getByText("Built Power BI dashboards tracking 12 regional sites.")).toBeVisible();
     expect(within(review!).getByText("لوحات Power BI")).toBeVisible();
+    expect(within(review!).getAllByText("Bachelor of Finance")).toHaveLength(2);
     expect(within(review!).queryByText("معلومة من استيراد أقدم")).not.toBeInTheDocument();
     expect(apiMocks.confirmCareerFact).not.toHaveBeenCalled();
+    expect(within(review!).queryByRole("button", { name: "تأكيد هذه المعلومة" })).not.toBeInTheDocument();
 
-    await user.click(within(review!).getByRole("button", { name: "تأكيد هذه المعلومة" }));
-    await waitFor(() => expect(apiMocks.confirmCareerFact).toHaveBeenCalledWith(profile.id, extractedFact.id));
+    const experienceCheckbox = within(review!).getByRole("checkbox", { name: new RegExp(extractedFact.label) });
+    const educationCheckbox = within(review!).getByRole("checkbox", { name: new RegExp(extractedEducationFact.label) });
+    const confirmAndBuild = within(review!).getByRole("button", { name: "اعتماد المحدد وإنشاء المسودة" });
+    expect(experienceCheckbox).toBeChecked();
+    expect(educationCheckbox).toBeChecked();
+    await user.click(educationCheckbox);
+    expect(educationCheckbox).not.toBeChecked();
+    expect(confirmAndBuild).toBeEnabled();
+    await user.click(confirmAndBuild);
+
+    await waitFor(() => expect(apiMocks.confirmCareerFactsBatch).toHaveBeenCalledWith(
+      profile.id,
+      {
+        sourceId: extractedFact.source_id,
+        clientRequestId: expect.any(String),
+        factIds: [extractedFact.id],
+        expectedEvidenceRevision: refreshed.evidence_revision,
+      },
+    ));
+    await waitFor(() => expect(apiMocks.buildResumeDraftFromImport).toHaveBeenCalledWith(
+      profile.id,
+      {
+        sourceId: extractedFact.source_id,
+        clientRequestId: expect.any(String),
+        expectedRevision: refreshed.revision,
+        expectedEvidenceRevision: 3,
+      },
+    ));
+    expect(apiMocks.confirmCareerFact).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("heading", { name: "راجع المعلومات المستخرجة" })).not.toBeInTheDocument());
   });
 
@@ -836,7 +919,7 @@ describe("resume workspace v2", () => {
       .mockResolvedValue([extractedFact, previouslyRejectedFact]);
     apiMocks.importResumeWorkspaceFile.mockResolvedValue({
       source: {
-        id: "source-1",
+        id: extractedFact.source_id,
         kind: "cv_upload",
         label: "resume.pdf",
         original_filename: "resume.pdf",
@@ -858,7 +941,210 @@ describe("resume workspace v2", () => {
     expect(review).not.toBeNull();
     expect(within(review!).getByText(extractedFact.label)).toBeVisible();
     expect(within(review!).queryByText(previouslyRejectedFact.label)).not.toBeInTheDocument();
-    expect(within(review!).getAllByRole("button", { name: "تأكيد هذه المعلومة" })).toHaveLength(1);
+    expect(within(review!).getByRole("checkbox", { name: new RegExp(extractedFact.label) })).toBeVisible();
+    expect(within(review!).queryByRole("button", { name: "تأكيد هذه المعلومة" })).not.toBeInTheDocument();
+  });
+
+  it("restores an already analyzed all-confirmed file and builds its draft directly", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace({ evidence_revision: 4 });
+    const generated = makeWorkspace({
+      stage: "writing",
+      revision: 1,
+      evidence_revision: 4,
+      readiness_score: 100,
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(current);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([confirmedImportedFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: confirmedImportedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [confirmedImportedFact],
+      requires_user_review: true,
+      analysis_status: "already_ai_analyzed",
+    });
+    apiMocks.buildResumeDraftFromImport.mockResolvedValue(generated);
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    const file = new File(["resume"], "resume.pdf", { type: "application/pdf" });
+    await user.upload(input!, file);
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    await waitFor(() => expect(apiMocks.buildResumeDraftFromImport).toHaveBeenCalledWith(
+      profile.id,
+      {
+        sourceId: confirmedImportedFact.source_id,
+        clientRequestId: expect.any(String),
+        expectedRevision: current.revision,
+        expectedEvidenceRevision: current.evidence_revision,
+      },
+    ));
+    expect(apiMocks.confirmCareerFactsBatch).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a completed same-file draft when the response is lost", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace({ evidence_revision: 4 });
+    const committed = makeWorkspace({
+      stage: "writing",
+      revision: 1,
+      evidence_revision: 4,
+      current_draft: draft,
+      draft_revision: 1,
+      provider_metadata: {
+        active_import_source_id: confirmedImportedFact.source_id,
+        draft_mode: "import_evidence",
+      },
+    });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(committed);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([confirmedImportedFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: confirmedImportedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [confirmedImportedFact],
+      requires_user_review: false,
+      analysis_status: "already_ai_analyzed",
+    });
+    apiMocks.buildResumeDraftFromImport.mockRejectedValue(new TypeError("response lost"));
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    expect(await screen.findByRole("button", { name: "امسح المسودة أولًا لرفع ملف آخر" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("builds from confirmed facts without silently confirming pending facts", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace({ evidence_revision: 4 });
+    const generated = makeWorkspace({
+      stage: "writing",
+      revision: 1,
+      evidence_revision: 4,
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(current);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([confirmedImportedFact, extractedEducationFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: confirmedImportedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [confirmedImportedFact, extractedEducationFact],
+      requires_user_review: true,
+      analysis_status: "already_ai_analyzed",
+    });
+    apiMocks.buildResumeDraftFromImport.mockResolvedValue(generated);
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+    const pendingCheckbox = await screen.findByRole("checkbox", { name: new RegExp(extractedEducationFact.label) });
+    expect(pendingCheckbox).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "إنشاء مسودة من هذا الملف" }));
+
+    await waitFor(() => expect(apiMocks.buildResumeDraftFromImport).toHaveBeenCalled());
+    expect(apiMocks.confirmCareerFactsBatch).not.toHaveBeenCalled();
+  });
+
+  it("prevents uploading another resume while a draft is active", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+    }));
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    expect(input).toBeDisabled();
+    expect(screen.getByRole("button", { name: "امسح المسودة أولًا لرفع ملف آخر" })).toBeDisabled();
+  });
+
+  it("blocks the generic generate action while imported facts still need review", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace();
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(makeWorkspace({ evidence_revision: 2 }));
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([extractedFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: extractedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [extractedFact],
+      requires_user_review: true,
+      analysis_status: "created",
+    });
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    expect(await screen.findByRole("checkbox", { name: new RegExp(extractedFact.label) })).toBeVisible();
+    expect(screen.getByRole("button", { name: "اكتب السيرة الآن" })).toBeDisabled();
+  });
+
+  it("restores pending extracted-fact review from the initial facts after reload", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      evidence_revision: 2,
+      provider_metadata: {
+        pending_import_source_id: extractedFact.source_id,
+        pending_import_filename: "resume.pdf",
+        pending_import_analysis_status: "created",
+      },
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([extractedEducationFact, extractedFact]);
+    await renderResumePage();
+
+    const reviewHeading = await screen.findByRole("heading", { name: "راجع المعلومات المستخرجة" });
+    const review = reviewHeading.closest("section");
+    expect(review).not.toBeNull();
+    expect(within(review!).getByRole("checkbox", { name: new RegExp(extractedEducationFact.label) })).toBeVisible();
+    expect(within(review!).getByRole("checkbox", { name: new RegExp(extractedFact.label) })).toBeVisible();
+    expect(within(review!).getByRole("heading", { name: "التعليم" })).toBeVisible();
+    expect(within(review!).getByRole("heading", { name: "الخبرة" })).toBeVisible();
+    expect(apiMocks.importResumeWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it("shows a before-and-after AI rewrite and accepts it without replacing the whole draft", async () => {

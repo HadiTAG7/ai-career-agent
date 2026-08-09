@@ -1,3 +1,5 @@
+import io
+import zipfile
 from copy import deepcopy
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -2308,3 +2310,334 @@ async def test_removed_rewrite_target_is_rejected_by_schema(
     )
     assert started.status_code == 201
     assert rejected.status_code == 422
+
+
+def import_draft_docx(
+    text: str = "Skills: Python and SQL\nBachelor of Computer Science",
+) -> bytes:
+    stream = io.BytesIO()
+    paragraphs = "".join(
+        f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in text.splitlines()
+    )
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>{paragraphs}</w:body>
+    </w:document>"""
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types />")
+        archive.writestr("word/document.xml", document_xml)
+    return stream.getvalue()
+
+
+async def create_from_import_workspace(client) -> tuple[dict, dict, dict, dict, dict]:
+    profile, other_source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    imported = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        headers=headers,
+        files={
+            "file": (
+                "existing-resume.docx",
+                import_draft_docx(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    import_source = imported.json()["source"]
+    imported_fact = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": import_source["id"],
+            "category": "experience",
+            "label": "Cost Analyst",
+            "detail": "Prepared monthly cost reports using Excel for Harbor Company.",
+            "structured_value": {
+                "title": "Cost Analyst",
+                "organization": "Harbor Company",
+                "date_range": "2024 - Present",
+                "responsibilities": [
+                    "Prepared monthly cost reports using Excel for Harbor Company."
+                ],
+            },
+            "source_excerpt": (
+                "Professional Experience\nCost Analyst | Harbor Company | 2024 - Present\n"
+                "Prepared monthly cost reports using Excel for Harbor Company."
+            ),
+        },
+    )
+    assert imported_fact.status_code == 201, imported_fact.text
+    confirmed_imported = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{imported_fact.json()['id']}/confirm",
+        headers=headers,
+    )
+    assert confirmed_imported.status_code == 200, confirmed_imported.text
+
+    other_fact = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": other_source["id"],
+            "category": "experience",
+            "label": "External Payroll Analyst",
+            "detail": "Managed payroll reporting for External Company.",
+            "structured_value": {
+                "title": "External Payroll Analyst",
+                "organization": "External Company",
+                "responsibilities": ["Managed payroll reporting for External Company."],
+            },
+            "source_excerpt": "Managed payroll reporting for External Company.",
+        },
+    )
+    assert other_fact.status_code == 201, other_fact.text
+    confirmed_other = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{other_fact.json()['id']}/confirm",
+        headers=headers,
+    )
+    assert confirmed_other.status_code == 200, confirmed_other.text
+
+    started = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "ar",
+            "data_sharing_acknowledged": False,
+        },
+    )
+    assert started.status_code == 201, started.text
+    return (
+        profile,
+        import_source,
+        confirmed_imported.json(),
+        headers,
+        started.json(),
+    )
+
+
+async def test_from_import_draft_uses_only_confirmed_source_facts_without_provider_call(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source, imported_fact, headers, started = await create_from_import_workspace(client)
+    profile_state = await client.get("/v1/profiles", headers=headers)
+    assert profile_state.status_code == 200, profile_state.text
+    request_id = uuid4()
+    payload = {
+        "source_id": source["id"],
+        "client_request_id": str(request_id),
+        "expected_revision": started["revision"],
+        "expected_evidence_revision": profile_state.json()["evidence_revision"],
+    }
+
+    generated = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json=payload,
+    )
+
+    assert generated.status_code == 200, generated.text
+    workspace = generated.json()
+    assert stub_provider.draft_calls == []
+    assert workspace["current_draft"]["headline"] == "Cost Analyst"
+    serialized_draft = str(workspace["current_draft"])
+    assert "Harbor Company" in serialized_draft
+    assert "External Company" not in serialized_draft
+    assert workspace["provider_metadata"]["generation_fact_ids"] == [imported_fact["id"]]
+    assert workspace["draft_revision"] == 1
+    assert len(workspace["versions"]) == 1
+    assert workspace["versions"][0]["reason"] == "initial_generation"
+
+    repeated = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json=payload,
+    )
+    assert repeated.status_code == 200, repeated.text
+    duplicate = repeated.json()
+    assert duplicate["revision"] == workspace["revision"]
+    assert duplicate["draft_revision"] == workspace["draft_revision"]
+    assert duplicate["current_draft"] == workspace["current_draft"]
+    assert len(duplicate["versions"]) == 1
+    assert stub_provider.draft_calls == []
+
+    replacement = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json={**payload, "client_request_id": str(uuid4())},
+    )
+    assert replacement.status_code == 409, replacement.text
+    assert replacement.json()["detail"]["code"] == "resume_import_draft_exists"
+    preserved = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert preserved.status_code == 200, preserved.text
+    assert preserved.json()["current_draft"] == workspace["current_draft"]
+    assert preserved.json()["draft_revision"] == workspace["draft_revision"]
+
+
+async def test_from_import_scopes_cross_language_evidence_for_ai_without_blocking_chat(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source, imported_fact, headers, _started = await create_from_import_workspace(client)
+    rejected_english = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{imported_fact['id']}/unconfirm",
+        headers=headers,
+    )
+    assert rejected_english.status_code == 200, rejected_english.text
+    arabic_fact = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "category": "experience",
+            "label": "محلل تكاليف",
+            "detail": "أعددت تقارير التكاليف الشهرية باستخدام إكسل.",
+            "structured_value": {
+                "title": "محلل تكاليف",
+                "organization": "شركة المرفأ",
+                "responsibilities": ["أعددت تقارير التكاليف الشهرية باستخدام إكسل."],
+            },
+            "source_excerpt": "محلل تكاليف في شركة المرفأ",
+        },
+    )
+    assert arabic_fact.status_code == 201, arabic_fact.text
+    confirmed_arabic = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{arabic_fact.json()['id']}/confirm",
+        headers=headers,
+    )
+    assert confirmed_arabic.status_code == 200, confirmed_arabic.text
+    refreshed = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    profile_state = await client.get("/v1/profiles", headers=headers)
+    assert profile_state.status_code == 200, profile_state.text
+    payload = {
+        "source_id": source["id"],
+        "client_request_id": str(uuid4()),
+        "expected_revision": refreshed.json()["revision"],
+        "expected_evidence_revision": profile_state.json()["evidence_revision"],
+    }
+
+    scoped = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json=payload,
+    )
+
+    assert scoped.status_code == 200, scoped.text
+    workspace = scoped.json()
+    assert workspace["current_draft"] is None
+    assert workspace["provider_metadata"]["draft_mode"] == "import_translation_required"
+    assert workspace["provider_metadata"]["generation_fact_ids"] == [arabic_fact.json()["id"]]
+    assert workspace["provider_metadata"]["pending_import_source_id"] is None
+    assert "اكتب السيرة الآن" in workspace["messages"][-1]["content"]
+    assert stub_provider.draft_calls == []
+
+    repeated = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json=payload,
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["revision"] == workspace["revision"]
+    assert repeated.json()["current_draft"] is None
+
+
+async def test_from_import_draft_rejects_stale_workspace_revision(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source, _fact, headers, started = await create_from_import_workspace(client)
+    profile_state = (await client.get("/v1/profiles", headers=headers)).json()
+    changed = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "en",
+            "data_sharing_acknowledged": False,
+        },
+    )
+    assert changed.status_code == 201, changed.text
+    assert changed.json()["revision"] > started["revision"]
+
+    rejected = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": profile_state["evidence_revision"],
+        },
+    )
+
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"]["code"] == "resume_workspace_revision_conflict"
+    assert stub_provider.draft_calls == []
+    reloaded = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert reloaded.status_code == 200, reloaded.text
+    assert reloaded.json()["current_draft"] is None
+
+
+async def test_from_import_draft_rejects_stale_evidence_revision(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source, _fact, headers, started = await create_from_import_workspace(client)
+    stale_evidence_revision = (await client.get("/v1/profiles", headers=headers)).json()[
+        "evidence_revision"
+    ]
+    extra = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "category": "skill",
+            "label": "Power BI",
+            "detail": "Built finance reporting dashboards with Power BI.",
+            "source_excerpt": "Built finance reporting dashboards with Power BI.",
+        },
+    )
+    assert extra.status_code == 201, extra.text
+    confirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{extra.json()['id']}/confirm",
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    refreshed = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["revision"] > started["revision"]
+
+    rejected = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": refreshed.json()["revision"],
+            "expected_evidence_revision": stale_evidence_revision,
+        },
+    )
+
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"]["code"] == "resume_evidence_revision_conflict"
+    assert stub_provider.draft_calls == []
+    reloaded = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert reloaded.status_code == 200, reloaded.text
+    assert reloaded.json()["current_draft"] is None

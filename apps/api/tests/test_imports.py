@@ -750,6 +750,162 @@ async def test_duplicate_import_is_rejected_without_duplicate_sources_or_revisio
     assert duplicate_source_count == source_count_after_first
 
 
+async def test_batch_confirm_is_atomic_idempotent_and_advances_revision_once(
+    client: httpx.AsyncClient,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    imported = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        files={
+            "file": (
+                "batch-resume.docx",
+                minimal_docx("Skills: Python and SQL\nBachelor of Computer Science"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    result = imported.json()
+    fact_ids = [fact["id"] for fact in result["facts"][:2]]
+    assert len(fact_ids) == 2
+    before = (await client.get("/v1/profiles")).json()["evidence_revision"]
+    payload = {
+        "source_id": result["source"]["id"],
+        "client_request_id": str(uuid4()),
+        "fact_ids": fact_ids,
+        "expected_evidence_revision": before,
+    }
+
+    confirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json=payload,
+    )
+
+    assert confirmed.status_code == 200, confirmed.text
+    batch = confirmed.json()
+    assert {fact["id"] for fact in batch["facts"]} == set(fact_ids)
+    assert {fact["verification_status"] for fact in batch["facts"]} == {"confirmed"}
+    assert batch["evidence_revision"] == before + 1
+    assert (await client.get("/v1/profiles")).json()["evidence_revision"] == before + 1
+
+    repeated = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json=payload,
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["evidence_revision"] == batch["evidence_revision"]
+    assert (await client.get("/v1/profiles")).json()["evidence_revision"] == before + 1
+
+    changed_after_commit = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{fact_ids[0]}/unconfirm"
+    )
+    assert changed_after_commit.status_code == 200, changed_after_commit.text
+    stale_replay = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json=payload,
+    )
+    assert stale_replay.status_code == 409, stale_replay.text
+    assert stale_replay.json()["detail"]["code"] == "resume_evidence_revision_conflict"
+    assert changed_after_commit.json()["verification_status"] == "unconfirmed"
+
+
+async def test_batch_confirm_rejects_unconfirmed_fact_without_partial_mutation(
+    client: httpx.AsyncClient,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    imported = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        files={
+            "file": (
+                "review-resume.docx",
+                minimal_docx("Skills: Python and SQL\nBachelor of Computer Science"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    result = imported.json()
+    extracted_fact, rejected_fact = result["facts"][:2]
+    rejected = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{rejected_fact['id']}/unconfirm"
+    )
+    assert rejected.status_code == 200, rejected.text
+    before = (await client.get("/v1/profiles")).json()["evidence_revision"]
+
+    response = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json={
+            "source_id": result["source"]["id"],
+            "client_request_id": str(uuid4()),
+            "fact_ids": [extracted_fact["id"], rejected_fact["id"]],
+            "expected_evidence_revision": before,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "resume_import_fact_rejected"
+    assert (await client.get("/v1/profiles")).json()["evidence_revision"] == before
+    facts = {
+        fact["id"]: fact
+        for fact in (await client.get(f"/v1/profiles/{profile['id']}/facts")).json()
+    }
+    assert facts[extracted_fact["id"]]["verification_status"] == "extracted"
+    assert facts[rejected_fact["id"]]["verification_status"] == "unconfirmed"
+
+
+async def test_batch_confirm_rejects_cross_source_ids_without_partial_mutation(
+    client: httpx.AsyncClient,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    first = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        files={
+            "file": (
+                "first-resume.docx",
+                minimal_docx("Skills: Python and SQL"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    second = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        files={
+            "file": (
+                "second-resume.docx",
+                minimal_docx("Skills: Python and Docker"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    first_result = first.json()
+    second_result = second.json()
+    first_fact = first_result["facts"][0]
+    second_fact = second_result["facts"][0]
+    before = (await client.get("/v1/profiles")).json()["evidence_revision"]
+
+    response = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json={
+            "source_id": first_result["source"]["id"],
+            "client_request_id": str(uuid4()),
+            "fact_ids": [first_fact["id"], second_fact["id"]],
+            "expected_evidence_revision": before,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "resume_import_fact_mismatch"
+    assert (await client.get("/v1/profiles")).json()["evidence_revision"] == before
+    facts = {
+        fact["id"]: fact
+        for fact in (await client.get(f"/v1/profiles/{profile['id']}/facts")).json()
+    }
+    assert facts[first_fact["id"]]["verification_status"] == "extracted"
+    assert facts[second_fact["id"]]["verification_status"] == "extracted"
+
+
 def test_negated_or_third_party_skill_lines_do_not_create_positive_facts() -> None:
     assert _facts_from_cv_text("No Python experience") == []
     assert _facts_from_cv_text("I didn't use Python") == []

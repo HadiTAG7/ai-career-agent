@@ -40,7 +40,8 @@ import {
 import {
   apiErrorMessage,
   ApiHttpError,
-  confirmCareerFact,
+  buildResumeDraftFromImport,
+  confirmCareerFactsBatch,
   confirmResumeUnderstanding,
   correctResumeUnderstanding,
   decideResumeRewriteSuggestion,
@@ -86,7 +87,26 @@ type ResumeWorkspaceV2Props = {
   initialWorkspace: ApiResumeWorkspace | null;
 };
 
+type RecentImportState = {
+  sourceId: string;
+  fileName: string;
+  analysisStatus: "created" | "ai_upgraded" | "already_ai_analyzed";
+  confirmedCount: number;
+  extractedCount: number;
+  rejectedCount: number;
+};
+
 const MAX_FILE_BYTES = 10_000_000;
+
+const importCategoryOrder = [
+  "education",
+  "experience",
+  "certification",
+  "skill",
+  "language",
+  "project",
+  "achievement",
+];
 
 const coverageCopy: Record<string, { ar: string; en: string }> = {
   identity: { ar: "الهوية", en: "Identity" },
@@ -701,18 +721,86 @@ function ImportConsentCard({
   );
 }
 
+function ImportResultCard({
+  locale,
+  result,
+  building,
+  onBuild,
+}: {
+  locale: "ar" | "en";
+  result: RecentImportState;
+  building: boolean;
+  onBuild: () => void;
+}) {
+  const reused = result.analysisStatus === "already_ai_analyzed";
+  const canBuild = result.confirmedCount > 0;
+  return (
+    <section className="ms-10 border-s-2 border-emerald py-3 ps-4" aria-labelledby="resume-import-result-title">
+      <div className="flex items-start gap-2">
+        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" aria-hidden="true" />
+        <div>
+          <h3 id="resume-import-result-title" className="font-bold text-foreground">
+            {reused
+              ? (locale === "ar" ? "استعدنا تحليل هذا الملف" : "Previous analysis restored")
+              : (locale === "ar" ? "اكتمل تحليل الملف" : "File analysis complete")}
+          </h3>
+          <p className="mt-1 text-xs leading-6 text-muted">
+            {locale === "ar"
+              ? `${result.fileName}: ${result.confirmedCount} معلومة مؤكدة، ${result.extractedCount} تحتاج مراجعة${result.rejectedCount ? `، و${result.rejectedCount} مستبعدة سابقًا` : ""}.`
+              : `${result.fileName}: ${result.confirmedCount} confirmed, ${result.extractedCount} need review${result.rejectedCount ? `, and ${result.rejectedCount} previously rejected` : ""}.`}
+          </p>
+        </div>
+      </div>
+      {canBuild ? (
+        <>
+          {result.extractedCount > 0 ? (
+            <p className="mt-3 text-xs leading-5 text-muted">
+              {locale === "ar"
+                ? "يمكنك إنشاء المسودة من المعلومات المؤكدة الآن، أو مراجعة المعلومات المتبقية وإضافتها أولًا."
+                : "Create the draft from confirmed facts now, or review and add the remaining facts first."}
+            </p>
+          ) : null}
+          <Button className="mt-4 w-full" disabled={building} onClick={onBuild}>
+            {building ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+            {building
+              ? (locale === "ar" ? "جارٍ إنشاء المسودة…" : "Creating draft…")
+              : (locale === "ar" ? "إنشاء مسودة من هذا الملف" : "Create draft from this file")}
+          </Button>
+        </>
+      ) : null}
+      {!canBuild && result.extractedCount === 0 ? (
+        <p className="mt-3 border border-amber/40 bg-amber/10 px-3 py-2 text-xs leading-5 text-foreground">
+          {locale === "ar"
+            ? "لا توجد معلومات مؤكدة قابلة للاستخدام من هذا الملف. عدّل المعلومات المستبعدة من الملف المهني أو ارفع نسخة محدّثة."
+            : "This file has no confirmed usable facts. Edit rejected facts in your profile or upload an updated copy."}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 function ExtractedFactsReview({
   locale,
   facts,
-  confirmingFactId,
-  onConfirm,
+  selectedFactIds,
+  busySourceId,
+  sourceNames,
+  onToggle,
+  onToggleSource,
+  onBuild,
 }: {
   locale: "ar" | "en";
   facts?: ApiCareerFact[];
-  confirmingFactId: string | null;
-  onConfirm: (factId: string) => void;
+  selectedFactIds: string[];
+  busySourceId: string | null;
+  sourceNames: Record<string, string>;
+  onToggle: (factId: string, selected: boolean) => void;
+  onToggleSource: (sourceId: string, selected: boolean) => void;
+  onBuild: (sourceId: string) => void;
 }) {
   if (!facts?.length) return null;
+  const selected = new Set(selectedFactIds);
+  const sourceIds = Array.from(new Set(facts.map((fact) => fact.source_id)));
   return (
     <section className="ms-10 border-s-2 border-primary py-2 ps-4" aria-labelledby="resume-import-facts-title">
       <div className="flex items-start gap-2">
@@ -723,49 +811,85 @@ function ExtractedFactsReview({
           </h3>
           <p className="mt-1 text-xs leading-5 text-muted">
             {locale === "ar"
-              ? "هذه المعلومات من الملف الذي رفعته الآن ولم تُعتمد بعد. أكّد الصحيح منها واحدةً تلو الأخرى."
-              : "These facts came from the file you just uploaded and are not confirmed yet. Confirm each accurate item explicitly."}
+              ? "راجع المعلومات وحدد الصحيح منها. سنعتمد المحدد دفعة واحدة ونبني منه مسودة كاملة؛ غير المحدد لن يدخل المسودة."
+              : "Review and select the accurate facts. We will confirm them together and build a complete draft; unselected facts stay out."}
           </p>
         </div>
       </div>
-      <div className="mt-4 space-y-3">
-        {facts.map((fact) => {
-          const category = coverageCopy[fact.category]?.[locale] ?? fact.category;
-          const confirming = confirmingFactId === fact.id;
-          const structuredRows = structuredReviewRows(fact, locale);
+      <div className="mt-4 space-y-6">
+        {sourceIds.map((sourceId) => {
+          const sourceFacts = facts
+            .filter((fact) => fact.source_id === sourceId)
+            .sort((left, right) => {
+              const categoryDifference = importCategoryOrder.indexOf(left.category) - importCategoryOrder.indexOf(right.category);
+              return categoryDifference || left.created_at.localeCompare(right.created_at);
+            });
+          const selectedCount = sourceFacts.filter((fact) => selected.has(fact.id)).length;
+          const allSelected = selectedCount === sourceFacts.length;
+          const building = busySourceId === sourceId;
           return (
-            <article className="border-t border-border py-3 first:border-t-0" key={fact.id}>
-              <span className="text-[10px] font-bold uppercase tracking-wide text-primary-text">{category}</span>
-              <h4 className="mt-1 text-sm font-bold text-foreground">{fact.label}</h4>
-              {fact.detail ? <p className="mt-1 whitespace-pre-wrap text-xs leading-6 text-muted">{fact.detail}</p> : null}
-              {structuredRows.length ? (
-                <dl className="mt-3 space-y-2 border-s border-primary/40 ps-3 text-xs">
-                  {structuredRows.map((row) => (
-                    <div key={row.key}>
-                      <dt className="font-bold text-foreground">{row.label}</dt>
-                      <dd className="mt-1 text-muted">
-                        {row.values.length === 1 ? row.values[0] : (
-                          <ul className="list-disc space-y-1 ps-5">
-                            {row.values.map((value) => <li key={value}>{value}</li>)}
-                          </ul>
-                        )}
-                      </dd>
+            <div className="border border-border bg-surface/40 p-3" key={sourceId}>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+                <div>
+                  <p className="text-xs font-bold text-foreground">{sourceNames[sourceId] ?? (locale === "ar" ? "ملف سيرة مستورد" : "Imported resume")}</p>
+                  <p className="mt-1 text-[11px] text-muted">{locale === "ar" ? `${selectedCount} من ${sourceFacts.length} محددة` : `${selectedCount} of ${sourceFacts.length} selected`}</p>
+                </div>
+                <label className="inline-flex min-h-10 cursor-pointer items-center gap-2 text-xs font-semibold text-primary-text">
+                  <input type="checkbox" checked={allSelected} disabled={Boolean(busySourceId)} onChange={(event) => onToggleSource(sourceId, event.target.checked)} />
+                  {locale === "ar" ? "تحديد الكل" : "Select all"}
+                </label>
+              </div>
+              <div className="divide-y divide-border">
+                {Array.from(new Set(sourceFacts.map((fact) => fact.category))).map((categoryKey) => (
+                  <section className="py-4" key={categoryKey}>
+                    <h4 className="text-xs font-bold uppercase tracking-wide text-primary-text">
+                      {coverageCopy[categoryKey]?.[locale] ?? categoryKey}
+                    </h4>
+                    <div className="mt-2 divide-y divide-border/70">
+                      {sourceFacts.filter((fact) => fact.category === categoryKey).map((fact) => {
+                        const structuredRows = structuredReviewRows(fact, locale);
+                        return (
+                          <article className="py-3" key={fact.id}>
+                            <label className="flex cursor-pointer items-start gap-3">
+                              <input className="mt-1" type="checkbox" checked={selected.has(fact.id)} disabled={Boolean(busySourceId)} onChange={(event) => onToggle(fact.id, event.target.checked)} />
+                              <span className="min-w-0 flex-1 text-sm font-bold text-foreground">{fact.label}</span>
+                            </label>
+                            {fact.detail ? <p className="mt-2 whitespace-pre-wrap ps-7 text-xs leading-6 text-muted">{fact.detail}</p> : null}
+                            {structuredRows.length ? (
+                              <dl className="ms-7 mt-3 space-y-2 border-s border-primary/40 ps-3 text-xs">
+                                {structuredRows.map((row) => (
+                                  <div key={row.key}>
+                                    <dt className="font-bold text-foreground">{row.label}</dt>
+                                    <dd className="mt-1 text-muted">
+                                      {row.values.length === 1 ? row.values[0] : (
+                                        <ul className="list-disc space-y-1 ps-5">
+                                          {row.values.map((value) => <li key={value}>{value}</li>)}
+                                        </ul>
+                                      )}
+                                    </dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            ) : null}
+                            {fact.source_excerpt ? (
+                              <p className="ms-7 mt-2 border-s border-border ps-2 text-[11px] leading-5 text-muted">
+                                {locale === "ar" ? "من الملف: " : "From the file: "}{fact.source_excerpt}
+                              </p>
+                            ) : null}
+                          </article>
+                        );
+                      })}
                     </div>
-                  ))}
-                </dl>
-              ) : null}
-              {fact.source_excerpt ? (
-                <p className="mt-2 border-s border-border ps-2 text-[11px] leading-5 text-muted">
-                  {locale === "ar" ? "من الملف: " : "From the file: "}{fact.source_excerpt}
-                </p>
-              ) : null}
-              <Button className="mt-3 w-full" size="sm" disabled={Boolean(confirmingFactId)} onClick={() => onConfirm(fact.id)}>
-                {confirming ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                {confirming
-                  ? (locale === "ar" ? "جارٍ التأكيد…" : "Confirming…")
-                  : (locale === "ar" ? "تأكيد هذه المعلومة" : "Confirm this fact")}
+                  </section>
+                ))}
+              </div>
+              <Button className="mt-3 w-full" disabled={!selectedCount || Boolean(busySourceId)} onClick={() => onBuild(sourceId)}>
+                {building ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {building
+                  ? (locale === "ar" ? "جارٍ اعتماد المعلومات وبناء المسودة…" : "Confirming facts and building draft…")
+                  : (locale === "ar" ? "اعتماد المحدد وإنشاء المسودة" : "Confirm selected and create draft")}
               </Button>
-            </article>
+            </div>
           );
         })}
       </div>
@@ -785,10 +909,12 @@ function ConversationPanel({
   importing,
   correcting,
   correction,
-  recentImportName,
+  recentImport,
   pendingImportFileName,
   importedFacts,
-  confirmingFactId,
+  selectedImportFactIds,
+  busyImportSourceId,
+  importSourceNames,
   showContact,
   onShowContact,
   onContactChange,
@@ -798,7 +924,9 @@ function ConversationPanel({
   onFile,
   onConfirmImport,
   onCancelImport,
-  onConfirmFact,
+  onToggleImportFact,
+  onToggleImportSource,
+  onBuildImportDraft,
   onConfirm,
   onStartCorrection,
   onCancelCorrection,
@@ -816,10 +944,12 @@ function ConversationPanel({
   importing: boolean;
   correcting: boolean;
   correction: string;
-  recentImportName: string | null;
+  recentImport: RecentImportState | null;
   pendingImportFileName: string | null;
   importedFacts: ApiCareerFact[];
-  confirmingFactId: string | null;
+  selectedImportFactIds: string[];
+  busyImportSourceId: string | null;
+  importSourceNames: Record<string, string>;
   showContact: boolean;
   onShowContact: (show: boolean) => void;
   onContactChange: (contact: ApiResumeWorkspace["contact"]) => void;
@@ -829,7 +959,9 @@ function ConversationPanel({
   onFile: (event: ChangeEvent<HTMLInputElement>) => void;
   onConfirmImport: () => void;
   onCancelImport: () => void;
-  onConfirmFact: (factId: string) => void;
+  onToggleImportFact: (factId: string, selected: boolean) => void;
+  onToggleImportSource: (sourceId: string, selected: boolean) => void;
+  onBuildImportDraft: (sourceId: string, includeSelectedFacts: boolean) => void;
   onConfirm: () => void;
   onStartCorrection: () => void;
   onCancelCorrection: () => void;
@@ -839,6 +971,14 @@ function ConversationPanel({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationEndRef = useRef<HTMLDivElement>(null);
   const controlsLocked = busy || interactionLocked;
+  const importReviewLocked = Boolean(
+    importing
+    || pendingImportFileName
+    || (!workspace.current_draft && importedFacts.length)
+    || busyImportSourceId,
+  );
+  const conversationControlsLocked = controlsLocked || importReviewLocked;
+  const attachmentLocked = conversationControlsLocked || Boolean(workspace.current_draft);
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView?.({ block: "nearest" });
@@ -858,7 +998,14 @@ function ConversationPanel({
             <p dir={conversationLanguage === "ar" ? "rtl" : "ltr"}>{conversationLanguage === "ar" ? "جميل، خلّنا نبني سيرتك من قصتك الحقيقية. أرفق سيرة موجودة هنا، أو اكتب نبذة قصيرة عن آخر تجربة دراسية أو مهنية لك." : "Great—let's build your resume from your real story. Attach an existing resume here, or tell me briefly about your latest study or work experience."}</p>
           </AssistantBubble>
         ) : null}
-        {recentImportName ? <div className="flex items-center gap-2 border-y border-emerald/40 py-2 text-xs font-semibold text-emerald"><FileText className="h-3.5 w-3.5" />{locale === "ar" ? `تم استخراج معلومات من ${recentImportName}` : `Facts extracted from ${recentImportName}`}</div> : null}
+        {recentImport && !workspace.current_draft ? (
+          <ImportResultCard
+            locale={locale}
+            result={recentImport}
+            building={controlsLocked || busyImportSourceId === recentImport.sourceId}
+            onBuild={() => onBuildImportDraft(recentImport.sourceId, false)}
+          />
+        ) : null}
         {pendingImportFileName ? (
           <ImportConsentCard
             locale={locale}
@@ -868,7 +1015,16 @@ function ConversationPanel({
             onCancel={onCancelImport}
           />
         ) : null}
-        <ExtractedFactsReview locale={locale} facts={importedFacts} confirmingFactId={confirmingFactId} onConfirm={onConfirmFact} />
+        <ExtractedFactsReview
+          locale={locale}
+          facts={workspace.current_draft ? [] : importedFacts}
+          selectedFactIds={selectedImportFactIds}
+          busySourceId={controlsLocked ? "workspace-locked" : busyImportSourceId}
+          sourceNames={importSourceNames}
+          onToggle={onToggleImportFact}
+          onToggleSource={onToggleImportSource}
+          onBuild={(sourceId) => onBuildImportDraft(sourceId, true)}
+        />
         {workspace.messages.filter((item) => item.status !== "failed").map((item) => <MessageBubble key={item.id} message={item} />)}
         {optimisticMessage ? <MessageBubble message={optimisticMessage} /> : null}
         <UnderstandingCard
@@ -890,20 +1046,24 @@ function ConversationPanel({
 
       <footer className="space-y-3 border-t border-border p-3 sm:p-4">
         <div className="grid grid-cols-2 divide-x divide-x-reverse divide-border border-y border-border sm:grid-cols-4">
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-primary-text hover:bg-primary hover:text-primary-foreground" disabled={controlsLocked || Boolean(workspace.pending_understanding)} onClick={() => onQuickAction(conversationLanguage === "ar" ? "اكتب سيرتي كاملة الآن اعتمادًا على المعلومات التي أكّدتها، من دون اختراع أي معلومة." : "Write my complete resume now using only the information I confirmed, without inventing anything.", "generate")}><PencilLine className="h-4 w-4" />{locale === "ar" ? "اكتب السيرة الآن" : "Write resume now"}</button>
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-foreground hover:text-primary-text" disabled={controlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "أعطني مثالًا" : "Give me an example", "show_example")}><Lightbulb className="h-4 w-4" />{locale === "ar" ? "أعطني مثالًا" : "Give an example"}</button>
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={controlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "ما عندي رقم دقيق" : "I do not have an exact metric", "no_exact_metric")}><Info className="h-4 w-4" />{locale === "ar" ? "ما عندي رقم دقيق" : "No exact metric"}</button>
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={controlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "تخطَّ هذا السؤال" : "Skip this question", "skip")}><ChevronDown className="h-4 w-4" />{locale === "ar" ? "تخطَّ هذا السؤال" : "Skip this question"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-primary-text hover:bg-primary hover:text-primary-foreground" disabled={conversationControlsLocked || Boolean(workspace.pending_understanding)} onClick={() => onQuickAction(conversationLanguage === "ar" ? "اكتب سيرتي كاملة الآن اعتمادًا على المعلومات التي أكّدتها، من دون اختراع أي معلومة." : "Write my complete resume now using only the information I confirmed, without inventing anything.", "generate")}><PencilLine className="h-4 w-4" />{locale === "ar" ? "اكتب السيرة الآن" : "Write resume now"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-foreground hover:text-primary-text" disabled={conversationControlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "أعطني مثالًا" : "Give me an example", "show_example")}><Lightbulb className="h-4 w-4" />{locale === "ar" ? "أعطني مثالًا" : "Give an example"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={conversationControlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "ما عندي رقم دقيق" : "I do not have an exact metric", "no_exact_metric")}><Info className="h-4 w-4" />{locale === "ar" ? "ما عندي رقم دقيق" : "No exact metric"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={conversationControlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "تخطَّ هذا السؤال" : "Skip this question", "skip")}><ChevronDown className="h-4 w-4" />{locale === "ar" ? "تخطَّ هذا السؤال" : "Skip this question"}</button>
         </div>
         <CoverageStrip workspace={workspace} locale={locale} />
         <form className="grid grid-cols-[1fr_auto] border border-border" onSubmit={onSend}>
           <label className="sr-only" htmlFor="resume-workspace-message">{locale === "ar" ? "اكتب رسالتك" : "Write your message"}</label>
-          <textarea id="resume-workspace-message" className="min-h-[58px] resize-none bg-transparent px-3 py-3 text-sm text-foreground placeholder:text-muted" dir="auto" placeholder={locale === "ar" ? "اكتب رسالتك هنا…" : "Write your message…"} value={message} disabled={controlsLocked || importing || Boolean(workspace.pending_understanding)} onChange={(event) => onMessageChange(event.target.value)} />
-          <button type="submit" className="grid h-[58px] w-[58px] place-items-center self-start border-s border-border text-primary-text transition hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-45" disabled={!message.trim() || controlsLocked || importing || Boolean(workspace.pending_understanding)} aria-label={locale === "ar" ? "إرسال الرسالة" : "Send message"}>{busy ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 rtl:-scale-x-100" />}</button>
-          <input ref={fileInputRef} className="sr-only" id="resume-workspace-file" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" disabled={controlsLocked || importing} onChange={onFile} />
-          <button type="button" className="col-span-2 inline-flex min-h-10 w-fit items-center gap-2 text-xs font-semibold text-muted hover:text-primary-text disabled:opacity-50" disabled={controlsLocked || importing} onClick={() => fileInputRef.current?.click()}>
+          <textarea id="resume-workspace-message" className="min-h-[58px] resize-none bg-transparent px-3 py-3 text-sm text-foreground placeholder:text-muted" dir="auto" placeholder={locale === "ar" ? "اكتب رسالتك هنا…" : "Write your message…"} value={message} disabled={conversationControlsLocked || Boolean(workspace.pending_understanding)} onChange={(event) => onMessageChange(event.target.value)} />
+          <button type="submit" className="grid h-[58px] w-[58px] place-items-center self-start border-s border-border text-primary-text transition hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-45" disabled={!message.trim() || conversationControlsLocked || Boolean(workspace.pending_understanding)} aria-label={locale === "ar" ? "إرسال الرسالة" : "Send message"}>{busy ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 rtl:-scale-x-100" />}</button>
+          <input ref={fileInputRef} className="sr-only" id="resume-workspace-file" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" disabled={attachmentLocked} onChange={onFile} />
+          <button type="button" className="col-span-2 inline-flex min-h-10 w-fit items-center gap-2 text-xs font-semibold text-muted hover:text-primary-text disabled:opacity-50" disabled={attachmentLocked} onClick={() => fileInputRef.current?.click()}>
             {importing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-            {importing ? (locale === "ar" ? "جارٍ تحليل الملف…" : "Analyzing file…") : (locale === "ar" ? "إرفاق سيرة موجودة" : "Attach an existing resume")}
+            {importing
+              ? (locale === "ar" ? "جارٍ تحليل الملف…" : "Analyzing file…")
+              : workspace.current_draft
+                ? (locale === "ar" ? "امسح المسودة أولًا لرفع ملف آخر" : "Clear the draft before uploading another file")
+                : (locale === "ar" ? "إرفاق سيرة موجودة" : "Attach an existing resume")}
           </button>
         </form>
       </footer>
@@ -1006,6 +1166,16 @@ export function ResumeWorkspaceV2({
   initialFacts,
   initialWorkspace,
 }: ResumeWorkspaceV2Props) {
+  const initialPendingSourceId = typeof initialWorkspace?.provider_metadata?.pending_import_source_id === "string"
+    ? initialWorkspace.provider_metadata.pending_import_source_id
+    : null;
+  const initialPendingFileName = typeof initialWorkspace?.provider_metadata?.pending_import_filename === "string"
+    ? initialWorkspace.provider_metadata.pending_import_filename
+    : null;
+  const initialPendingAnalysisStatus = initialWorkspace?.provider_metadata?.pending_import_analysis_status;
+  const initialPendingSourceFacts = initialPendingSourceId
+    ? initialFacts.filter((fact) => fact.source_id === initialPendingSourceId)
+    : [];
   const [workspace, setWorkspace] = useState<ApiResumeWorkspace | null>(initialWorkspace);
   const [facts, setFacts] = useState(initialFacts);
   const [conversationLanguage, setConversationLanguage] = useState<"ar" | "en">(
@@ -1039,10 +1209,37 @@ export function ResumeWorkspaceV2({
   const [correction, setCorrection] = useState("");
   const [correcting, setCorrecting] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("conversation");
-  const [recentImportName, setRecentImportName] = useState<string | null>(null);
+  const [recentImport, setRecentImport] = useState<RecentImportState | null>(() => (
+    initialPendingSourceId && initialPendingFileName
+      ? {
+          sourceId: initialPendingSourceId,
+          fileName: initialPendingFileName,
+          analysisStatus: initialPendingAnalysisStatus === "created"
+            || initialPendingAnalysisStatus === "ai_upgraded"
+            || initialPendingAnalysisStatus === "already_ai_analyzed"
+            ? initialPendingAnalysisStatus
+            : "created",
+          confirmedCount: initialPendingSourceFacts.filter((fact) => fact.verification_status === "confirmed").length,
+          extractedCount: initialPendingSourceFacts.filter((fact) => fact.verification_status === "extracted").length,
+          rejectedCount: initialPendingSourceFacts.filter((fact) => fact.verification_status === "unconfirmed").length,
+        }
+      : null
+  ));
   const [pendingImportFile, setPendingImportFile] = useState<File | null>(null);
-  const [importedFacts, setImportedFacts] = useState<ApiCareerFact[]>([]);
-  const [confirmingFactId, setConfirmingFactId] = useState<string | null>(null);
+  const [importedFacts, setImportedFacts] = useState<ApiCareerFact[]>(
+    initialPendingSourceFacts.filter((fact) => fact.verification_status === "extracted"),
+  );
+  const [selectedImportFactIds, setSelectedImportFactIds] = useState<string[]>(
+    initialPendingSourceFacts
+      .filter((fact) => fact.verification_status === "extracted")
+      .map((fact) => fact.id),
+  );
+  const [busyImportSourceId, setBusyImportSourceId] = useState<string | null>(null);
+  const [importSourceNames, setImportSourceNames] = useState<Record<string, string>>(
+    initialPendingSourceId && initialPendingFileName
+      ? { [initialPendingSourceId]: initialPendingFileName }
+      : {},
+  );
   const [showContact, setShowContact] = useState(false);
   const [versions, setVersions] = useState<ApiResumeDraftVersion[]>(initialWorkspace?.versions ?? []);
   const workspaceRef = useRef(workspace);
@@ -1202,7 +1399,7 @@ export function ResumeWorkspaceV2({
       commitWorkspace(next);
       setVersions((currentVersions) => next.versions ?? currentVersions);
       setOptimisticMessage(null);
-      setRecentImportName(null);
+      setRecentImport(null);
       if (next.current_draft && next.stage !== "understanding") setMobilePanel("resume");
     } catch (nextError) {
       if (!operationIsCurrent(operationEpoch)) return;
@@ -1230,6 +1427,10 @@ export function ResumeWorkspaceV2({
     const current = workspaceRef.current;
     if (!file || !current || current.consent_required) return;
     setError(null);
+    if (current.current_draft) {
+      setError(new Error(locale === "ar" ? "امسح المسودة الحالية أولًا قبل رفع ملف سيرة آخر." : "Clear the current draft before uploading another resume."));
+      return;
+    }
     if (!supportsResume(file)) {
       setError(new Error(locale === "ar" ? "اختر ملف PDF أو DOCX فقط." : "Choose a PDF or DOCX file."));
       return;
@@ -1239,8 +1440,7 @@ export function ResumeWorkspaceV2({
       return;
     }
     setPendingImportFile(file);
-    setRecentImportName(null);
-    setImportedFacts([]);
+    setRecentImport(null);
   }
 
   async function handleConfirmImport() {
@@ -1248,6 +1448,7 @@ export function ResumeWorkspaceV2({
     const current = workspaceRef.current;
     if (!file || !current || current.consent_required) return;
     const operationEpoch = operationEpochRef.current;
+    let analyzedSourceId: string | null = null;
     setImporting(true);
     setError(null);
     try {
@@ -1255,40 +1456,207 @@ export function ResumeWorkspaceV2({
         // This acknowledgement is sent only after the explicit confirmation above.
         dataSharingAcknowledged: true,
       });
+      analyzedSourceId = result.source.id;
       if (!operationIsCurrent(operationEpoch)) return;
-      const currentImportIds = new Set(result.facts.map((fact) => fact.id));
       const refreshed = await refreshWorkspace(operationEpoch);
       if (!operationIsCurrent(operationEpoch)) return;
-      const refreshedById = new Map(refreshed.facts.map((fact) => [fact.id, fact]));
-      setImportedFacts(
-        result.facts
-          .filter((fact) => currentImportIds.has(fact.id))
-          .map((fact) => refreshedById.get(fact.id) ?? fact)
-          .filter((fact) => fact.verification_status === "extracted"),
-      );
-      setRecentImportName(file.name);
+      const currentSourceFacts = refreshed.facts.filter((fact) => fact.source_id === result.source.id);
+      const pendingFacts = currentSourceFacts.filter((fact) => fact.verification_status === "extracted");
+      const currentSourcePendingIds = currentSourceFacts
+        .filter((fact) => fact.verification_status === "extracted")
+        .map((fact) => fact.id);
+      const confirmedCount = currentSourceFacts.filter((fact) => fact.verification_status === "confirmed").length;
+      const extractedCount = currentSourcePendingIds.length;
+      const rejectedCount = currentSourceFacts.filter((fact) => fact.verification_status === "unconfirmed").length;
+      setImportedFacts(pendingFacts);
+      setSelectedImportFactIds((currentIds) => {
+        const pendingIds = new Set(pendingFacts.map((fact) => fact.id));
+        return Array.from(new Set([
+          ...currentIds.filter((factId) => pendingIds.has(factId)),
+          ...currentSourcePendingIds,
+        ]));
+      });
+      setImportSourceNames((currentNames) => ({
+        ...currentNames,
+        [result.source.id]: result.source.original_filename ?? file.name,
+      }));
+      setRecentImport({
+        sourceId: result.source.id,
+        fileName: result.source.original_filename ?? file.name,
+        analysisStatus: result.analysis_status,
+        confirmedCount,
+        extractedCount,
+        rejectedCount,
+      });
       setPendingImportFile(null);
+      if (
+        result.analysis_status === "already_ai_analyzed"
+        && confirmedCount > 0
+        && extractedCount === 0
+        && refreshed.workspace
+        && !refreshed.workspace.current_draft
+      ) {
+        setBusyImportSourceId(result.source.id);
+        const next = await buildResumeDraftFromImport(profile.id, {
+          sourceId: result.source.id,
+          clientRequestId: freshTurnId(),
+          expectedRevision: refreshed.workspace.revision,
+          expectedEvidenceRevision: refreshed.workspace.evidence_revision,
+        });
+        if (!operationIsCurrent(operationEpoch)) return;
+        commitWorkspace(next);
+        setVersions(next.versions ?? []);
+        setRecentImport(null);
+        setMobilePanel(next.current_draft ? "resume" : "conversation");
+      }
     } catch (nextError) {
-      if (operationIsCurrent(operationEpoch)) setError(nextError);
+      if (operationIsCurrent(operationEpoch)) {
+        const refreshed = await refreshWorkspace(operationEpoch).catch(() => null);
+        const refreshedMetadata = refreshed?.workspace?.provider_metadata;
+        const activeSourceId = typeof refreshedMetadata?.active_import_source_id === "string"
+          ? refreshedMetadata.active_import_source_id
+          : null;
+        const requestCompleted = Boolean(
+          analyzedSourceId
+          && activeSourceId === analyzedSourceId
+          && (
+            refreshed?.workspace?.current_draft
+            || refreshedMetadata?.draft_mode === "import_translation_required"
+          ),
+        );
+        if (requestCompleted) {
+          setError(null);
+          setPendingImportFile(null);
+          setImportedFacts([]);
+          setSelectedImportFactIds([]);
+          setRecentImport(null);
+          setMobilePanel(refreshed?.workspace?.current_draft ? "resume" : "conversation");
+        } else {
+          setError(nextError);
+        }
+      }
     } finally {
-      if (operationIsCurrent(operationEpoch)) setImporting(false);
+      if (operationIsCurrent(operationEpoch)) {
+        setImporting(false);
+        setBusyImportSourceId(null);
+      }
     }
   }
 
-  async function handleConfirmImportedFact(factId: string) {
-    if (!importedFacts.some((fact) => fact.id === factId)) return;
+  function handleToggleImportFact(factId: string, selected: boolean) {
+    setSelectedImportFactIds((currentIds) => selected
+      ? Array.from(new Set([...currentIds, factId]))
+      : currentIds.filter((currentId) => currentId !== factId));
+  }
+
+  function handleToggleImportSource(sourceId: string, selected: boolean) {
+    const sourceFactIds = importedFacts
+      .filter((fact) => fact.source_id === sourceId)
+      .map((fact) => fact.id);
+    setSelectedImportFactIds((currentIds) => {
+      const next = new Set(currentIds);
+      sourceFactIds.forEach((factId) => {
+        if (selected) next.add(factId);
+        else next.delete(factId);
+      });
+      return Array.from(next);
+    });
+  }
+
+  async function handleBuildImportDraft(sourceId: string, includeSelectedFacts: boolean) {
+    const current = workspaceRef.current;
+    if (
+      !current
+      || current.current_draft
+      || busyImportSourceId
+      || busy
+      || importing
+      || rewriting
+      || reviewing
+      || resetting
+      || saveState !== "saved"
+      || persistenceIsPending()
+    ) return;
+    const sourcePendingFacts = importedFacts.filter((fact) => fact.source_id === sourceId);
+    const selectedFactIds = includeSelectedFacts
+      ? sourcePendingFacts
+          .filter((fact) => selectedImportFactIds.includes(fact.id))
+          .map((fact) => fact.id)
+      : [];
+    if (
+      sourcePendingFacts.length
+      && !selectedFactIds.length
+      && !(recentImport?.sourceId === sourceId && recentImport.confirmedCount > 0)
+    ) return;
     const operationEpoch = operationEpochRef.current;
-    setConfirmingFactId(factId);
+    const clientRequestId = freshTurnId();
+    setBusyImportSourceId(sourceId);
     setError(null);
     try {
-      await confirmCareerFact(profile.id, factId);
+      let evidenceRevision = current.evidence_revision;
+      if (selectedFactIds.length) {
+        const confirmation = await confirmCareerFactsBatch(profile.id, {
+          sourceId,
+          clientRequestId,
+          factIds: selectedFactIds,
+          expectedEvidenceRevision: evidenceRevision,
+        });
+        evidenceRevision = confirmation.evidence_revision;
+        const confirmedById = new Map(confirmation.facts.map((fact) => [fact.id, fact]));
+        setFacts((currentFacts) => currentFacts.map((fact) => confirmedById.get(fact.id) ?? fact));
+      }
       if (!operationIsCurrent(operationEpoch)) return;
-      setImportedFacts((currentFacts) => currentFacts.filter((fact) => fact.id !== factId));
-      await refreshWorkspace(operationEpoch);
+      const next = await buildResumeDraftFromImport(profile.id, {
+        sourceId,
+        clientRequestId,
+        expectedRevision: current.revision,
+        expectedEvidenceRevision: evidenceRevision,
+      });
+      if (!operationIsCurrent(operationEpoch)) return;
+      commitWorkspace(next);
+      setVersions(next.versions ?? versions);
+      const sourceFactIds = new Set(sourcePendingFacts.map((fact) => fact.id));
+      setImportedFacts((currentFacts) => currentFacts.filter((fact) => fact.source_id !== sourceId));
+      setSelectedImportFactIds((currentIds) => currentIds.filter((factId) => !sourceFactIds.has(factId)));
+      setRecentImport(null);
+      setMobilePanel(next.current_draft ? "resume" : "conversation");
     } catch (nextError) {
-      if (operationIsCurrent(operationEpoch)) setError(nextError);
+      if (operationIsCurrent(operationEpoch)) {
+        const refreshed = await refreshWorkspace(operationEpoch).catch(() => null);
+        if (refreshed && operationIsCurrent(operationEpoch)) {
+          const refreshedMetadata = refreshed.workspace?.provider_metadata;
+          const requestCompleted = Boolean(
+            refreshedMetadata?.active_import_source_id === sourceId
+            && (
+              refreshed.workspace?.current_draft
+              || refreshedMetadata?.draft_mode === "import_translation_required"
+            ),
+          );
+          if (requestCompleted) {
+            setError(null);
+            setImportedFacts((currentFacts) => currentFacts.filter((fact) => fact.source_id !== sourceId));
+            setSelectedImportFactIds((currentIds) => currentIds.filter((factId) => !sourcePendingFacts.some((fact) => fact.id === factId)));
+            setRecentImport(null);
+            setMobilePanel(refreshed.workspace?.current_draft ? "resume" : "conversation");
+            return;
+          }
+          const refreshedSourceFacts = refreshed.facts.filter((fact) => fact.source_id === sourceId);
+          const pendingFacts = refreshedSourceFacts.filter((fact) => fact.verification_status === "extracted");
+          setImportedFacts(pendingFacts);
+          setSelectedImportFactIds((currentIds) => currentIds.filter((factId) => pendingFacts.some((fact) => fact.id === factId)));
+          setRecentImport((currentImport) => currentImport?.sourceId === sourceId
+            ? {
+                ...currentImport,
+                confirmedCount: refreshedSourceFacts.filter((fact) => fact.verification_status === "confirmed").length,
+                extractedCount: refreshedSourceFacts.filter((fact) => fact.verification_status === "extracted").length,
+                rejectedCount: refreshedSourceFacts.filter((fact) => fact.verification_status === "unconfirmed").length,
+              }
+            : currentImport);
+        }
+        setError(nextError);
+      }
     } finally {
-      if (operationIsCurrent(operationEpoch)) setConfirmingFactId(null);
+      if (operationIsCurrent(operationEpoch)) setBusyImportSourceId(null);
     }
   }
 
@@ -1665,10 +2033,12 @@ export function ResumeWorkspaceV2({
     setCorrection("");
     setCorrecting(false);
     setMobilePanel("conversation");
-    setRecentImportName(null);
+    setRecentImport(null);
     setPendingImportFile(null);
     setImportedFacts([]);
-    setConfirmingFactId(null);
+    setSelectedImportFactIds([]);
+    setBusyImportSourceId(null);
+    setImportSourceNames({});
     setShowContact(false);
     setError(null);
     setResetError(null);
@@ -1694,7 +2064,7 @@ export function ResumeWorkspaceV2({
       || reviewing
       || previewing
       || exporting
-      || confirmingFactId !== null
+      || busyImportSourceId !== null
       || correcting
       || saveState === "saving"
       || persistenceIsPending()
@@ -1745,7 +2115,7 @@ export function ResumeWorkspaceV2({
     || reviewing
     || previewing
     || exporting
-    || confirmingFactId !== null
+    || busyImportSourceId !== null
     || correcting
     || saveState === "saving"
   );
@@ -1923,10 +2293,12 @@ export function ResumeWorkspaceV2({
                 importing={importing}
                 correcting={correcting}
                 correction={correction}
-                recentImportName={recentImportName}
+                recentImport={recentImport}
                 pendingImportFileName={pendingImportFile?.name ?? null}
                 importedFacts={importedFacts}
-                confirmingFactId={confirmingFactId}
+                selectedImportFactIds={selectedImportFactIds}
+                busyImportSourceId={busyImportSourceId}
+                importSourceNames={importSourceNames}
                 showContact={showContact}
                 onShowContact={setShowContact}
                 onContactChange={handleContactChange}
@@ -1936,7 +2308,9 @@ export function ResumeWorkspaceV2({
                 onFile={(event) => void handleFile(event)}
                 onConfirmImport={() => void handleConfirmImport()}
                 onCancelImport={() => setPendingImportFile(null)}
-                onConfirmFact={(factId) => void handleConfirmImportedFact(factId)}
+                onToggleImportFact={handleToggleImportFact}
+                onToggleImportSource={handleToggleImportSource}
+                onBuildImportDraft={(sourceId, includeSelectedFacts) => void handleBuildImportDraft(sourceId, includeSelectedFacts)}
                 onConfirm={() => void handleConfirmUnderstanding()}
                 onStartCorrection={() => { setCorrection(workspace.pending_understanding?.understanding ?? ""); setCorrecting(true); }}
                 onCancelCorrection={() => { setCorrection(""); setCorrecting(false); }}

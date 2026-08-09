@@ -45,6 +45,7 @@ from career_agent_api.schemas.api import (
     ResumeDraftRevisionCreate,
     ResumeDraftVersionRead,
     ResumeExportContact,
+    ResumeImportDraftCreate,
     ResumeMessageCreate,
     ResumeReviewCreate,
     ResumeReviewRead,
@@ -214,6 +215,21 @@ async def _profile_facts(session: AsyncSession, profile_id: UUID) -> list[Career
             )
         ).all()
     )
+
+
+async def _workspace_facts(
+    session: AsyncSession,
+    workspace: ResumeWorkspace,
+) -> list[CareerFact]:
+    """Return the evidence explicitly selected for this resume, if it has a source scope."""
+
+    facts = await _profile_facts(session, workspace.profile_id)
+    metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
+    raw_ids = metadata.get("generation_fact_ids")
+    if not isinstance(raw_ids, list):
+        return facts
+    selected_ids = {str(value) for value in raw_ids if str(value).strip()}
+    return [fact for fact in facts if str(fact.id) in selected_ids]
 
 
 def _provider_consent_version(provider: ResumeWriterProvider) -> str:
@@ -465,7 +481,7 @@ async def _refresh_workspace(
             **workspace.provider_metadata,
             "review_invalidated_reason": "professional_evidence_changed",
         }
-    facts = await _profile_facts(session, workspace.profile_id)
+    facts = await _workspace_facts(session, workspace)
     draft = (
         ResumeDraftContent.model_validate(workspace.current_draft)
         if workspace.current_draft
@@ -492,6 +508,28 @@ def _dump(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _dump(item) for key, item in value.items()}
     return value
+
+
+def _evidence_fingerprint(evidence: tuple[Any, ...]) -> str:
+    snapshot = [
+        {
+            "handle": item.handle,
+            "category": item.category,
+            "label": item.label,
+            "detail": item.detail,
+            "structured_value": item.structured_value,
+            "source_excerpt": item.source_excerpt,
+        }
+        for item in evidence
+    ]
+    return sha256(
+        json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def _first_interview_section(facts: list[CareerFact]) -> ResumeWriterCategory:
@@ -819,6 +857,16 @@ async def _create_version(
             ResumeDraftVersion.workspace_id == workspace.id
         )
     )
+    metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
+    scope_diff = {
+        key: metadata[key]
+        for key in (
+            "active_import_source_id",
+            "generation_fact_ids",
+            "generation_evidence_fingerprint",
+        )
+        if key in metadata
+    }
     version = ResumeDraftVersion(
         workspace_id=workspace.id,
         version=int(latest or 0) + 1,
@@ -826,7 +874,7 @@ async def _create_version(
         reason=reason,
         status=status_value,
         content=workspace.current_draft,
-        diff=diff or {},
+        diff={**scope_diff, **(diff or {})},
         evidence_revision=workspace.evidence_revision,
         reviewed_at=datetime.now(UTC) if reviewed_by else None,
         reviewed_by_owner_id=reviewed_by,
@@ -993,6 +1041,24 @@ async def _handle_resume_quick_action(
             }
             assistant_kind = ResumeMessageKind.QUESTION
             structured_payload = {"question": next_question, "quick_action": action}
+    elif action == "improve" and workspace.current_draft is not None:
+        workspace.pending_understanding = None
+        workspace.pending_suggestion = None
+        workspace.stage = ResumeWorkspaceStage.WRITING
+        assistant_content = (
+            "مسودتك محفوظة. حدّد الملخص أو أي نقطة داخل السيرة، ثم اختر «صياغة أقوى» "
+            "أو «احترافية أكثر» لتراجع التحسين قبل اعتماده."
+            if conversation_language is PreferredLanguage.AR
+            else (
+                "Your draft is preserved. Select the summary or any bullet, then choose "
+                "a stronger or more professional rewrite to review it before accepting."
+            )
+        )
+        structured_payload = {
+            "quick_action": action,
+            "draft_preserved": True,
+            "improvement_mode": "reviewed_selection",
+        }
     elif action in {"generate", "improve", "review"}:
         if not evidence:
             raise _api_error(
@@ -1169,7 +1235,7 @@ async def start_resume_workspace(
                     "resume_conversation_language_change_not_allowed",
                     "Start a new resume workspace to change the conversation language",
                 )
-            facts = await _profile_facts(session, profile_id)
+            facts = await _workspace_facts(session, workspace)
             evidence = build_resume_evidence(facts)
             if provider.available and (
                 payload.data_sharing_acknowledged
@@ -1248,7 +1314,7 @@ async def start_resume_workspace(
                 )
             )
             if not user_message_count:
-                facts = await _profile_facts(session, profile_id)
+                facts = await _workspace_facts(session, workspace)
                 try:
                     question = await _generate_ordered_question(
                         provider,
@@ -1431,6 +1497,183 @@ async def reset_resume_workspace(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/draft/from-import", response_model=ResumeWorkspaceRead)
+async def create_resume_draft_from_import(
+    profile_id: UUID,
+    payload: ResumeImportDraftCreate,
+    user: CurrentUser,
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_db),
+) -> ResumeWorkspaceRead:
+    """Create an immediate literal draft from confirmed facts belonging to one uploaded file."""
+
+    profile = await _owned_profile(session, profile_id, user.id, for_update=True)
+    workspace = await _load_workspace(
+        session,
+        profile_id,
+        for_update=True,
+        include_versions=False,
+    )
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resume workspace not found",
+        )
+    provider = get_resume_writer_provider(settings)
+    metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
+    if (
+        str(metadata.get("last_import_draft_request_id") or "")
+        == str(payload.client_request_id)
+        and str(metadata.get("active_import_source_id") or "") == str(payload.source_id)
+        and (
+            workspace.current_draft is not None
+            or metadata.get("draft_mode") == "import_translation_required"
+        )
+    ):
+        reloaded = await _load_workspace(session, profile_id)
+        assert reloaded is not None
+        return _workspace_read(reloaded, provider)
+    if workspace.current_draft is not None:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_draft_exists",
+            "Clear the current resume before creating a new draft from another file",
+        )
+    if payload.expected_revision != workspace.revision:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_workspace_revision_conflict",
+            "The resume workspace changed; reload it before creating the draft",
+        )
+    if payload.expected_evidence_revision != profile.evidence_revision:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_evidence_revision_conflict",
+            "Professional evidence changed; reload the imported resume",
+        )
+    source = await session.scalar(
+        select(EvidenceSource).where(
+            EvidenceSource.id == payload.source_id,
+            EvidenceSource.profile_id == profile_id,
+            EvidenceSource.kind == SourceKind.CV_UPLOAD,
+        )
+    )
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume source not found")
+    facts = list(
+        (
+            await session.scalars(
+                select(CareerFact)
+                .where(
+                    CareerFact.profile_id == profile_id,
+                    CareerFact.source_id == payload.source_id,
+                    CareerFact.category.in_(PROFESSIONAL_CATEGORIES),
+                    CareerFact.verification_status == VerificationStatus.CONFIRMED,
+                )
+                .order_by(CareerFact.created_at, CareerFact.id)
+            )
+        ).all()
+    )
+    evidence = build_resume_evidence(facts)
+    if not evidence:
+        raise _api_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "resume_import_confirmed_evidence_required",
+            "Confirm at least one useful fact from this file before creating the draft",
+        )
+    translation_required = False
+    try:
+        draft = build_evidence_fallback_draft(
+            language=workspace.language,
+            evidence=evidence,
+        )
+    except ResumeWriterError:
+        draft = None
+        translation_required = True
+
+    if draft is not None:
+        workspace.current_draft = draft.model_dump(mode="json")
+        workspace.draft_revision += 1
+    workspace.revision += 1
+    workspace.evidence_revision = profile.evidence_revision
+    workspace.pending_understanding = None
+    workspace.pending_suggestion = None
+    workspace.stage = (
+        ResumeWorkspaceStage.WRITING
+        if draft is not None
+        else ResumeWorkspaceStage.UNDERSTANDING
+    )
+    draft_mode = "import_translation_required" if translation_required else "import_evidence"
+    workspace.provider_metadata = {
+        **metadata,
+        "active_import_source_id": str(payload.source_id),
+        "generation_fact_ids": [str(fact.id) for fact in facts],
+        "generation_evidence_fingerprint": _evidence_fingerprint(evidence),
+        "last_import_draft_request_id": str(payload.client_request_id),
+        "draft_mode": draft_mode,
+        "generation_warning": "import_translation_required" if translation_required else None,
+        "pending_import_source_id": None,
+        "pending_import_filename": None,
+        "pending_import_analysis_status": None,
+    }
+    session.add(
+        ResumeMessage(
+            workspace_id=workspace.id,
+            sequence=_next_sequence(workspace),
+            role=ResumeMessageRole.ASSISTANT,
+            kind=ResumeMessageKind.STATUS,
+            content=(
+                (
+                    "ربطت السيرة بالمعلومات التي اعتمدتها من هذا الملف. "
+                    "لأن لغة الملف تختلف عن لغة السيرة، "
+                    "اضغط «اكتب السيرة الآن» ليترجمها المساعد الذكي ويصوغها لك."
+                    if translation_required
+                    else (
+                        "جهزت مسودة كاملة وسريعة من المعلومات التي راجعتها في هذا الملف. "
+                        "يمكنك الآن تعديلها أو تحسين صياغتها بالذكاء الاصطناعي."
+                    )
+                )
+                if _conversation_language(workspace) is PreferredLanguage.AR
+                else (
+                    (
+                        "I linked this resume to the facts you approved from the file. "
+                        "Since the file language differs from the resume language, "
+                        "choose Write resume now to translate "
+                        "and draft it with AI."
+                    )
+                    if translation_required
+                    else (
+                        "I created a complete first draft from the reviewed facts in this file. "
+                        "You can edit it now or refine the wording with AI."
+                    )
+                )
+            ),
+            structured_payload={
+                "draft_mode": draft_mode,
+                "source_id": str(payload.source_id),
+                "fact_count": len(facts),
+            },
+            status=ResumeMessageStatus.SENT,
+        )
+    )
+    if draft is not None:
+        await _create_version(
+            session,
+            workspace,
+            reason=ResumeDraftVersionReason.INITIAL_GENERATION,
+            diff={
+                "draft_mode": draft_mode,
+                "source_id": str(payload.source_id),
+                "fact_count": len(facts),
+            },
+        )
+    await _refresh_workspace(session, workspace)
+    await session.commit()
+    workspace = await _load_workspace(session, profile_id)
+    assert workspace is not None
+    return _workspace_read(workspace, provider)
+
+
 @router.post("/messages", response_model=ResumeWorkspaceRead)
 async def send_resume_message(
     profile_id: UUID,
@@ -1481,7 +1724,7 @@ async def send_resume_message(
             "Acknowledge sending professional evidence to the AI provider before continuing",
         )
 
-    facts = await _profile_facts(session, profile_id)
+    facts = await _workspace_facts(session, workspace)
     evidence = build_resume_evidence(facts)
     conversation_language = _conversation_language(workspace)
     current_question = dict(workspace.provider_metadata.get("current_question") or {})
@@ -1719,6 +1962,19 @@ async def confirm_resume_understanding(
     await session.flush()
     source_handle_map: dict[str, list[str]] = {}
     created_handles = [_fact_handle(fact) for fact in created_facts]
+    raw_generation_fact_ids = workspace.provider_metadata.get("generation_fact_ids")
+    if isinstance(raw_generation_fact_ids, list) and created_facts:
+        workspace.provider_metadata = {
+            **workspace.provider_metadata,
+            "generation_fact_ids": list(
+                dict.fromkeys(
+                    [
+                        *(str(value) for value in raw_generation_fact_ids),
+                        *(str(fact.id) for fact in created_facts),
+                    ]
+                )
+            ),
+        }
     for fact, record in fact_records:
         actual_handle = _fact_handle(fact)
         raw_handles = record.get("source_handles")
@@ -1735,7 +1991,7 @@ async def confirm_resume_understanding(
                 handle = str(raw_handle).strip()
                 if handle and created_handles:
                     source_handle_map.setdefault(handle, []).extend(created_handles)
-    confirmed_evidence = build_resume_evidence(await _profile_facts(session, profile_id))
+    confirmed_evidence = build_resume_evidence(await _workspace_facts(session, workspace))
     remapped_patch = _remap_patch_evidence_handles(
         pending.get("draft_patch"),
         source_handle_map=source_handle_map,
@@ -1760,7 +2016,7 @@ async def confirm_resume_understanding(
     )
     if should_generate_full_draft:
         try:
-            generation_facts = await _profile_facts(session, profile_id)
+            generation_facts = await _workspace_facts(session, workspace)
             draft = await provider.generate_draft(
                 language=workspace.language,
                 target_role=None,
@@ -1809,7 +2065,7 @@ async def confirm_resume_understanding(
         workspace.stage = ResumeWorkspaceStage.WRITING
     next_question = pending.get("next_question")
     if pending.get("corrected_by_user") and not next_question:
-        corrected_facts = await _profile_facts(session, profile_id)
+        corrected_facts = await _workspace_facts(session, workspace)
         raw_category = str((pending.get("question") or {}).get("category") or "")
         corrected_category = (
             cast(ResumeWriterCategory, raw_category)
@@ -1856,7 +2112,7 @@ async def confirm_resume_understanding(
             "current_question": next_question,
             "pending_question": None,
         }
-    facts = await _profile_facts(session, profile_id)
+    facts = await _workspace_facts(session, workspace)
     active_draft = draft or (
         ResumeDraftContent.model_validate(workspace.current_draft)
         if workspace.current_draft
@@ -2053,7 +2309,7 @@ async def rewrite_resume_draft(
             "resume_rewrite_not_supported",
             "The configured resume writer does not support section rewrites",
         )
-    evidence = build_resume_evidence(await _profile_facts(session, profile_id))
+    evidence = build_resume_evidence(await _workspace_facts(session, workspace))
     instruction = payload.instruction or payload.mode
     try:
         candidate = await rewrite(
@@ -2312,6 +2568,16 @@ async def restore_resume_version(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume version not found"
         )
     workspace.current_draft = version.content
+    restored_metadata = dict(workspace.provider_metadata)
+    for key in (
+        "active_import_source_id",
+        "generation_fact_ids",
+        "generation_evidence_fingerprint",
+    ):
+        restored_metadata.pop(key, None)
+        if key in version.diff:
+            restored_metadata[key] = version.diff[key]
+    workspace.provider_metadata = restored_metadata
     workspace.draft_revision += 1
     workspace.pending_suggestion = None
     workspace.revision += 1
@@ -2490,7 +2756,7 @@ async def review_resume_workspace(
         )
     await _refresh_workspace(session, workspace)
     draft = ResumeDraftContent.model_validate(workspace.current_draft)
-    evidence = build_resume_evidence(await _profile_facts(session, profile_id))
+    evidence = build_resume_evidence(await _workspace_facts(session, workspace))
     blockers = _review_blockers(draft, workspace, evidence)
     if blockers:
         raise _api_error(

@@ -189,6 +189,27 @@ class ImportResultRead(BaseModel):
     analysis_status: Literal["created", "ai_upgraded", "already_ai_analyzed"] = "created"
 
 
+class CareerFactBatchConfirmCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: UUID
+    client_request_id: UUID
+    fact_ids: list[UUID] = Field(min_length=1, max_length=120)
+    expected_evidence_revision: int = Field(ge=0)
+
+    @field_validator("fact_ids")
+    @classmethod
+    def unique_fact_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("fact_ids must be unique")
+        return value
+
+
+class CareerFactBatchConfirmRead(BaseModel):
+    facts: list["CareerFactRead"]
+    evidence_revision: int = Field(ge=0)
+
+
 class ResumeNarrativeCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -349,6 +370,15 @@ class ResumeWorkspaceStartCreate(BaseModel):
     conversation_language: PreferredLanguage | None = None
     contact: ResumeExportContact = Field(default_factory=ResumeExportContact)
     data_sharing_acknowledged: bool = False
+
+
+class ResumeImportDraftCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: UUID
+    client_request_id: UUID
+    expected_revision: int = Field(ge=0)
+    expected_evidence_revision: int = Field(ge=0)
 
 
 class ResumeMessageCreate(BaseModel):

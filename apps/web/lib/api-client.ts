@@ -56,6 +56,12 @@ export function apiErrorMessage(error: unknown, locale: "ar" | "en") {
     if (error.code === "resume_review_required") return locale === "ar" ? "راجع نص السيرة ووافق عليه قبل تنزيل PDF." : "Review and approve the resume text before downloading the PDF.";
     if (error.code === "resume_export_failed") return locale === "ar" ? "تعذر إنشاء ملف PDF مؤقتًا. حاول مرة أخرى." : "The PDF could not be generated. Please try again.";
     if (error.code === "resume_workspace_revision_conflict") return locale === "ar" ? "تغيّرت مساحة السيرة في تبويب آخر. حدّثنا آخر نسخة؛ راجعها ثم أعد المحاولة." : "The resume workspace changed in another tab. We loaded the latest version; review it and try again.";
+    if (error.code === "resume_evidence_revision_conflict") return locale === "ar" ? "تغيّرت معلومات السيرة أثناء المراجعة. حدّثنا القائمة؛ راجعها ثم أعد المحاولة." : "Resume facts changed during review. We refreshed the list; review it and try again.";
+    if (error.code === "resume_import_draft_exists") return locale === "ar" ? "توجد مسودة حالية. امسحها أولًا إذا أردت إنشاء مسودة من ملف آخر." : "A draft already exists. Clear it before creating one from another file.";
+    if (error.code === "resume_import_confirmed_evidence_required") return locale === "ar" ? "حدد معلومة صحيحة واحدة على الأقل من الملف قبل إنشاء المسودة." : "Select at least one accurate fact from the file before creating the draft.";
+    if (error.code === "resume_import_draft_requires_ai") return locale === "ar" ? "لغة الملف تختلف عن لغة السيرة. استخدم المساعد الذكي لترجمة المحتوى وبناء المسودة." : "The file language differs from the resume language. Use the AI assistant to translate and build the draft.";
+    if (error.code === "resume_import_fact_mismatch") return locale === "ar" ? "بعض المعلومات المحددة لا تنتمي إلى هذا الملف. حدّثنا المراجعة؛ اختر معلومات الملف نفسه فقط." : "Some selected facts do not belong to this file. We refreshed the review; select facts from this file only.";
+    if (error.code === "resume_import_fact_rejected") return locale === "ar" ? "إحدى المعلومات المحددة سبق استبعادها. راجع القائمة واختر المعلومات غير المستبعدة فقط." : "One selected fact was previously rejected. Review the list and select only active facts.";
     if (error.code === "resume_workspace_consent_required") return locale === "ar" ? "وافق على استخدام الذكاء الاصطناعي في مساحة السيرة قبل المتابعة." : "Acknowledge AI use in the resume workspace before continuing.";
     if (error.code === "resume_workspace_not_configured") return locale === "ar" ? "مساحة السيرة الذكية غير مفعّلة على الخادم." : "The AI resume workspace is not enabled on the server.";
     if (error.code === "resume_workspace_unavailable") return locale === "ar" ? "تعذر تشغيل مساعد السيرة مؤقتًا. حفظنا ما كتبته ويمكنك إعادة المحاولة." : "The resume assistant is temporarily unavailable. Your input was kept so you can retry.";
@@ -231,6 +237,11 @@ export type ApiImportResult = {
   facts: ApiCareerFact[];
   requires_user_review: boolean;
   analysis_status: "created" | "ai_upgraded" | "already_ai_analyzed";
+};
+
+export type ApiCareerFactBatchConfirmResult = {
+  facts: ApiCareerFact[];
+  evidence_revision: number;
 };
 
 export type ApiResumeFactCategory =
@@ -993,6 +1004,26 @@ export async function sendResumeWorkspaceMessage(
   });
 }
 
+export async function buildResumeDraftFromImport(
+  profileId: string,
+  input: {
+    sourceId: string;
+    clientRequestId: string;
+    expectedRevision: number;
+    expectedEvidenceRevision: number;
+  },
+) {
+  return apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId, "/draft/from-import"), {
+    method: "POST",
+    body: JSON.stringify({
+      source_id: input.sourceId,
+      client_request_id: input.clientRequestId,
+      expected_revision: input.expectedRevision,
+      expected_evidence_revision: input.expectedEvidenceRevision,
+    }),
+  });
+}
+
 export async function confirmResumeUnderstanding(
   profileId: string,
   understandingId: string,
@@ -1141,6 +1172,29 @@ export async function exportResumeWorkspacePdf(profileId: string, expectedDraftR
 
 export async function confirmCareerFact(profileId: string, factId: string) {
   return apiRequest<ApiCareerFact>(`/v1/profiles/${encodeURIComponent(profileId)}/facts/${encodeURIComponent(factId)}/confirm`, { method: "POST" });
+}
+
+export async function confirmCareerFactsBatch(
+  profileId: string,
+  input: {
+    sourceId: string;
+    clientRequestId: string;
+    factIds: string[];
+    expectedEvidenceRevision: number;
+  },
+) {
+  return apiRequest<ApiCareerFactBatchConfirmResult>(
+    `/v1/profiles/${encodeURIComponent(profileId)}/facts/confirm-batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        source_id: input.sourceId,
+        client_request_id: input.clientRequestId,
+        fact_ids: input.factIds,
+        expected_evidence_revision: input.expectedEvidenceRevision,
+      }),
+    },
+  );
 }
 
 export async function updateCareerFact(profileId: string, factId: string, input: { category: string; label: string; detail: string; correctionReason: string }) {
