@@ -211,7 +211,16 @@ function saveBlob(blob: Blob, filename: string) {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  return url;
+}
+
+function resumeExportContentKey(profile: ApiCareerProfile, workspace: ApiResumeWorkspace | null) {
+  return JSON.stringify([
+    profile.full_name,
+    profile.city,
+    workspace?.current_draft ?? null,
+    workspace?.contact ?? null,
+  ]);
 }
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
@@ -1199,6 +1208,11 @@ export function ResumeWorkspaceV2({
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [downloadNotice, setDownloadNotice] = useState(false);
+  const [downloadReady, setDownloadReady] = useState<{
+    url: string;
+    filename: string;
+    contentKey: string;
+  } | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -1249,6 +1263,7 @@ export function ResumeWorkspaceV2({
   const contactTimerRef = useRef<number | null>(null);
   const draftSaveInFlightRef = useRef(false);
   const contactSaveInFlightRef = useRef(false);
+  const revokedDownloadUrlRef = useRef<string | null>(null);
   const queuedDraftSaveRef = useRef<QueuedDraftSave | null>(null);
   const draftEditGenerationRef = useRef(0);
   const operationEpochRef = useRef(0);
@@ -1266,6 +1281,35 @@ export function ResumeWorkspaceV2({
   useEffect(() => () => {
     if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
   }, [pdfPreviewUrl]);
+
+  useEffect(() => () => {
+    if (downloadReady && revokedDownloadUrlRef.current !== downloadReady.url) {
+      URL.revokeObjectURL(downloadReady.url);
+      revokedDownloadUrlRef.current = downloadReady.url;
+    }
+  }, [downloadReady]);
+
+  const exportContentKey = useMemo(
+    () => resumeExportContentKey(profile, workspace),
+    [profile, workspace],
+  );
+
+  const visibleDownloadReady = downloadReady
+    && downloadReady.contentKey === exportContentKey
+    && saveState === "saved"
+    && revokedDownloadUrlRef.current !== downloadReady.url
+    ? downloadReady
+    : null;
+
+  useEffect(() => {
+    if (
+      !downloadReady
+      || (downloadReady.contentKey === exportContentKey && saveState === "saved")
+      || revokedDownloadUrlRef.current === downloadReady.url
+    ) return;
+    URL.revokeObjectURL(downloadReady.url);
+    revokedDownloadUrlRef.current = downloadReady.url;
+  }, [downloadReady, exportContentKey, saveState]);
 
   const stageIndex = workspaceStageIndex(workspace);
   const generationWarningValue = workspace?.provider_metadata?.generation_warning;
@@ -1991,11 +2035,19 @@ export function ResumeWorkspaceV2({
     const operationEpoch = operationEpochRef.current;
     setExporting(true);
     setDownloadNotice(false);
+    setDownloadReady(null);
     setError(null);
     try {
       const blob = await exportResumeWorkspacePdf(profile.id, current.draft_revision);
       if (!operationIsCurrent(operationEpoch)) return;
-      saveBlob(blob, `${profile.full_name.trim() || "resume"}-resume.pdf`);
+      const filename = `${profile.full_name.trim() || "resume"}-resume.pdf`;
+      const url = saveBlob(blob, filename);
+      revokedDownloadUrlRef.current = null;
+      setDownloadReady({
+        url,
+        filename,
+        contentKey: resumeExportContentKey(profile, current),
+      });
       commitWorkspace({ ...current, stage: "complete" });
       setDownloadNotice(true);
     } catch (nextError) {
@@ -2350,7 +2402,17 @@ export function ResumeWorkspaceV2({
         ) : null}
 
         {error && isReview ? <p className="mt-2 text-xs text-danger" role="alert">{apiErrorMessage(error, locale)}</p> : null}
-        {downloadNotice ? <p className="mt-2 text-xs font-medium text-emerald" role="status">{locale === "ar" ? "بدأ تنزيل ملف PDF. إذا لم يظهر، اضغط اعتماد وتحميل مرة أخرى." : "The PDF download started. If it does not appear, choose Approve & download again."}</p> : null}
+        {downloadNotice && visibleDownloadReady ? (
+          <p className="mt-2 text-xs font-medium text-emerald" role="status">
+            {locale === "ar" ? "تم تجهيز ملف PDF. إذا لم يبدأ تلقائيًا، " : "The PDF is ready. If it did not start automatically, "}
+            {visibleDownloadReady ? (
+              <a className="underline underline-offset-4" href={visibleDownloadReady.url} download={visibleDownloadReady.filename}>
+                {locale === "ar" ? "نزّله من هنا" : "download it here"}
+              </a>
+            ) : null}
+            .
+          </p>
+        ) : null}
       </div>
       {pdfPreviewUrl ? (
         <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="resume-pdf-preview-title">

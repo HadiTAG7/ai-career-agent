@@ -1443,7 +1443,50 @@ describe("resume workspace v2", () => {
     expect(anchorClick).toHaveBeenCalledOnce();
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(revokeObjectURL).not.toHaveBeenCalled();
-    expect(screen.getByText(/بدأ تنزيل ملف PDF/)).toBeVisible();
+    expect(screen.getByText(/تم تجهيز ملف PDF/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "نزّله من هنا" })).toHaveAttribute(
+      "href",
+      "blob:resume-v2",
+    );
+    expect(screen.getByRole("link", { name: "نزّله من هنا" })).toHaveAttribute(
+      "download",
+      `${profile.full_name}-resume.pdf`,
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "العنوان المهني" }), " updated");
+    await waitFor(() => expect(screen.queryByRole("link", { name: "نزّله من هنا" })).not.toBeInTheDocument());
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:resume-v2");
+  });
+
+  it("revokes a prepared PDF link when the workspace is permanently cleared", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "review",
+      revision: 7,
+      current_draft: draft,
+      draft_revision: 1,
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:reset-resume"),
+    });
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("checkbox", { name: "راجعت المعلومات" }));
+    await waitFor(() => expect(apiMocks.reviewResumeWorkspace).toHaveBeenCalledWith(profile.id, 1));
+    await user.click(screen.getByRole("button", { name: "تنزيل PDF" }));
+    expect(await screen.findByRole("link", { name: "نزّله من هنا" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "مسح والبدء من جديد" }));
+    await user.click(screen.getByRole("button", { name: "امسح وابدأ من جديد" }));
+
+    await waitFor(() => expect(apiMocks.resetResumeWorkspace).toHaveBeenCalledWith(profile.id, 7));
+    expect(screen.queryByRole("link", { name: "نزّله من هنا" })).not.toBeInTheDocument();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:reset-resume");
   });
 
   it("shows the PDF preview inside the workspace instead of relying on a popup", async () => {
