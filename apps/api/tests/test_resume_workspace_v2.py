@@ -25,6 +25,7 @@ from career_agent_api.schemas.api import ResumeDraftContent, ResumeQuestionRead
 from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
     ResumeEvidence,
+    ResumeWriterOutputError,
     ResumeWriterProvider,
     ResumeWriterTransportError,
 )
@@ -1211,10 +1212,12 @@ async def test_workspace_maps_mistral_transport_failures_to_retryable_503(
     assert provider_failure not in failed.text
 
 
+@pytest.mark.parametrize("failure_kind", ["transport", "output"])
 async def test_failed_regeneration_preserves_current_draft_and_workspace_can_retry(
     client,
     stub_provider: StubWorkspaceProvider,
     monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
 ) -> None:
     _profile, base, headers, workspace = await create_generated_workspace(client)
     original_draft = deepcopy(workspace["current_draft"])
@@ -1223,6 +1226,8 @@ async def test_failed_regeneration_preserves_current_draft_and_workspace_can_ret
     working_generation = stub_provider.generate_draft
 
     async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        if failure_kind == "output":
+            raise ResumeWriterOutputError("no usable grounded draft")
         raise ResumeWriterTransportError("request timed out", transient=True)
 
     monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
@@ -1271,10 +1276,12 @@ async def test_failed_regeneration_preserves_current_draft_and_workspace_can_ret
     assert retried.json()["draft_revision"] == original_draft_revision + 1
 
 
-async def test_initial_generate_uses_same_language_evidence_fallback_on_provider_timeout(
+@pytest.mark.parametrize("failure_kind", ["transport", "output"])
+async def test_initial_generate_uses_same_language_evidence_fallback_on_provider_failure(
     client,
     stub_provider: StubWorkspaceProvider,
     monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
 ) -> None:
     profile, source = await create_profile_and_source(client)
     headers = {"X-User-Id": "demo-user"}
@@ -1313,6 +1320,8 @@ async def test_initial_generate_uses_same_language_evidence_fallback_on_provider
     assert started.status_code == 201, started.text
 
     async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        if failure_kind == "output":
+            raise ResumeWriterOutputError("no usable grounded draft")
         raise ResumeWriterTransportError("request timed out", transient=True)
 
     monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
@@ -1355,12 +1364,32 @@ async def test_initial_generate_uses_same_language_evidence_fallback_on_provider
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["status"] == "export_ready"
     assert reviewed.json()["export_allowed"] is True
+    monkeypatch.setattr(workspace_api, "render_resume_pdf", lambda **_: b"%PDF-fallback")
+    exported = await client.post(
+        f"{base}/export.pdf",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert exported.status_code == 200, exported.text
+    assert exported.content == b"%PDF-fallback"
 
 
-async def test_initial_transport_failure_rejects_mixed_language_evidence_fallback(
+@pytest.mark.parametrize(
+    ("organization", "transient"),
+    [
+        pytest.param("شركة الميناء", True, id="mixed-language-transient"),
+        pytest.param("Harbor Company", False, id="same-language-401"),
+    ],
+)
+async def test_initial_transport_failure_does_not_create_an_unsafe_fallback(
     client,
     stub_provider: StubWorkspaceProvider,
     monkeypatch: pytest.MonkeyPatch,
+    organization: str,
+    transient: bool,
 ) -> None:
     profile, source = await create_profile_and_source(client)
     headers = {"X-User-Id": "demo-user"}
@@ -1375,7 +1404,7 @@ async def test_initial_transport_failure_rejects_mixed_language_evidence_fallbac
             "detail": responsibility,
             "structured_value": {
                 "title": "Cost Analyst",
-                "organization": "شركة الميناء",
+                "organization": organization,
                 "date_range": "2024 - Present",
                 "responsibilities": [responsibility],
             },
@@ -1397,7 +1426,8 @@ async def test_initial_transport_failure_rejects_mixed_language_evidence_fallbac
     assert started.status_code == 201, started.text
 
     async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
-        raise ResumeWriterTransportError("request timed out", transient=True)
+        message = "request timed out" if transient else "401 unauthorized"
+        raise ResumeWriterTransportError(message, transient=transient)
 
     monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
     generated = await client.post(

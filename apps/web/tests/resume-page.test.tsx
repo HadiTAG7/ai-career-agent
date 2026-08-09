@@ -159,6 +159,13 @@ const olderExtractedFact: ApiCareerFact = {
   label: "معلومة من استيراد أقدم",
 };
 
+const previouslyRejectedFact: ApiCareerFact = {
+  ...extractedFact,
+  id: "fact-rejected-1",
+  label: "معلومة مرفوضة سابقًا",
+  verification_status: "unconfirmed",
+};
+
 async function renderResumePage() {
   const [{ default: ResumePage }, { LocaleProvider }] = await Promise.all([
     import("@/app/resume/page"),
@@ -817,6 +824,41 @@ describe("resume workspace v2", () => {
     await user.click(within(review!).getByRole("button", { name: "تأكيد هذه المعلومة" }));
     await waitFor(() => expect(apiMocks.confirmCareerFact).toHaveBeenCalledWith(profile.id, extractedFact.id));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "راجع المعلومات المستخرجة" })).not.toBeInTheDocument());
+  });
+
+  it("does not reopen previously rejected facts when the same analyzed file is uploaded", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(makeWorkspace())
+      .mockResolvedValue(makeWorkspace({ readiness_score: 55 }));
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([extractedFact, previouslyRejectedFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: "source-1",
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [extractedFact, previouslyRejectedFact],
+      requires_user_review: true,
+      analysis_status: "already_ai_analyzed",
+    });
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    const file = new File(["resume"], "resume.pdf", { type: "application/pdf" });
+    await user.upload(input!, file);
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    const reviewHeading = await screen.findByRole("heading", { name: "راجع المعلومات المستخرجة" });
+    const review = reviewHeading.closest("section");
+    expect(review).not.toBeNull();
+    expect(within(review!).getByText(extractedFact.label)).toBeVisible();
+    expect(within(review!).queryByText(previouslyRejectedFact.label)).not.toBeInTheDocument();
+    expect(within(review!).getAllByRole("button", { name: "تأكيد هذه المعلومة" })).toHaveLength(1);
   });
 
   it("shows a before-and-after AI rewrite and accepts it without replacing the whole draft", async () => {

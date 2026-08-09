@@ -1264,7 +1264,7 @@ export function ResumeWorkspaceV2({
         result.facts
           .filter((fact) => currentImportIds.has(fact.id))
           .map((fact) => refreshedById.get(fact.id) ?? fact)
-          .filter((fact) => fact.verification_status !== "confirmed"),
+          .filter((fact) => fact.verification_status === "extracted"),
       );
       setRecentImportName(file.name);
       setPendingImportFile(null);

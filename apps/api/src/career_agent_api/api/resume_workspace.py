@@ -59,6 +59,7 @@ from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
     ResumeWriterCategory,
     ResumeWriterError,
+    ResumeWriterOutputError,
     ResumeWriterProvider,
     ResumeWriterTransportError,
     build_evidence_fallback_draft,
@@ -1014,6 +1015,15 @@ async def _handle_resume_quick_action(
             except ResumeWriterTransportError as exc:
                 if not exc.transient:
                     raise
+                if had_draft:
+                    generation_warning = "ai_unavailable_existing_draft_preserved"
+                else:
+                    draft = build_evidence_fallback_draft(
+                        language=workspace.language,
+                        evidence=evidence,
+                    )
+                    generation_warning = "ai_unavailable_evidence_fallback_created"
+            except ResumeWriterOutputError:
                 if had_draft:
                     generation_warning = "ai_unavailable_existing_draft_preserved"
                 else:

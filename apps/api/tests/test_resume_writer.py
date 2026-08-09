@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 from pydantic import BaseModel, SecretStr, ValidationError
 from pypdf import PdfReader
@@ -20,6 +21,7 @@ from career_agent_api.services.resume_writer import (
     MistralResumeWriterProvider,
     ResumeEvidence,
     ResumeWriterError,
+    ResumeWriterOutputError,
     ResumeWriterTransportError,
     _adaptive_answer_category,
     _GeneratedDraft,
@@ -2010,6 +2012,28 @@ async def test_generate_draft_retries_invalid_structured_output_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_draft_exhaustion_raises_distinct_output_error_after_two_calls() -> None:
+    provider = CapturingResumeWriter(
+        [
+            ResumeWriterError("Resume writer returned invalid structured output"),
+            ResumeWriterError("Resume writer returned unsupported semantic claims"),
+        ]
+    )
+
+    with pytest.raises(ResumeWriterOutputError) as captured:
+        await provider.generate_draft(
+            language=PreferredLanguage.EN,
+            target_role="Data Analyst",
+            evidence=evidence(),
+            answers=[],
+        )
+
+    assert len(provider.calls) == 2
+    assert isinstance(captured.value.__cause__, ResumeWriterError)
+    assert not isinstance(captured.value.__cause__, ResumeWriterTransportError)
+
+
+@pytest.mark.asyncio
 async def test_generate_draft_does_not_retry_transport_failure() -> None:
     provider = CapturingResumeWriter(
         [
@@ -2806,6 +2830,66 @@ def test_provider_uses_dedicated_interview_and_writer_models_with_one_key() -> N
 
     assert provider.model == "writer-model"
     assert provider.interview_model == "interview-model"
+
+
+@pytest.mark.asyncio
+async def test_mistral_provider_wraps_failures_once_with_safe_transience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TinyResponse(BaseModel):
+        value: str
+
+    class ProviderStatusError(Exception):
+        def __init__(self, status_code: int) -> None:
+            super().__init__(f"provider status {status_code}")
+            self.status_code = status_code
+
+    class FailingCompletions:
+        def __init__(self, failure: Exception) -> None:
+            self.failure = failure
+            self.calls = 0
+
+        async def create(self, **_kwargs: Any) -> SimpleNamespace:
+            self.calls += 1
+            raise self.failure
+
+    class FailingClient:
+        def __init__(self, failure: Exception) -> None:
+            self.completions = FailingCompletions(failure)
+            self.chat = SimpleNamespace(completions=self.completions)
+
+        def with_options(self, **_kwargs: Any) -> FailingClient:
+            return self
+
+    failures = [
+        (TypeError("client bug"), False),
+        (ProviderStatusError(401), False),
+        (TimeoutError("request timed out"), True),
+        (httpx.ConnectError("network unavailable"), True),
+    ]
+    for failure, expected_transient in failures:
+        provider = MistralResumeWriterProvider(
+            api_key="test-key",
+            model="writer-model",
+            interview_model="interview-model",
+            timeout_seconds=5,
+            max_tokens=4_000,
+        )
+        client = FailingClient(failure)
+        monkeypatch.setattr(provider, "_get_client", lambda client=client: client)
+
+        with pytest.raises(ResumeWriterTransportError) as captured:
+            await provider._structured_response(
+                schema=TinyResponse,
+                schema_name="professional_resume_draft",
+                system_instructions="Return JSON",
+                payload={"draft": 1},
+                max_tokens=4_000,
+                model_name="writer-model",
+            )
+
+        assert captured.value.transient is expected_transient
+        assert client.completions.calls == 1
 
 
 @pytest.mark.asyncio

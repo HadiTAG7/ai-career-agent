@@ -12,7 +12,8 @@ from hashlib import sha256
 from time import perf_counter
 from typing import Any, Literal, cast
 
-from openai import AsyncOpenAI
+import httpx
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from career_agent_api.core.config import Settings
@@ -453,6 +454,10 @@ class ResumeWriterTransportError(ResumeWriterError):
     def __init__(self, message: str, *, transient: bool) -> None:
         super().__init__(message)
         self.transient = transient
+
+
+class ResumeWriterOutputError(ResumeWriterError):
+    """The provider responded, but both draft attempts failed deterministic checks."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -3707,8 +3712,10 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
             except ResumeWriterError as exc:
                 validation_error = exc
                 if attempt == 1:
-                    raise
-        raise ResumeWriterError("Resume writer returned no usable draft")
+                    raise ResumeWriterOutputError(
+                        "Resume writer returned no usable grounded draft"
+                    ) from exc
+        raise ResumeWriterOutputError("Resume writer returned no usable grounded draft")
 
     async def generate_adaptive_turn(
         self,
@@ -3921,10 +3928,21 @@ def _provider_wall_clock_timeout(schema_name: str, configured_timeout: float) ->
 
 
 def _provider_failure_is_transient(exc: Exception) -> bool:
-    status_code = getattr(exc, "status_code", None)
-    if not isinstance(status_code, int):
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            APIConnectionError,
+            APITimeoutError,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+        ),
+    ):
         return True
-    return status_code in {408, 409, 425, 429} or status_code >= 500
+    status_code = getattr(exc, "status_code", None)
+    return isinstance(status_code, int) and (
+        status_code in {408, 409, 425, 429} or status_code >= 500
+    )
 
 
 class MistralResumeWriterProvider(_StructuredResumeWriterProvider):
