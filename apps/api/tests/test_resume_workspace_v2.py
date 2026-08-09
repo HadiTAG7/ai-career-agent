@@ -24,6 +24,7 @@ from career_agent_api.models.enums import (
 from career_agent_api.schemas.api import ResumeDraftContent, ResumeQuestionRead
 from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
+    ResumeEvidence,
     ResumeWriterError,
     ResumeWriterProvider,
 )
@@ -1358,6 +1359,277 @@ async def test_guidance_quick_actions_never_create_facts_or_understandings(
         await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
     ).json()
     assert len(facts_after) == len(facts_before)
+
+
+def _coursework_review_blockers(
+    *,
+    section_key: str,
+    evidence: tuple[ResumeEvidence, ...],
+    bullet: str,
+    item_id: str,
+    title: str,
+    organization: str,
+    date_range: str,
+) -> list[str]:
+    primary_evidence = evidence[0]
+    draft = ResumeDraftContent.model_validate(
+        {
+            "headline": primary_evidence.label,
+            "professional_summary": primary_evidence.detail or primary_evidence.label,
+            "summary_evidence_handles": [primary_evidence.handle],
+            "sections": [
+                {
+                    "key": section_key,
+                    "title": section_key.replace("_", " ").title(),
+                    "items": [
+                        {
+                            "id": item_id,
+                            "title": title,
+                            "organization": organization,
+                            "date_range": date_range,
+                            "location": None,
+                            "bullets": [bullet],
+                            "evidence_handles": [item.handle for item in evidence],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    workspace = SimpleNamespace(
+        pending_understanding=None,
+        pending_suggestion=None,
+    )
+
+    return workspace_api._review_blockers(draft, workspace, evidence)
+
+
+def test_review_accepts_combined_coursework_bullet_from_structured_education_fact() -> None:
+    coursework = [
+        "Auditing",
+        "Financial Accounting",
+        "Risk Management",
+        "Cost Control",
+        "Internal Control Systems",
+        "Financial Modelling",
+    ]
+    education = ResumeEvidence(
+        handle="education_fact",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Bachelor of Science in Finance at Harbor University, completed 2023",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "Bachelor of Science in Finance",
+            "institution": "Harbor University",
+            "date_range": "2023",
+            "coursework": coursework,
+        },
+        source_excerpt=(
+            "Education\nBachelor of Science in Finance\nHarbor University\n"
+            f"Relevant Courses: {', '.join(coursework)}"
+        ),
+    )
+    blockers = _coursework_review_blockers(
+        section_key="education",
+        evidence=(education,),
+        bullet=f"Relevant Coursework: {', '.join(coursework)}",
+        item_id="finance_degree",
+        title="Bachelor of Science in Finance",
+        organization="Harbor University",
+        date_range="2023",
+    )
+
+    assert not [blocker for blocker in blockers if blocker.startswith("unsupported_claim:")]
+
+
+def test_review_rejects_coursework_bullet_with_an_invented_course() -> None:
+    coursework = [
+        "Auditing",
+        "Financial Accounting",
+        "Risk Management",
+        "Cost Control",
+        "Internal Control Systems",
+        "Financial Modelling",
+    ]
+    education = ResumeEvidence(
+        handle="education_fact",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Bachelor of Science in Finance at Harbor University, completed 2023",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "Bachelor of Science in Finance",
+            "institution": "Harbor University",
+            "date_range": "2023",
+            "coursework": coursework,
+        },
+        source_excerpt=f"Relevant Courses: {', '.join(coursework)}",
+    )
+    blockers = _coursework_review_blockers(
+        section_key="education",
+        evidence=(education,),
+        bullet=f"Relevant Coursework: {', '.join([*coursework, 'Quantum Finance'])}",
+        item_id="finance_degree",
+        title="Bachelor of Science in Finance",
+        organization="Harbor University",
+        date_range="2023",
+    )
+
+    assert "unsupported_claim:bullet:finance_degree:0" in blockers
+
+
+@pytest.mark.parametrize("non_coursework_value", ["Harbor University", "Bachelor of Finance"])
+def test_review_rejects_education_metadata_presented_as_coursework(
+    non_coursework_value: str,
+) -> None:
+    coursework = [
+        "Auditing",
+        "Financial Accounting",
+        "Risk Management",
+        "Cost Control",
+        "Internal Control Systems",
+        "Financial Modelling",
+    ]
+    education = ResumeEvidence(
+        handle="education_fact",
+        category="education",
+        label="Bachelor of Finance",
+        detail="Bachelor of Finance at Harbor University, completed 2023",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "Bachelor of Finance",
+            "institution": "Harbor University",
+            "date_range": "2023",
+            "coursework": coursework,
+        },
+        source_excerpt=f"Relevant Courses: {', '.join(coursework)}",
+    )
+    blockers = _coursework_review_blockers(
+        section_key="education",
+        evidence=(education,),
+        bullet=f"Relevant Coursework: {non_coursework_value}",
+        item_id="finance_degree",
+        title="Bachelor of Finance",
+        organization="Harbor University",
+        date_range="2023",
+    )
+
+    assert "unsupported_claim:bullet:finance_degree:0" in blockers
+
+
+def test_review_does_not_exempt_coursework_prefix_in_experience_section() -> None:
+    coursework = ["Auditing", "Financial Accounting", "Risk Management"]
+    experience = ResumeEvidence(
+        handle="experience_fact",
+        category="experience",
+        label="Cost Analyst",
+        detail="Cost Analyst at Harbor Company in 2024",
+        verification_status="confirmed",
+        structured_value={
+            "title": "Cost Analyst",
+            "organization": "Harbor Company",
+            "date_range": "2024",
+            "coursework": coursework,
+        },
+        source_excerpt=", ".join(coursework),
+    )
+    blockers = _coursework_review_blockers(
+        section_key="experience",
+        evidence=(experience,),
+        bullet=f"Relevant Coursework: {', '.join(coursework)}",
+        item_id="cost_analyst",
+        title="Cost Analyst",
+        organization="Harbor Company",
+        date_range="2024",
+    )
+
+    assert "unsupported_claim:bullet:cost_analyst:0" in blockers
+
+
+def test_review_accepts_arabic_coursework_prefix_for_arabic_structured_courses() -> None:
+    coursework = [
+        "المراجعة",
+        "المحاسبة المالية",
+        "إدارة المخاطر",
+        "مراقبة التكاليف",
+        "أنظمة الرقابة الداخلية",
+        "النمذجة المالية",
+    ]
+    education = ResumeEvidence(
+        handle="arabic_education_fact",
+        category="education",
+        label="بكالوريوس العلوم في المالية",
+        detail="بكالوريوس العلوم في المالية من جامعة الميناء عام 2023",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "بكالوريوس العلوم في المالية",
+            "institution": "جامعة الميناء",
+            "date_range": "2023",
+            "coursework": coursework,
+        },
+        source_excerpt=f"المقررات: {', '.join(coursework)}",
+    )
+    blockers = _coursework_review_blockers(
+        section_key="education",
+        evidence=(education,),
+        bullet=f"المقررات ذات الصلة: {', '.join(coursework)}",
+        item_id="arabic_finance_degree",
+        title="بكالوريوس العلوم في المالية",
+        organization="جامعة الميناء",
+        date_range="2023",
+    )
+
+    assert not [blocker for blocker in blockers if blocker.startswith("unsupported_claim:")]
+
+
+def test_review_rejects_coursework_list_composed_from_two_education_facts() -> None:
+    first_courses = ["Auditing", "Risk Management", "Cost Control"]
+    second_courses = [
+        "Financial Accounting",
+        "Internal Control Systems",
+        "Financial Modelling",
+    ]
+    first_education = ResumeEvidence(
+        handle="first_education_fact",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Bachelor of Science in Finance at Harbor University, completed 2023",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "Bachelor of Science in Finance",
+            "institution": "Harbor University",
+            "date_range": "2023",
+            "coursework": first_courses,
+        },
+        source_excerpt=f"Relevant Courses: {', '.join(first_courses)}",
+    )
+    second_education = ResumeEvidence(
+        handle="second_education_fact",
+        category="education",
+        label="Diploma in Accounting",
+        detail="Diploma in Accounting at Coast College, completed 2021",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "Diploma in Accounting",
+            "institution": "Coast College",
+            "date_range": "2021",
+            "coursework": second_courses,
+        },
+        source_excerpt=f"Relevant Courses: {', '.join(second_courses)}",
+    )
+    combined_courses = [*first_courses, *second_courses]
+    blockers = _coursework_review_blockers(
+        section_key="education",
+        evidence=(first_education, second_education),
+        bullet=f"Relevant Coursework: {', '.join(combined_courses)}",
+        item_id="combined_education",
+        title="Bachelor of Science in Finance",
+        organization="Harbor University",
+        date_range="2023",
+    )
+
+    assert "unsupported_claim:bullet:combined_education:0" in blockers
 
 
 async def test_review_rejects_unknown_evidence_handles(

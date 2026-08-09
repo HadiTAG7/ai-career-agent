@@ -2276,13 +2276,56 @@ def _review_blockers(
 
     evidence_by_handle = {item.handle: item for item in evidence}
 
-    def validate_claim(label: str, text: str, handles: list[str]) -> None:
+    def validate_claim(
+        label: str,
+        text: str,
+        handles: list[str],
+        *,
+        education_coursework: bool = False,
+    ) -> None:
         unknown = [handle for handle in handles if handle not in evidence_by_handle]
         if unknown:
             blockers.append(f"unknown_evidence:{label}")
             return
+        claim_text = text
+        if education_coursework and handles:
+            supports = [evidence_by_handle[handle] for handle in handles]
+            all_supports_are_education = all(
+                support.category == "education" for support in supports
+            )
+            if all_supports_are_education:
+                stripped = text.strip()
+                for prefix in ("Relevant Coursework:", "المقررات ذات الصلة:"):
+                    if stripped.startswith(prefix):
+                        coursework = stripped.removeprefix(prefix).strip()
+                        normalized_coursework = " ".join(coursework.split())
+                        supported_coursework_lists = {
+                            " ".join(", ".join(values).split())
+                            for support in supports
+                            if isinstance(
+                                raw_coursework := support.structured_value.get(
+                                    "coursework"
+                                ),
+                                list,
+                            )
+                            and (
+                                values := [
+                                    value.strip()
+                                    for value in raw_coursework
+                                    if isinstance(value, str) and value.strip()
+                                ]
+                            )
+                        }
+                        if (
+                            not normalized_coursework
+                            or normalized_coursework not in supported_coursework_lists
+                        ):
+                            blockers.append(f"unsupported_claim:{label}")
+                            return
+                        claim_text = coursework
+                        break
         try:
-            validate_claim_grounding(text, handles, evidence)
+            validate_claim_grounding(claim_text, handles, evidence)
         except ResumeWriterError:
             blockers.append(f"unsupported_claim:{label}")
 
@@ -2332,6 +2375,7 @@ def _review_blockers(
                     f"bullet:{item.id}:{bullet_index}",
                     bullet,
                     item.evidence_handles,
+                    education_coursework=section.key == "education",
                 )
             if section.key in {"experience", "trading_experience", "project"} and not item.bullets:
                 blockers.append(f"item_without_bullets:{item.id}")
