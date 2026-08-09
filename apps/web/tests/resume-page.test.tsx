@@ -230,6 +230,7 @@ describe("resume workspace v2", () => {
       evidence_revision: 1,
       export_allowed: true,
     });
+    apiMocks.previewResumeWorkspacePdf.mockResolvedValue(new Blob(["%PDF"], { type: "application/pdf" }));
     apiMocks.exportResumeWorkspacePdf.mockResolvedValue(new Blob(["%PDF"], { type: "application/pdf" }));
   });
 
@@ -1171,11 +1172,32 @@ describe("resume workspace v2", () => {
     });
     apiMocks.getResumeWorkspace.mockResolvedValue(reviewWorkspace);
     apiMocks.getCareerFacts.mockResolvedValue([fact]);
-    apiMocks.decideResumeRewriteSuggestion.mockResolvedValue({ ...reviewWorkspace, pending_suggestion: null, draft_revision: 2 });
+    const acceptedDraft: ApiResumeDraftContent = {
+      ...draft,
+      sections: draft.sections.map((section) => ({
+        ...section,
+        items: section.items.map((item) => ({
+          ...item,
+          bullets: item.bullets.map((bullet, index) => (
+            item.id === suggestion.item_id && index === suggestion.bullet_index
+              ? suggestion.after_text
+              : bullet
+          )),
+        })),
+      })),
+    };
+    apiMocks.decideResumeRewriteSuggestion.mockResolvedValue({
+      ...reviewWorkspace,
+      current_draft: acceptedDraft,
+      pending_suggestion: null,
+      draft_revision: 2,
+    });
     await renderResumePage();
 
     expect(await screen.findByText("بنيت لوحات Power BI.")).toBeVisible();
     expect(screen.getByText("بنيت لوحات Power BI تفاعلية سهّلت متابعة مؤشرات الأداء.")).toBeVisible();
+    expect(screen.getByDisplayValue(draft.sections[0].items[0].bullets[0])).toBeVisible();
+    expect(screen.queryAllByText(/قابل للقياس|نتيجة قابلة للتحقق/)).toHaveLength(0);
     await user.click(screen.getByRole("button", { name: "اعتمد التحسين" }));
     await waitFor(() => expect(apiMocks.decideResumeRewriteSuggestion).toHaveBeenCalledWith(
       profile.id,
@@ -1183,6 +1205,8 @@ describe("resume workspace v2", () => {
       "accept",
       1,
     ));
+    expect(await screen.findByDisplayValue(suggestion.after_text)).toBeVisible();
+    expect(screen.queryByDisplayValue(draft.sections[0].items[0].bullets[0])).not.toBeInTheDocument();
   });
 
   it("does not start a generate quick action while a draft autosave is pending", async () => {
@@ -1406,6 +1430,8 @@ describe("resume workspace v2", () => {
     const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     await renderResumePage();
 
+    expect(screen.getByRole("textbox", { name: "العنوان المهني" }).tagName).toBe("TEXTAREA");
+
     const download = await screen.findByRole("button", { name: "تنزيل PDF" });
     expect(download).toBeDisabled();
     await user.click(screen.getByRole("checkbox", { name: "راجعت المعلومات" }));
@@ -1416,7 +1442,30 @@ describe("resume workspace v2", () => {
     await waitFor(() => expect(apiMocks.exportResumeWorkspacePdf).toHaveBeenCalledWith(profile.id, 1));
     expect(anchorClick).toHaveBeenCalledOnce();
     expect(createObjectURL).toHaveBeenCalledOnce();
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:resume-v2");
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    expect(screen.getByText(/بدأ تنزيل ملف PDF/)).toBeVisible();
+  });
+
+  it("shows the PDF preview inside the workspace instead of relying on a popup", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "review",
+      current_draft: draft,
+      draft_revision: 1,
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:preview") });
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "معاينة PDF" }));
+
+    expect(await screen.findByRole("dialog", { name: "معاينة السيرة بصيغة PDF" })).toBeVisible();
+    expect(screen.getByTitle("ملف السيرة بصيغة PDF")).toHaveAttribute("src", "blob:preview");
+    await user.click(screen.getByRole("button", { name: "إغلاق معاينة PDF" }));
+    expect(screen.queryByRole("dialog", { name: "معاينة السيرة بصيغة PDF" })).not.toBeInTheDocument();
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview"));
   });
 
   it("creates the basic profile before showing the language step", async () => {

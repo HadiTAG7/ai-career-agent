@@ -170,7 +170,8 @@ class StubWorkspaceProvider(ResumeWriterProvider):
         )
 
     async def rewrite_section(self, **kwargs: object):
-        assert kwargs["instruction"] == "stronger"
+        assert "Strengthen this resume bullet" in str(kwargs["instruction"])
+        assert "invent no outcome or metric" in str(kwargs["instruction"])
         return SimpleNamespace(
             text="حللت المبيعات باستخدام Power BI.",
             evidence_handles=kwargs["evidence_handles"],
@@ -366,6 +367,7 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
     assert workspace["messages"][-1]["kind"] == "question"
     assert workspace["messages"][-1]["structured_payload"]["question"]["category"] == "education"
 
+    original_bullet = workspace["current_draft"]["sections"][0]["items"][0]["bullets"][0]
     rewrite = await client.post(
         f"{base}/draft/rewrite",
         headers=headers,
@@ -380,11 +382,16 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
     )
     assert rewrite.status_code == 200, rewrite.text
     suggestion = rewrite.json()
+    assert suggestion["before_text"] == original_bullet
     assert suggestion["before_text"] != suggestion["after_text"]
 
     rewrite_reloaded = await client.get(base, headers=headers)
     assert rewrite_reloaded.status_code == 200
     assert rewrite_reloaded.json()["stage"] == "review"
+    assert (
+        rewrite_reloaded.json()["current_draft"]["sections"][0]["items"][0]["bullets"][0]
+        == original_bullet
+    )
     assert rewrite_reloaded.json()["pending_suggestion"]["suggestion_id"] == suggestion[
         "suggestion_id"
     ]

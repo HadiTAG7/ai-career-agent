@@ -176,12 +176,13 @@ export function ResumeProofingPaper({
           <header className="text-center">
             <h2 className="text-[24px] font-bold leading-tight tracking-[-0.02em] text-[#101828]">{profile.full_name}</h2>
             {canEdit ? (
-              <input
+              <textarea
                 aria-label={locale === "ar" ? "العنوان المهني" : "Professional headline"}
                 className={cn(
-                  "mx-auto mt-2 block w-full max-w-md border-0 bg-transparent text-center text-[14px] font-medium text-[#344054] outline-none",
+                  "mx-auto mt-2 block min-h-10 w-full max-w-xl resize-none overflow-hidden border-0 bg-transparent text-center text-[14px] font-medium leading-5 text-[#344054] outline-none",
                   selectionMatches(selection, { targetKind: "headline" }) && "border-b border-[#f6bd2a] bg-[#fff8e6]",
                 )}
+                rows={2}
                 disabled={editingLocked}
                 value={displayedDraft.headline}
                 onFocus={() => onSelect({ targetKind: "headline", text: displayedDraft.headline })}

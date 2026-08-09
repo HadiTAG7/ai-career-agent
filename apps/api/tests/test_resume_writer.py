@@ -2776,6 +2776,7 @@ async def test_section_rewrite_is_a_grounded_candidate_and_uses_writer_model() -
     assert result.evidence_handles == ["fact_1"]
     assert len(provider.calls) == 1
     assert provider.calls[0]["model_name"] == "writer-model"
+    assert provider.calls[0]["max_tokens"] == 400
 
 
 @pytest.mark.asyncio
@@ -2813,6 +2814,269 @@ async def test_section_rewrite_retries_an_unsupported_candidate() -> None:
     assert result.proposed_text == "Produced weekly inventory reports using Python."
     assert len(provider.calls) == 2
     assert "prior candidate was rejected" in provider.calls[1]["system_instructions"].lower()
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_retries_a_repetitive_multi_sentence_bullet() -> None:
+    rewrite_evidence = (
+        ResumeEvidence(
+            handle="fact_1",
+            category="experience",
+            label="Monthly variance analysis, cost control, and internal financial reviews",
+            detail=(
+                "Performed monthly variance analysis, cost control, and internal financial reviews."
+            ),
+            verification_status="confirmed",
+        ),
+    )
+    provider = CapturingResumeWriter(
+        [
+            {
+                "section_key": "experience",
+                "item_id": "cost_analyst",
+                "original_text": (
+                    "Performed monthly variance analysis, cost control, and internal financial "
+                    "reviews."
+                ),
+                "proposed_text": (
+                    "Performed monthly variance analysis. "
+                    "Performed cost control. "
+                    "Performed internal financial reviews."
+                ),
+                "evidence_handles": ["fact_1"],
+            },
+            {
+                "section_key": "experience",
+                "item_id": "cost_analyst",
+                "original_text": (
+                    "Performed monthly variance analysis, cost control, and internal financial "
+                    "reviews."
+                ),
+                "proposed_text": (
+                    "Conducted monthly variance analysis, cost control, and internal financial "
+                    "reviews."
+                ),
+                "evidence_handles": ["fact_1"],
+            },
+        ]
+    )
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=rewrite_evidence,
+        section_key="experience",
+        item_id="cost_analyst",
+        original_text=(
+            "Performed monthly variance analysis, cost control, and internal financial reviews."
+        ),
+        instruction="Make this bullet stronger",
+        evidence_handles=["fact_1"],
+    )
+
+    assert result.proposed_text == (
+        "Conducted monthly variance analysis, cost control, and internal financial reviews."
+    )
+    assert len(provider.calls) == 2
+    assert "prior candidate was rejected" in provider.calls[1]["system_instructions"].lower()
+
+
+@pytest.mark.parametrize(
+    ("original_text", "proposed_text"),
+    [
+        ("Supported monthly financial reviews.", "Conducted monthly financial reviews."),
+        ("Supported cost control measures.", "Implemented cost control measures."),
+        (
+            "Supported cost control measures.",
+            "Supported and implemented cost control measures.",
+        ),
+        (
+            "Supported cost control measures.",
+            "Supported and responsible for cost control measures.",
+        ),
+        (
+            "Supported cost control measures.",
+            "Supported and leverage cost control measures.",
+        ),
+        (
+            "\u062f\u0639\u0645\u062a \u0645\u0631\u0627\u062c\u0639\u0627\u062a "
+            "\u0645\u0627\u0644\u064a\u0629 "
+            "\u0634\u0647\u0631\u064a\u0629.",
+            "\u062f\u0639\u0645\u062a\u060c \u0646\u0641\u0630\u062a "
+            "\u0645\u0631\u0627\u062c\u0639\u0627\u062a "
+            "\u0645\u0627\u0644\u064a\u0629 \u0634\u0647\u0631\u064a\u0629.",
+        ),
+        ("Implemented cost control measures.", "Cost control measures."),
+    ],
+)
+def test_section_rewrite_rejects_unsupported_ownership_upgrade(
+    original_text: str,
+    proposed_text: str,
+) -> None:
+    rewrite_evidence = (
+        ResumeEvidence(
+            handle="fact_1",
+            category="experience",
+            label="Monthly financial reviews",
+            detail=(
+                "Performed variance analysis and supported monthly financial reviews and cost "
+                "control measures. Implemented cost control measures."
+            ),
+            verification_status="confirmed",
+        ),
+    )
+
+    with pytest.raises(ResumeWriterError):
+        resume_writer_module._validated_rewrite_candidate(
+            resume_writer_module.ResumeRewriteCandidate(
+                section_key="experience",
+                item_id="finance_role",
+                original_text=original_text,
+                proposed_text=proposed_text,
+                evidence_handles=["fact_1"],
+            ),
+            section_key="experience",
+            item_id="finance_role",
+            original_text=original_text,
+            evidence=rewrite_evidence,
+            allowed_handles=["fact_1"],
+        )
+
+
+@pytest.mark.parametrize(
+    "proposed_text",
+    [
+        "Performed monthly variance analysis.",
+        (
+            "Performed monthly variance analysis and performed cost control and performed "
+            "internal financial reviews."
+        ),
+    ],
+)
+def test_section_rewrite_rejects_dropped_material_or_repeated_inline_action(
+    proposed_text: str,
+) -> None:
+    original_text = (
+        "Performed monthly variance analysis, cost control, and internal financial reviews."
+    )
+    rewrite_evidence = (
+        ResumeEvidence(
+            handle="fact_1",
+            category="experience",
+            label="Monthly finance responsibilities",
+            detail=original_text,
+            verification_status="confirmed",
+        ),
+    )
+
+    with pytest.raises(ResumeWriterError):
+        resume_writer_module._validated_rewrite_candidate(
+            resume_writer_module.ResumeRewriteCandidate(
+                section_key="experience",
+                item_id="cost_analyst",
+                original_text=original_text,
+                proposed_text=proposed_text,
+                evidence_handles=["fact_1"],
+            ),
+            section_key="experience",
+            item_id="cost_analyst",
+            original_text=original_text,
+            evidence=rewrite_evidence,
+            allowed_handles=["fact_1"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_summary_rewrite_keeps_a_larger_output_budget() -> None:
+    provider = CapturingResumeWriter(
+        {
+            "section_key": "professional_summary",
+            "item_id": None,
+            "original_text": "provider must not replace this value",
+            "proposed_text": "Produced weekly inventory reports using Python.",
+            "evidence_handles": ["fact_1"],
+        }
+    )
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=evidence(),
+        section_key="professional_summary",
+        item_id=None,
+        original_text="Built weekly inventory reports using Python.",
+        instruction="Make the summary more professional",
+        evidence_handles=["fact_1"],
+    )
+
+    assert result.proposed_text == "Produced weekly inventory reports using Python."
+    assert provider.calls[0]["max_tokens"] == 2_000
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_does_not_retry_a_transport_failure() -> None:
+    provider = CapturingResumeWriter(
+        [
+            ResumeWriterTransportError("provider request timed out", transient=True),
+            {
+                "section_key": "project",
+                "item_id": "inventory_project",
+                "original_text": "Built inventory reports using Python.",
+                "proposed_text": "Produced weekly inventory reports using Python.",
+                "evidence_handles": ["fact_1"],
+            },
+        ]
+    )
+
+    with pytest.raises(ResumeWriterTransportError) as captured:
+        await provider.rewrite_section(
+            language=PreferredLanguage.EN,
+            target_role="Data Analyst",
+            evidence=evidence(),
+            section_key="project",
+            item_id="inventory_project",
+            original_text="Built inventory reports using Python.",
+            instruction="Make this bullet stronger",
+            evidence_handles=["fact_1"],
+        )
+
+    assert captured.value.transient is True
+    assert len(provider.calls) == 1
+    assert len(provider.responses) == 1
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_has_one_total_wall_clock_budget() -> None:
+    class SlowRewriteWriter(CapturingResumeWriter):
+        async def _structured_response(self, **kwargs: Any) -> BaseModel:
+            await asyncio.sleep(0.05)
+            return await super()._structured_response(**kwargs)
+
+    provider = SlowRewriteWriter(
+        {
+            "section_key": "project",
+            "item_id": "inventory_project",
+            "original_text": "Built inventory reports using Python.",
+            "proposed_text": "Produced weekly inventory reports using Python.",
+            "evidence_handles": ["fact_1"],
+        }
+    )
+    provider._timeout_seconds = 0.01
+
+    with pytest.raises(ResumeWriterTransportError) as captured:
+        await provider.rewrite_section(
+            language=PreferredLanguage.EN,
+            target_role="Data Analyst",
+            evidence=evidence(),
+            section_key="project",
+            item_id="inventory_project",
+            original_text="Built inventory reports using Python.",
+            instruction="Make this bullet stronger",
+            evidence_handles=["fact_1"],
+        )
+
+    assert captured.value.transient is True
+    assert len(provider.calls) == 0
 
 
 def test_provider_uses_dedicated_interview_and_writer_models_with_one_key() -> None:
@@ -3014,16 +3278,26 @@ async def test_mistral_provider_reuses_client_and_bounds_interactive_failures(
         max_tokens=4_000,
         model_name="writer-model",
     )
+    rewrite = await provider._structured_response(
+        schema=TinyResponse,
+        schema_name="resume_section_rewrite_candidate",
+        system_instructions="Return JSON",
+        payload={"rewrite": 1},
+        max_tokens=1_500,
+        model_name="writer-model",
+    )
 
     assert adaptive.value == "ok"
     assert draft.value == "ok"
+    assert rewrite.value == "ok"
     assert len(FakeAsyncOpenAI.instances) == 1
     client = FakeAsyncOpenAI.instances[0]
     assert client.options == [
         {"timeout": 15.0, "max_retries": 0},
         {"timeout": 45.0, "max_retries": 0},
+        {"timeout": 30.0, "max_retries": 0},
     ]
-    assert len(client.completions.calls) == 2
+    assert len(client.completions.calls) == 3
 
     client.completions.delay = 0.05
     provider._timeout_seconds = 0.01

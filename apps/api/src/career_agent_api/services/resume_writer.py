@@ -441,6 +441,12 @@ Rules:
 5. Return a candidate for review. Do not silently apply it.
 6. The complete candidate must be supported by one allowed evidence handle. Separate sentences
    must each be supported by one handle. Never merge facts into a relationship or drop negation.
+7. When `item_id` is present, the input is one resume bullet. Keep it as one concise sentence;
+   do not split a list of responsibilities into several short sentences.
+8. Avoid repeating the same opening verb or merely changing punctuation. The rewrite must be a
+   meaningful wording improvement while preserving every supported fact.
+9. Never describe a rewrite as measurable or impact-focused unless the cited evidence already
+   contains the supporting number or result.
 """.strip()
 
 
@@ -959,6 +965,37 @@ _SEMANTIC_PARAPHRASE_WORDS = frozenset(
         "وظفت",
     }
 )
+
+_SCOPED_SEMANTIC_EQUIVALENTS: dict[str, frozenset[str]] = {
+    "built": frozenset({"produced"}),
+    "conducted": frozenset({"performed"}),
+    "produced": frozenset({"built"}),
+    "performed": frozenset({"conducted"}),
+}
+_REWRITE_NONFACTUAL_PARAPHRASE_WORDS = frozenset(
+    _normalized_word(word)
+    for word in {
+        "clear",
+        "has",
+        "having",
+        "includes",
+        "including",
+        "professional",
+        "professionally",
+        "using",
+        "you",
+        "your",
+        "\u0628\u0627\u0633\u062a\u062e\u062f\u0627\u0645",
+        "\u0628\u0627\u0644\u0627\u0636\u0627\u0641\u0629",
+        "\u0628\u0634\u0643\u0644",
+        "\u0628\u0635\u0648\u0631\u0629",
+        "\u062a\u0634\u0645\u0644",
+        "\u0645\u0647\u0646\u064a",
+        "\u0645\u0647\u0646\u064a\u0629",
+        "\u0645\u0647\u0646\u064a\u0627",
+        "\u0648\u0627\u0636\u062d",
+    }
+)
 _COMPARATIVE_NUMBER_WORDS = frozenset(
     _normalized_word(word)
     for word in {
@@ -1140,6 +1177,11 @@ def _word_supported(word: str, supporting_words: set[str]) -> bool:
         for variant in _word_variants(supporting_word)
     }
     if word_variants & supporting_variants:
+        return True
+    if any(
+        _SCOPED_SEMANTIC_EQUIVALENTS.get(variant, frozenset()) & supporting_variants
+        for variant in word_variants
+    ):
         return True
     if any(
         _identifier_base(variant)
@@ -3472,6 +3514,70 @@ def _validated_rewrite_candidate(
         raise ResumeWriterError("Resume writer returned a rewrite for the wrong section")
     if not set(generated.evidence_handles) <= set(allowed_handles):
         raise ResumeWriterError("Resume writer returned unknown evidence references")
+    original_units = _claim_units(original_text)
+    proposed_units = _claim_units(generated.proposed_text)
+    original_words = _meaningful_words(original_text)
+    proposed_words = _meaningful_words(generated.proposed_text)
+    if original_words == proposed_words:
+        raise ResumeWriterError("Resume writer returned no meaningful wording improvement")
+    proposed_word_set = set(proposed_words)
+    mutable_action_words = _SEMANTIC_PARAPHRASE_WORDS | frozenset(
+        _SCOPED_SEMANTIC_EQUIVALENTS
+    )
+    dropped_material = {
+        word
+        for word in original_words
+        if word not in mutable_action_words
+        and not any(character.isdigit() for character in word)
+        and not _word_supported(word, proposed_word_set)
+    }
+    if dropped_material or _numbers(original_text) - _numbers(generated.proposed_text):
+        rejected_terms = ", ".join(sorted(dropped_material)) or "supported numbers"
+        raise ResumeWriterError(
+            f"Resume writer dropped supported material from the original: {rejected_terms}"
+        )
+    if _contains_negation(original_text) != _contains_negation(generated.proposed_text):
+        raise ResumeWriterError("Resume writer changed the original negation")
+    if item_id is not None and len(proposed_units) > max(1, len(original_units)):
+        raise ResumeWriterError("Resume writer split one bullet into multiple sentences")
+    if item_id is not None and (
+        not original_words
+        or not proposed_words
+        or not _word_supported(proposed_words[0], {original_words[0]})
+    ):
+        raise ResumeWriterError(
+            "Resume writer changed or removed the supported opening action"
+        )
+    original_word_set = set(original_words)
+    unsupported_new_paraphrases = {
+        word
+        for word in proposed_words
+        if any(
+            variant in _SEMANTIC_PARAPHRASE_WORDS
+            and variant not in _REWRITE_NONFACTUAL_PARAPHRASE_WORDS
+            for variant in _word_variants(word)
+        )
+        and not _word_supported(word, original_word_set)
+    }
+    if item_id is not None and unsupported_new_paraphrases:
+        rejected_actions = ", ".join(sorted(unsupported_new_paraphrases))
+        raise ResumeWriterError(
+            f"Resume writer added unsupported actions: {rejected_actions}"
+        )
+    proposed_openings = [
+        words[0]
+        for unit in proposed_units
+        if (words := _meaningful_words(unit))
+    ]
+    if len(proposed_openings) > 1 and len(set(proposed_openings)) < len(proposed_openings):
+        raise ResumeWriterError("Resume writer repeated the same sentence opening")
+    if (
+        item_id is not None
+        and proposed_words
+        and proposed_words.count(proposed_words[0])
+        > max(1, original_words.count(proposed_words[0]))
+    ):
+        raise ResumeWriterError("Resume writer repeated the opening action inside one bullet")
     validate_claim_grounding(
         generated.proposed_text,
         generated.evidence_handles,
@@ -3862,61 +3968,79 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
             "allowed_evidence_handles": unique_handles,
             "evidence": _serialized_evidence(selected_evidence),
         }
-        validation_error: ResumeWriterError | None = None
-        for attempt in range(2):
-            instructions = SECTION_REWRITE_SYSTEM_INSTRUCTIONS
-            if validation_error is not None:
-                instructions += (
-                    "\n\nThe prior candidate was rejected: "
-                    f"{validation_error}. Rewrite more literally in the requested language, "
-                    "using one cited evidence handle per sentence and no new claim."
-                )
-            try:
-                parsed = await self._structured_response(
-                    schema=ResumeRewriteCandidate,
-                    schema_name="resume_section_rewrite_candidate",
-                    system_instructions=instructions,
-                    payload=payload,
-                    max_tokens=min(self._max_tokens, 1_500),
-                    model_name=self.model,
-                )
-                if not isinstance(parsed, ResumeRewriteCandidate):
-                    raise ResumeWriterError("Resume writer returned no usable rewrite")
-                parsed_support = " ".join(
-                    evidence_by_handle[handle].text
-                    for handle in parsed.evidence_handles
-                    if handle in evidence_by_handle
-                )
-                proposed_text = _replace_supported_resume_terms(
-                    parsed.proposed_text,
-                    parsed_support,
-                )
-                proposed_text = _remove_unsupported_inflated_terms(
-                    proposed_text,
-                    parsed_support,
-                )
-                proposed_text = _restore_open_ended_number_qualifiers(
-                    proposed_text,
-                    parsed_support,
-                )
-                if not proposed_text:
-                    raise ResumeWriterError("Resume writer returned no usable rewrite")
-                parsed = parsed.model_copy(update={"proposed_text": proposed_text})
-                return _validated_rewrite_candidate(
-                    parsed,
-                    section_key=section_key,
-                    item_id=item_id,
-                    original_text=safe_original,
-                    evidence=selected_evidence,
-                    allowed_handles=unique_handles,
-                )
-            except ResumeWriterTransportError:
-                raise
-            except ResumeWriterError as exc:
-                validation_error = exc
-                if attempt == 1:
+        async def run_attempts() -> ResumeRewriteCandidate:
+            validation_error: ResumeWriterError | None = None
+            for attempt in range(2):
+                instructions = SECTION_REWRITE_SYSTEM_INSTRUCTIONS
+                if validation_error is not None:
+                    instructions += (
+                        "\n\nThe prior candidate was rejected: "
+                        f"{validation_error}. Return one concise sentence for a bullet, make a "
+                        "meaningful wording improvement, cite one supporting handle, and add no "
+                        "new claim."
+                    )
+                try:
+                    rewrite_token_budget = (
+                        400
+                        if item_id is not None
+                        else 500
+                        if section_key == "headline"
+                        else 2_000
+                    )
+                    parsed = await self._structured_response(
+                        schema=ResumeRewriteCandidate,
+                        schema_name="resume_section_rewrite_candidate",
+                        system_instructions=instructions,
+                        payload=payload,
+                        max_tokens=min(self._max_tokens, rewrite_token_budget),
+                        model_name=self.model,
+                    )
+                    if not isinstance(parsed, ResumeRewriteCandidate):
+                        raise ResumeWriterError("Resume writer returned no usable rewrite")
+                    parsed_support = " ".join(
+                        evidence_by_handle[handle].text
+                        for handle in parsed.evidence_handles
+                        if handle in evidence_by_handle
+                    )
+                    proposed_text = _replace_supported_resume_terms(
+                        parsed.proposed_text,
+                        parsed_support,
+                    )
+                    proposed_text = _remove_unsupported_inflated_terms(
+                        proposed_text,
+                        parsed_support,
+                    )
+                    proposed_text = _restore_open_ended_number_qualifiers(
+                        proposed_text,
+                        parsed_support,
+                    )
+                    if not proposed_text:
+                        raise ResumeWriterError("Resume writer returned no usable rewrite")
+                    parsed = parsed.model_copy(update={"proposed_text": proposed_text})
+                    return _validated_rewrite_candidate(
+                        parsed,
+                        section_key=section_key,
+                        item_id=item_id,
+                        original_text=safe_original,
+                        evidence=selected_evidence,
+                        allowed_handles=unique_handles,
+                    )
+                except ResumeWriterTransportError:
                     raise
-        raise ResumeWriterError("Resume writer returned no usable rewrite")
+                except ResumeWriterError as exc:
+                    validation_error = exc
+                    if attempt == 1:
+                        raise
+            raise ResumeWriterError("Resume writer returned no usable rewrite")
+
+        try:
+            async with asyncio.timeout(min(self._timeout_seconds, 20.0)):
+                return await run_attempts()
+        except TimeoutError:
+            raise ResumeWriterTransportError(
+                "Resume writer rewrite deadline exceeded",
+                transient=True,
+            ) from None
 
 
 def _provider_wall_clock_timeout(schema_name: str, configured_timeout: float) -> float:

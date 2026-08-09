@@ -211,7 +211,7 @@ function saveBlob(blob: Blob, filename: string) {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
@@ -1112,7 +1112,7 @@ function ReviewPanel({
         {suggestion ? (
           <section className="relative border-s-2 border-primary ps-5" aria-labelledby="resume-suggestion-title">
             <span className="absolute -start-8 top-0 text-lg font-bold text-primary-text" aria-hidden="true">03</span>
-            <h3 id="resume-suggestion-title" className="text-sm font-bold leading-6 text-primary-text">{locale === "ar" ? "حوّلنا الوصف إلى إنجاز قابل للقياس" : "Turned the description into a measurable achievement"}</h3>
+            <h3 id="resume-suggestion-title" className="text-sm font-bold leading-6 text-primary-text">{locale === "ar" ? "اقتراح تحرير بالذكاء الاصطناعي" : "AI editing suggestion"}</h3>
             <p className="mt-1 inline-flex items-center gap-1.5 text-[11px] text-muted"><Bookmark className="h-3 w-3" aria-hidden="true" />{locale === "ar" ? "مرتبطة بفقرة النص" : "Linked to the selected passage"}</p>
 
             <div className="mt-5 grid grid-cols-2 divide-x divide-x-reverse divide-border text-xs leading-6">
@@ -1128,7 +1128,7 @@ function ReviewPanel({
 
             <div className="mt-5 border-t border-border pt-4">
               <p className="text-[11px] text-muted">{locale === "ar" ? "السبب" : "Reason"}</p>
-              <p className="mt-1 text-xs leading-6 text-foreground">{locale === "ar" ? "صياغة أوضح تربط العمل بنتيجة قابلة للتحقق." : "Clearer wording that connects the work to a verifiable result."}</p>
+              <p className="mt-1 text-xs leading-6 text-foreground">{locale === "ar" ? "صياغة بديلة مدعومة بنفس الأدلة. راجعها قبل الاعتماد." : "Alternative wording grounded in the same evidence. Review it before applying."}</p>
             </div>
 
             <div className="mt-5 grid grid-cols-2 divide-x divide-x-reverse divide-border border-t border-border">
@@ -1196,7 +1196,9 @@ export function ResumeWorkspaceV2({
   const [rewriting, setRewriting] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [downloadNotice, setDownloadNotice] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -1260,6 +1262,10 @@ export function ResumeWorkspaceV2({
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     if (contactTimerRef.current) window.clearTimeout(contactTimerRef.current);
   }, []);
+
+  useEffect(() => () => {
+    if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+  }, [pdfPreviewUrl]);
 
   const stageIndex = workspaceStageIndex(workspace);
   const generationWarningValue = workspace?.provider_metadata?.generation_warning;
@@ -1971,8 +1977,7 @@ export function ResumeWorkspaceV2({
       const blob = await previewResumeWorkspacePdf(profile.id);
       if (!operationIsCurrent(operationEpoch)) return;
       const url = URL.createObjectURL(blob);
-      window.open(url, "_blank", "noopener,noreferrer");
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      setPdfPreviewUrl(url);
     } catch (nextError) {
       if (operationIsCurrent(operationEpoch)) setError(nextError);
     } finally {
@@ -1985,12 +1990,14 @@ export function ResumeWorkspaceV2({
     if (!current?.current_draft || !reviewAcknowledged) return;
     const operationEpoch = operationEpochRef.current;
     setExporting(true);
+    setDownloadNotice(false);
     setError(null);
     try {
       const blob = await exportResumeWorkspacePdf(profile.id, current.draft_revision);
       if (!operationIsCurrent(operationEpoch)) return;
       saveBlob(blob, `${profile.full_name.trim() || "resume"}-resume.pdf`);
       commitWorkspace({ ...current, stage: "complete" });
+      setDownloadNotice(true);
     } catch (nextError) {
       if (operationIsCurrent(operationEpoch)) setError(nextError);
     } finally {
@@ -2343,7 +2350,19 @@ export function ResumeWorkspaceV2({
         ) : null}
 
         {error && isReview ? <p className="mt-2 text-xs text-danger" role="alert">{apiErrorMessage(error, locale)}</p> : null}
+        {downloadNotice ? <p className="mt-2 text-xs font-medium text-emerald" role="status">{locale === "ar" ? "بدأ تنزيل ملف PDF. إذا لم يظهر، اضغط اعتماد وتحميل مرة أخرى." : "The PDF download started. If it does not appear, choose Approve & download again."}</p> : null}
       </div>
+      {pdfPreviewUrl ? (
+        <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="resume-pdf-preview-title">
+          <section className="flex h-[92vh] w-full max-w-5xl flex-col border border-border bg-background shadow-2xl">
+            <header className="flex min-h-14 items-center justify-between gap-4 border-b border-border px-4">
+              <h2 id="resume-pdf-preview-title" className="font-bold text-foreground">{locale === "ar" ? "معاينة السيرة بصيغة PDF" : "Resume PDF preview"}</h2>
+              <button type="button" className="grid h-10 w-10 place-items-center border border-border text-foreground hover:border-primary hover:text-primary-text" aria-label={locale === "ar" ? "إغلاق معاينة PDF" : "Close PDF preview"} onClick={() => setPdfPreviewUrl(null)}><X className="h-5 w-5" /></button>
+            </header>
+            <iframe className="min-h-0 flex-1 bg-white" src={pdfPreviewUrl} title={locale === "ar" ? "ملف السيرة بصيغة PDF" : "Resume PDF document"} />
+          </section>
+        </div>
+      ) : null}
       {resetDialogOpen ? (
         <ResetWorkspaceDialog
           locale={locale}

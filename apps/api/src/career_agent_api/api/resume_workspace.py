@@ -2268,6 +2268,33 @@ def _target_text(draft: ResumeDraftContent, payload: ResumeRewriteCreate) -> tup
     return item.bullets[payload.bullet_index], list(item.evidence_handles)
 
 
+def _rewrite_instruction(payload: ResumeRewriteCreate) -> str:
+    if payload.mode == "custom":
+        assert payload.instruction
+        return payload.instruction
+    target = {
+        "headline": "professional headline",
+        "professional_summary": "professional summary",
+        "bullet": "resume bullet",
+    }[payload.target_kind]
+    if payload.mode == "shorter":
+        return (
+            f"Shorten this {target} without dropping any supported number, date, proper noun, "
+            "tool, responsibility, result, or negation."
+        )
+    if payload.mode == "professional":
+        return (
+            f"Rewrite this {target} with polished, natural professional wording. "
+            "For a resume bullet, keep one sentence and avoid repetitive sentence openings. "
+            "Preserve every fact and invent no outcome or metric."
+        )
+    return (
+        f"Strengthen this {target} with a concise evidence-grounded action verb. "
+        "For a resume bullet, keep one sentence. Preserve every fact and invent no "
+        "outcome or metric."
+    )
+
+
 @router.post("/draft/rewrite", response_model=ResumeRewriteSuggestionRead)
 async def rewrite_resume_draft(
     profile_id: UUID,
@@ -2310,7 +2337,7 @@ async def rewrite_resume_draft(
             "The configured resume writer does not support section rewrites",
         )
     evidence = build_resume_evidence(await _workspace_facts(session, workspace))
-    instruction = payload.instruction or payload.mode
+    instruction = _rewrite_instruction(payload)
     try:
         candidate = await rewrite(
             language=workspace.language,
