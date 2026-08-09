@@ -19,7 +19,7 @@ const apiMocks = vi.hoisted(() => ({
   importResumeWorkspaceFile: vi.fn(),
   confirmCareerFact: vi.fn(),
   confirmCareerFactsBatch: vi.fn(),
-  buildResumeDraftFromImport: vi.fn(),
+  prepareResumeImportFlow: vi.fn(),
   confirmResumeUnderstanding: vi.fn(),
   correctResumeUnderstanding: vi.fn(),
   patchResumeWorkspaceDraft: vi.fn(),
@@ -210,13 +210,32 @@ describe("resume workspace v2", () => {
       facts: [{ ...extractedFact, verification_status: "confirmed" }],
       evidence_revision: 2,
     });
-    apiMocks.buildResumeDraftFromImport.mockResolvedValue(makeWorkspace({
-      stage: "writing",
+    apiMocks.prepareResumeImportFlow.mockResolvedValue(makeWorkspace({
       revision: 1,
       evidence_revision: 2,
-      readiness_score: 100,
-      current_draft: draft,
-      draft_revision: 1,
+      provider_metadata: {
+        conversation_language: "ar",
+        import_flow: {
+          phase: "additions_choice",
+          can_generate: false,
+          source_id: extractedFact.source_id,
+          file_name: "resume.pdf",
+          assessment: {
+            verdict: "needs_information",
+            found_sections: ["experience"],
+            section_counts: { experience: 1 },
+            missing_sections: ["education", "skill", "language"],
+            gaps: [
+              { key: "education_details", category: "education", requested_fields: ["degree"], priority: "high", reason: "Education details are incomplete.", evidence_handles: [] },
+            ],
+            ats_checks: [],
+            page_target: 1,
+            disclaimer: "Structure only",
+          },
+          gap_queue: [],
+          page_target: 1,
+        },
+      },
     }));
     apiMocks.confirmResumeUnderstanding.mockResolvedValue(makeWorkspace({ revision: 2 }));
     apiMocks.getResumeDraftVersions.mockResolvedValue([]);
@@ -351,6 +370,17 @@ describe("resume workspace v2", () => {
     expect(preview.querySelector("article")).toHaveAttribute("lang", "en");
     expect(within(preview).getByRole("heading", { name: "Professional summary" })).toBeVisible();
     expect(within(preview).queryByRole("heading", { name: "نبذة مهنية" })).not.toBeInTheDocument();
+  });
+
+  it("never renders rejected import facts in the live resume or evidence rail", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({ language: "en" }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact, previouslyRejectedFact]);
+    await renderResumePage();
+
+    const preview = await screen.findByLabelText("معاينة السيرة الحية");
+    expect(within(preview).getAllByText(fact.label).length).toBeGreaterThan(0);
+    expect(within(preview).queryByText(previouslyRejectedFact.label)).not.toBeInTheDocument();
+    expect(screen.queryByText(previouslyRejectedFact.label)).not.toBeInTheDocument();
   });
 
   it.each([
@@ -647,6 +677,61 @@ describe("resume workspace v2", () => {
     await waitFor(() => expect(apiMocks.confirmResumeUnderstanding).toHaveBeenCalledWith(profile.id, "understanding-1", 1));
   });
 
+  it("locks helper actions, skip, and resume attachment while an understanding is pending", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      pending_understanding: {
+        id: "understanding-awaiting-review",
+        understanding: "استخدمت Power BI لبناء لوحة مبيعات.",
+        understanding_detail: { confidence: "high" },
+        proposed_records: [],
+        next_question: null,
+        draft_patch: null,
+      },
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByRole("button", { name: "أعطني مثالًا" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "ما عندي رقم دقيق" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "تخطَّ هذا السؤال" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "إرفاق سيرة موجودة" })).toBeDisabled();
+    expect(document.querySelector<HTMLInputElement>("#resume-workspace-file")).toBeDisabled();
+  });
+
+  it("reconciles a committed understanding after a lost response and refreshes the new evidence", async () => {
+    const user = userEvent.setup();
+    const pending = makeWorkspace({
+      revision: 1,
+      pending_understanding: {
+        id: "understanding-lost-1",
+        understanding: "استخدمت Power BI لإعداد تقرير شهري.",
+        understanding_detail: { confidence: "high" },
+        proposed_records: [],
+        next_question: null,
+        draft_patch: null,
+      },
+    });
+    const completed = makeWorkspace({ revision: 2, pending_understanding: null });
+    const addedFact: ApiCareerFact = {
+      ...fact,
+      id: "fact-from-confirmed-answer",
+      label: "Power BI reporting",
+    };
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValue(completed);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([addedFact]);
+    apiMocks.confirmResumeUnderstanding.mockRejectedValue(new TypeError("response lost"));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "صحيح" }));
+
+    await waitFor(() => expect(apiMocks.getCareerFacts).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("استخدمت Power BI لإعداد تقرير شهري.")).not.toBeInTheDocument();
+  });
+
   it("shows a sent answer immediately while the AI request is still running", async () => {
     const user = userEvent.setup();
     const answer = "حللت المبيعات الأسبوعية باستخدام Power BI.";
@@ -715,6 +800,139 @@ describe("resume workspace v2", () => {
     expect(await screen.findByRole("alert")).toBeVisible();
     expect(input).toHaveValue(answer);
     expect(screen.getAllByText(answer)).toHaveLength(1);
+  });
+
+  it("reconciles a sent message after the response is lost without restoring the input", async () => {
+    const user = userEvent.setup();
+    const answer = "حللت الانحرافات الشهرية باستخدام Excel.";
+    let committedWorkspace = makeWorkspace();
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(makeWorkspace())
+      .mockImplementation(() => Promise.resolve(committedWorkspace));
+    apiMocks.sendResumeWorkspaceMessage.mockImplementation((
+      _profileId: string,
+      input: { clientTurnId: string },
+    ) => {
+      committedWorkspace = makeWorkspace({
+        revision: 1,
+        messages: [
+          assistantQuestion,
+          {
+            id: "message-committed-after-timeout",
+            sequence: 2,
+            role: "user",
+            kind: "text",
+            content: answer,
+            structured_payload: {},
+            status: "sent",
+            client_turn_id: input.clientTurnId,
+            created_at: "2026-08-08T10:01:00Z",
+          },
+        ],
+      });
+      return Promise.reject(new TypeError("response lost"));
+    });
+    await renderResumePage();
+
+    const input = await screen.findByLabelText("اكتب رسالتك");
+    await user.type(input, answer);
+    await user.click(screen.getByRole("button", { name: "إرسال الرسالة" }));
+
+    await waitFor(() => expect(apiMocks.getResumeWorkspace).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText(answer)).toHaveLength(1));
+    expect(input).toHaveValue("");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not mistake a persisted failed turn for a committed message", async () => {
+    const user = userEvent.setup();
+    const answer = "أنشأت تقرير المصروفات الأسبوعي.";
+    let failedWorkspace = makeWorkspace();
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(makeWorkspace())
+      .mockImplementation(() => Promise.resolve(failedWorkspace));
+    apiMocks.sendResumeWorkspaceMessage.mockImplementation((
+      _profileId: string,
+      input: { clientTurnId: string },
+    ) => {
+      failedWorkspace = makeWorkspace({
+        messages: [
+          assistantQuestion,
+          {
+            id: "message-failed-after-provider-error",
+            sequence: 2,
+            role: "user",
+            kind: "text",
+            content: answer,
+            structured_payload: {},
+            status: "failed",
+            client_turn_id: input.clientTurnId,
+            created_at: "2026-08-08T10:01:00Z",
+          },
+        ],
+      });
+      return Promise.reject(new ApiHttpError(503, "provider unavailable", "resume_writer_unavailable"));
+    });
+    await renderResumePage();
+
+    const input = await screen.findByLabelText("اكتب رسالتك");
+    await user.type(input, answer);
+    await user.click(screen.getByRole("button", { name: "إرسال الرسالة" }));
+
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(input).toHaveValue(answer);
+    expect(screen.getAllByText(answer)).toHaveLength(1);
+  });
+
+  it("returns to a clean setup state when another tab permanently resets the workspace", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(makeWorkspace())
+      .mockResolvedValueOnce(null);
+    apiMocks.getCareerFacts.mockResolvedValue([]);
+    apiMocks.sendResumeWorkspaceMessage.mockRejectedValue(
+      new ApiHttpError(409, "Workspace was reset", "resume_workspace_revision_conflict"),
+    );
+    await renderResumePage();
+
+    const input = await screen.findByLabelText("اكتب رسالتك");
+    await user.type(input, "إجابة من تبويب قديم");
+    await user.click(screen.getByRole("button", { name: "إرسال الرسالة" }));
+
+    const start = await screen.findByRole("button", { name: "ابدأ المحادثة" });
+    expect(start).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /موافقة استخدام الذكاء الاصطناعي/ })).not.toBeChecked();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("hydrates a pending import discovered while reconciling another-tab changes", async () => {
+    const user = userEvent.setup();
+    const pendingWorkspace = makeWorkspace({
+      revision: 2,
+      evidence_revision: 3,
+      provider_metadata: {
+        pending_import_source_id: extractedFact.source_id,
+        pending_import_filename: "resume.pdf",
+        pending_import_analysis_status: "created",
+      },
+    });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(makeWorkspace())
+      .mockResolvedValueOnce(pendingWorkspace);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([extractedFact]);
+    apiMocks.sendResumeWorkspaceMessage.mockRejectedValue(
+      new ApiHttpError(409, "Workspace changed", "resume_workspace_revision_conflict"),
+    );
+    await renderResumePage();
+
+    const input = await screen.findByLabelText("اكتب رسالتك");
+    await user.type(input, "هذه الرسالة أصبحت قديمة");
+    await user.click(screen.getByRole("button", { name: "إرسال الرسالة" }));
+
+    expect(await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" })).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: new RegExp(extractedFact.label) })).toBeChecked();
   });
 
   it("offers full AI generation without exposing provider internals or failed turns", async () => {
@@ -813,18 +1031,507 @@ describe("resume workspace v2", () => {
     ));
   });
 
-  it("groups imported facts for checkbox review, then confirms the selection and builds the draft in one action", async () => {
+  it.each([
+    ["gap_interview", false],
+    ["ready_to_generate", true],
+  ])("keeps resume attachment disabled during the %s import phase", async (phase, canGenerate) => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      provider_metadata: {
+        import_flow: {
+          phase,
+          can_generate: canGenerate,
+          source_id: "source-imported-1",
+          file_name: "resume.pdf",
+          assessment: { gaps: [], page_target: 1 },
+          gap_queue: [],
+          page_target: 1,
+        },
+      },
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByRole("button", { name: "إرفاق سيرة موجودة" })).toBeDisabled();
+    expect(document.querySelector<HTMLInputElement>("#resume-workspace-file")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "التواصل" })).toBeDisabled();
+  });
+
+  it("shows only the ATS generation action after all import gaps are complete", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      provider_metadata: {
+        import_flow: {
+          phase: "ready_to_generate",
+          can_generate: true,
+          source_id: "source-imported-1",
+          file_name: "resume.pdf",
+          assessment: { gaps: [], page_target: 1 },
+          gap_queue: [],
+          completed_gap_keys: ["experience_context"],
+          skipped_gap_keys: ["certification_issuer"],
+          page_target: 1,
+        },
+      },
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByRole("button", { name: "أنشئ مسودة ATS" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "أعطني مثالًا" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "ما عندي رقم دقيق" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "تخطَّ هذا السؤال" })).not.toBeInTheDocument();
+  });
+
+  it("keeps resolved and skipped gaps in the interview progress total", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      provider_metadata: {
+        import_flow: {
+          phase: "gap_interview",
+          can_generate: false,
+          source_id: "source-imported-1",
+          file_name: "resume.pdf",
+          assessment: {
+            gaps: [
+              { key: "erp", category: "experience" },
+              { key: "cme1", category: "certification" },
+              { key: "excel", category: "certification" },
+              { key: "cme4", category: "certification" },
+              { key: "market", category: "skill" },
+            ],
+            page_target: 1,
+          },
+          active_gap_key: "erp",
+          completed_gap_keys: ["trading_context"],
+          skipped_gap_keys: [],
+          gap_queue: [
+            { key: "cme1", category: "certification" },
+            { key: "excel", category: "certification" },
+            { key: "cme4", category: "certification" },
+            { key: "market", category: "skill" },
+          ],
+          page_target: 1,
+        },
+      },
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByText("سؤال النقص 2 من 6")).toBeVisible();
+  });
+
+  it("hides messages before the import marker while keeping the current gap question", async () => {
+    const oldQuestion = {
+      ...assistantQuestion,
+      id: "message-before-import",
+      content: "هذه رسالة قديمة قبل رفع السيرة.",
+    };
+    const importMarker = {
+      ...assistantQuestion,
+      id: "message-import-marker",
+      sequence: 2,
+      content: "سنبدأ الآن مراجعة الملف المرفوع.",
+      structured_payload: { import_flow_phase: "additions_choice" },
+    };
+    const currentGap = {
+      ...assistantQuestion,
+      id: "message-current-gap",
+      sequence: 3,
+      content: "ما الأدوات التي استخدمتها في أحدث تجربة؟",
+      structured_payload: {
+        question: {
+          id: "gap-tools",
+          category: "skill",
+          question: "ما الأدوات التي استخدمتها في أحدث تجربة؟",
+        },
+      },
+    };
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      messages: [oldQuestion, importMarker, currentGap],
+      provider_metadata: {
+        import_flow: {
+          phase: "gap_interview",
+          can_generate: false,
+          source_id: "source-imported-1",
+          file_name: "resume.pdf",
+          assessment: {
+            gaps: [
+              { key: "skills", category: "skill", priority: "high" },
+            ],
+            page_target: 1,
+          },
+          gap_queue: [
+            { key: "skills", category: "skill", priority: "high" },
+          ],
+          page_target: 1,
+        },
+      },
+    }));
+    await renderResumePage();
+
+    expect(await screen.findByText("ما الأدوات التي استخدمتها في أحدث تجربة؟")).toBeVisible();
+    expect(screen.queryByText("هذه رسالة قديمة قبل رفع السيرة.")).not.toBeInTheDocument();
+  });
+
+  it("shows an ATS readiness assessment before asking about additions or building a draft", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace();
+    const refreshed = makeWorkspace({
+      evidence_revision: 2,
+      readiness_score: 55,
+      section_coverage: {
+        experience: true,
+        education: true,
+        project: false,
+        skill: false,
+        certification: false,
+        language: false,
+        achievement: false,
+      },
+    });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(refreshed);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([extractedFact, extractedEducationFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: extractedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [extractedFact, extractedEducationFact],
+      requires_user_review: true,
+      analysis_status: "created",
+    });
+    apiMocks.confirmCareerFactsBatch.mockResolvedValue({
+      facts: [
+        { ...extractedFact, verification_status: "confirmed" },
+        { ...extractedEducationFact, verification_status: "confirmed" },
+      ],
+      evidence_revision: 3,
+    });
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    const assessmentHeading = await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" });
+    const assessment = assessmentHeading.closest("section");
+    expect(assessment).not.toBeNull();
+    expect(within(assessment!).getByText(/هذا تقييم لاكتمال بنية السيرة، وليس احتمال قبول وظيفي/)).toBeVisible();
+    expect(within(assessment!).getByText(/التعليم/)).toBeVisible();
+    expect(within(assessment!).getByText(/المهارات/)).toBeVisible();
+
+    const experienceReview = screen
+      .getByRole("checkbox", { name: new RegExp(extractedFact.label) })
+      .closest("article");
+    const educationReview = screen
+      .getByRole("checkbox", { name: new RegExp(extractedEducationFact.label) })
+      .closest("article");
+    expect(experienceReview).not.toBeNull();
+    expect(educationReview).not.toBeNull();
+    expect(within(experienceReview!).getByText(extractedFact.detail!)).toBeVisible();
+    expect(within(educationReview!).getAllByText(extractedEducationFact.detail!)).toHaveLength(1);
+
+    const continueButton = screen.getByRole("button", { name: "اعتماد التحليل والمتابعة" });
+    await user.click(continueButton);
+
+    await waitFor(() => expect(apiMocks.confirmCareerFactsBatch).toHaveBeenCalled());
+    await waitFor(() => expect(apiMocks.prepareResumeImportFlow).toHaveBeenCalled());
+    expect(await screen.findByRole("heading", { name: "هل عندك معلومات غير موجودة في الملف؟" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "نعم، أضيفها" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "لا، اسألني عن النواقص" })).toBeVisible();
+    expect(screen.queryByText(/يحتاج تفصيل/)).not.toBeInTheDocument();
+  });
+
+  it("does not report optional project, certification, or achievement sections as missing", async () => {
+    const user = userEvent.setup();
+    const skillFact: ApiCareerFact = {
+      ...extractedFact,
+      id: "fact-imported-skill-1",
+      category: "skill",
+      label: "Power BI",
+      detail: null,
+      structured_value: {},
+    };
+    const languageFact: ApiCareerFact = {
+      ...extractedFact,
+      id: "fact-imported-language-1",
+      category: "language",
+      label: "English",
+      detail: "Fluent",
+      structured_value: { proficiency: "Fluent" },
+    };
+    const completeCoreFacts = [
+      extractedEducationFact,
+      extractedFact,
+      skillFact,
+      languageFact,
+    ];
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(makeWorkspace())
+      .mockResolvedValue(makeWorkspace({ evidence_revision: 2, readiness_score: 70 }));
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue(completeCoreFacts);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: extractedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: completeCoreFacts,
+      requires_user_review: true,
+      analysis_status: "created",
+    });
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    const assessmentHeading = await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" });
+    const assessment = assessmentHeading.closest("section");
+    expect(assessment).not.toBeNull();
+    expect(within(assessment!).getByText("الأقسام الأساسية موجودة")).toBeVisible();
+    expect(within(assessment!).getByText(/التعليم/)).toBeVisible();
+    expect(within(assessment!).getByText(/الخبرة/)).toBeVisible();
+    expect(within(assessment!).getByText(/المهارات/)).toBeVisible();
+    expect(within(assessment!).getByText(/اللغات/)).toBeVisible();
+    expect(within(assessment!).queryByText("المشاريع")).not.toBeInTheDocument();
+    expect(within(assessment!).queryByText("الشهادات")).not.toBeInTheDocument();
+    expect(within(assessment!).queryByText("الإنجازات")).not.toBeInTheDocument();
+  });
+
+  it("presents found ATS sections in the same order as the generated resume", async () => {
+    const user = userEvent.setup();
+    const categories: ApiCareerFact["category"][] = [
+      "education",
+      "experience",
+      "certification",
+      "skill",
+      "language",
+      "project",
+      "achievement",
+    ];
+    const imported = categories.map((category, index) => ({
+      ...extractedFact,
+      id: `ordered-${category}-${index}`,
+      category,
+      label: `Ordered ${category}`,
+      detail: null,
+      structured_value: {},
+    }));
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(makeWorkspace())
+      .mockResolvedValue(makeWorkspace({ evidence_revision: 2 }));
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue(imported);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: extractedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: imported,
+      requires_user_review: true,
+      analysis_status: "created",
+    });
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    const assessment = (await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" })).closest("section");
+    expect(assessment).not.toBeNull();
+    const found = within(assessment!).getByText("موجود في الملف").parentElement;
+    expect(found).not.toBeNull();
+    const certification = within(found!).getByText(/الشهادات/);
+    const skills = within(found!).getByText(/المهارات/);
+    const languages = within(found!).getByText(/اللغات/);
+    const projects = within(found!).getByText(/المشاريع/);
+    const achievements = within(found!).getByText(/الإنجازات/);
+    expect(certification.compareDocumentPosition(skills) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(skills.compareDocumentPosition(languages) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(languages.compareDocumentPosition(projects) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(projects.compareDocumentPosition(achievements) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it("does not auto-build an already reviewed file before the additions and gap steps", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace({ evidence_revision: 4 });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(current);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([confirmedImportedFact]);
+    apiMocks.importResumeWorkspaceFile.mockResolvedValue({
+      source: {
+        id: confirmedImportedFact.source_id,
+        kind: "cv_upload",
+        label: "resume.pdf",
+        original_filename: "resume.pdf",
+      },
+      facts: [confirmedImportedFact],
+      requires_user_review: false,
+      analysis_status: "already_ai_analyzed",
+    });
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    expect(await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" })).toBeVisible();
+    expect(apiMocks.prepareResumeImportFlow).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox", { name: "الملخص المهني" })).not.toBeInTheDocument();
+  });
+
+  it("restores the pending ATS assessment when the upload response is lost after commit", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace({ evidence_revision: 4 });
+    const recovered = makeWorkspace({
+      evidence_revision: 4,
+      provider_metadata: {
+        pending_import_source_id: confirmedImportedFact.source_id,
+        pending_import_filename: "resume.pdf",
+        pending_import_analysis_status: "already_ai_analyzed",
+      },
+    });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(recovered);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([confirmedImportedFact]);
+    apiMocks.importResumeWorkspaceFile.mockRejectedValue(new TypeError("response lost"));
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    expect(await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "اعتماد التحليل والمتابعة" })).toBeEnabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(apiMocks.prepareResumeImportFlow).not.toHaveBeenCalled();
+  });
+
+  it("discards a stale upload card when another tab has already advanced an import flow", async () => {
+    const user = userEvent.setup();
+    const current = makeWorkspace({ evidence_revision: 4 });
+    const activeOtherFlow = makeWorkspace({
+      revision: 2,
+      evidence_revision: 5,
+      messages: [],
+      provider_metadata: {
+        import_flow: {
+          phase: "additions_choice",
+          can_generate: false,
+          source_id: "source-from-other-tab",
+          file_name: "resume.pdf",
+          assessment: { gaps: [], page_target: 1 },
+          gap_queue: [],
+          page_target: 1,
+        },
+      },
+    });
+    apiMocks.getResumeWorkspace
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(activeOtherFlow);
+    apiMocks.getCareerFacts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([confirmedImportedFact]);
+    apiMocks.importResumeWorkspaceFile.mockRejectedValue(
+      new ApiHttpError(409, "Another import flow is active", "resume_import_phase_conflict"),
+    );
+    await renderResumePage();
+
+    const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
+    expect(input).not.toBeNull();
+    await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+
+    expect(await screen.findByRole("heading", { name: "هل عندك معلومات غير موجودة في الملف؟" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "حلّل الملف" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("restores the additions decision and starts one AI gap question without early generation", async () => {
+    const user = userEvent.setup();
+    const additionsWorkspace = makeWorkspace({
+      evidence_revision: 4,
+      readiness_score: 55,
+      messages: [],
+      provider_metadata: {
+        conversation_language: "ar",
+        import_flow: {
+          phase: "additions_choice",
+          source_id: confirmedImportedFact.source_id,
+          file_name: "resume.pdf",
+          assessment: {
+            score: 55,
+            found_sections: ["education", "experience"],
+            missing_sections: ["skill", "language"],
+          },
+        },
+      },
+    });
+    const gapQuestion = {
+      ...assistantQuestion,
+      id: "gap-skill-1",
+      content: "ما الأدوات أو المهارات التي استخدمتها فعليًا؟",
+      structured_payload: {
+        question: {
+          id: "gap_skill_1",
+          category: "skill",
+          question: "ما الأدوات أو المهارات التي استخدمتها فعليًا؟",
+        },
+      },
+    };
+    const gapWorkspace = makeWorkspace({
+      ...additionsWorkspace,
+      revision: 1,
+      messages: [gapQuestion],
+      provider_metadata: {
+        ...additionsWorkspace.provider_metadata,
+        import_flow: {
+          ...(additionsWorkspace.provider_metadata?.import_flow as Record<string, unknown>),
+          phase: "gap_interview",
+        },
+      },
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(additionsWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([confirmedImportedFact]);
+    apiMocks.sendResumeWorkspaceMessage.mockResolvedValue(gapWorkspace);
+    await renderResumePage();
+
+    expect(await screen.findByRole("heading", { name: "هل عندك معلومات غير موجودة في الملف؟" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "اكتب السيرة الآن" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "لا، اسألني عن النواقص" }));
+
+    await waitFor(() => expect(apiMocks.sendResumeWorkspaceMessage).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({ quickAction: "additions_no" }),
+    ));
+    expect(await screen.findByText("ما الأدوات أو المهارات التي استخدمتها فعليًا؟")).toBeVisible();
+    expect(screen.getAllByRole("textbox", { name: "اكتب رسالتك" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "اكتب السيرة الآن" })).not.toBeInTheDocument();
+  });
+
+  it("groups imported facts, confirms the selected facts, rejects the rest, then prepares the additions step", async () => {
     const user = userEvent.setup();
     const current = makeWorkspace();
     const refreshed = makeWorkspace({ readiness_score: 55, evidence_revision: 2 });
-    const generated = makeWorkspace({
-      stage: "writing",
-      revision: 1,
-      evidence_revision: 3,
-      readiness_score: 100,
-      current_draft: draft,
-      draft_revision: 1,
-    });
     apiMocks.getResumeWorkspace
       .mockResolvedValueOnce(current)
       .mockResolvedValue(refreshed);
@@ -846,7 +1553,6 @@ describe("resume workspace v2", () => {
       facts: [{ ...extractedFact, verification_status: "confirmed" }],
       evidence_revision: 3,
     });
-    apiMocks.buildResumeDraftFromImport.mockResolvedValue(generated);
     await renderResumePage();
 
     const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
@@ -863,8 +1569,7 @@ describe("resume workspace v2", () => {
       file,
       { dataSharingAcknowledged: true },
     ));
-    expect(await screen.findByRole("heading", { name: "اكتمل تحليل الملف" })).toBeVisible();
-    expect(screen.getByText((content) => content.includes("resume.pdf") && content.includes("تحتاج مراجعة"))).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" })).toBeVisible();
     const review = screen.getByRole("heading", { name: "راجع المعلومات المستخرجة" }).closest("section");
     expect(review).not.toBeNull();
     const educationHeading = within(review!).getByRole("heading", { name: "التعليم" });
@@ -880,13 +1585,13 @@ describe("resume workspace v2", () => {
 
     const experienceCheckbox = within(review!).getByRole("checkbox", { name: new RegExp(extractedFact.label) });
     const educationCheckbox = within(review!).getByRole("checkbox", { name: new RegExp(extractedEducationFact.label) });
-    const confirmAndBuild = within(review!).getByRole("button", { name: "اعتماد المحدد وإنشاء المسودة" });
+    const confirmAndContinue = within(review!).getByRole("button", { name: "اعتماد التحليل والمتابعة" });
     expect(experienceCheckbox).toBeChecked();
     expect(educationCheckbox).toBeChecked();
     await user.click(educationCheckbox);
     expect(educationCheckbox).not.toBeChecked();
-    expect(confirmAndBuild).toBeEnabled();
-    await user.click(confirmAndBuild);
+    expect(confirmAndContinue).toBeEnabled();
+    await user.click(confirmAndContinue);
 
     await waitFor(() => expect(apiMocks.confirmCareerFactsBatch).toHaveBeenCalledWith(
       profile.id,
@@ -894,10 +1599,11 @@ describe("resume workspace v2", () => {
         sourceId: extractedFact.source_id,
         clientRequestId: expect.any(String),
         factIds: [extractedFact.id],
+        rejectedFactIds: [extractedEducationFact.id],
         expectedEvidenceRevision: refreshed.evidence_revision,
       },
     ));
-    await waitFor(() => expect(apiMocks.buildResumeDraftFromImport).toHaveBeenCalledWith(
+    await waitFor(() => expect(apiMocks.prepareResumeImportFlow).toHaveBeenCalledWith(
       profile.id,
       {
         sourceId: extractedFact.source_id,
@@ -946,17 +1652,9 @@ describe("resume workspace v2", () => {
     expect(within(review!).queryByRole("button", { name: "تأكيد هذه المعلومة" })).not.toBeInTheDocument();
   });
 
-  it("restores an already analyzed all-confirmed file and builds its draft directly", async () => {
+  it("restores an already analyzed all-confirmed file and prepares the additions step after approval", async () => {
     const user = userEvent.setup();
     const current = makeWorkspace({ evidence_revision: 4 });
-    const generated = makeWorkspace({
-      stage: "writing",
-      revision: 1,
-      evidence_revision: 4,
-      readiness_score: 100,
-      current_draft: draft,
-      draft_revision: 1,
-    });
     apiMocks.getResumeWorkspace
       .mockResolvedValueOnce(current)
       .mockResolvedValue(current);
@@ -974,7 +1672,6 @@ describe("resume workspace v2", () => {
       requires_user_review: true,
       analysis_status: "already_ai_analyzed",
     });
-    apiMocks.buildResumeDraftFromImport.mockResolvedValue(generated);
     await renderResumePage();
 
     const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
@@ -982,8 +1679,11 @@ describe("resume workspace v2", () => {
     const file = new File(["resume"], "resume.pdf", { type: "application/pdf" });
     await user.upload(input!, file);
     await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+    expect(await screen.findByRole("heading", { name: "تقييم مبدئي لجاهزية ATS" })).toBeVisible();
+    expect(apiMocks.prepareResumeImportFlow).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "اعتماد التحليل والمتابعة" }));
 
-    await waitFor(() => expect(apiMocks.buildResumeDraftFromImport).toHaveBeenCalledWith(
+    await waitFor(() => expect(apiMocks.prepareResumeImportFlow).toHaveBeenCalledWith(
       profile.id,
       {
         sourceId: confirmedImportedFact.source_id,
@@ -995,18 +1695,22 @@ describe("resume workspace v2", () => {
     expect(apiMocks.confirmCareerFactsBatch).not.toHaveBeenCalled();
   });
 
-  it("reconciles a completed same-file draft when the response is lost", async () => {
+  it("reconciles a prepared same-file interview when the response is lost", async () => {
     const user = userEvent.setup();
     const current = makeWorkspace({ evidence_revision: 4 });
     const committed = makeWorkspace({
-      stage: "writing",
       revision: 1,
       evidence_revision: 4,
-      current_draft: draft,
-      draft_revision: 1,
       provider_metadata: {
-        active_import_source_id: confirmedImportedFact.source_id,
-        draft_mode: "import_evidence",
+        import_flow: {
+          phase: "additions_choice",
+          can_generate: false,
+          source_id: confirmedImportedFact.source_id,
+          file_name: "resume.pdf",
+          assessment: { found_sections: ["experience"], missing_sections: ["skill"] },
+          gap_queue: [],
+          page_target: 1,
+        },
       },
     });
     apiMocks.getResumeWorkspace
@@ -1027,28 +1731,22 @@ describe("resume workspace v2", () => {
       requires_user_review: false,
       analysis_status: "already_ai_analyzed",
     });
-    apiMocks.buildResumeDraftFromImport.mockRejectedValue(new TypeError("response lost"));
+    apiMocks.prepareResumeImportFlow.mockRejectedValue(new TypeError("response lost"));
     await renderResumePage();
 
     const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
     expect(input).not.toBeNull();
     await user.upload(input!, new File(["resume"], "resume.pdf", { type: "application/pdf" }));
     await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
+    await user.click(await screen.findByRole("button", { name: "اعتماد التحليل والمتابعة" }));
 
-    expect(await screen.findByRole("button", { name: "امسح المسودة أولًا لرفع ملف آخر" })).toBeDisabled();
+    expect(await screen.findByRole("heading", { name: "هل عندك معلومات غير موجودة في الملف؟" })).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("builds from confirmed facts without silently confirming pending facts", async () => {
+  it("rejects deselected pending facts and prepares the interview from confirmed facts", async () => {
     const user = userEvent.setup();
     const current = makeWorkspace({ evidence_revision: 4 });
-    const generated = makeWorkspace({
-      stage: "writing",
-      revision: 1,
-      evidence_revision: 4,
-      current_draft: draft,
-      draft_revision: 1,
-    });
     apiMocks.getResumeWorkspace
       .mockResolvedValueOnce(current)
       .mockResolvedValue(current);
@@ -1066,7 +1764,6 @@ describe("resume workspace v2", () => {
       requires_user_review: true,
       analysis_status: "already_ai_analyzed",
     });
-    apiMocks.buildResumeDraftFromImport.mockResolvedValue(generated);
     await renderResumePage();
 
     const input = document.querySelector<HTMLInputElement>("#resume-workspace-file");
@@ -1075,10 +1772,14 @@ describe("resume workspace v2", () => {
     await user.click(await screen.findByRole("button", { name: "حلّل الملف" }));
     const pendingCheckbox = await screen.findByRole("checkbox", { name: new RegExp(extractedEducationFact.label) });
     expect(pendingCheckbox).toBeChecked();
-    await user.click(screen.getByRole("button", { name: "إنشاء مسودة من هذا الملف" }));
+    await user.click(pendingCheckbox);
+    await user.click(screen.getByRole("button", { name: "اعتماد التحليل والمتابعة" }));
 
-    await waitFor(() => expect(apiMocks.buildResumeDraftFromImport).toHaveBeenCalled());
-    expect(apiMocks.confirmCareerFactsBatch).not.toHaveBeenCalled();
+    await waitFor(() => expect(apiMocks.confirmCareerFactsBatch).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({ factIds: [], rejectedFactIds: [extractedEducationFact.id] }),
+    ));
+    await waitFor(() => expect(apiMocks.prepareResumeImportFlow).toHaveBeenCalled());
   });
 
   it("prevents uploading another resume while a draft is active", async () => {
@@ -1458,6 +2159,96 @@ describe("resume workspace v2", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:resume-v2");
   });
 
+  it("restores the current server review after reloading the review stage", async () => {
+    const currentReview = {
+      id: "current-export-ready-version",
+      workspace_id: "workspace-1",
+      version: 2,
+      base_version_id: null,
+      reason: "review" as const,
+      status: "export_ready" as const,
+      content: draft,
+      diff: {},
+      evidence_revision: 1,
+      reviewed_at: "2026-08-08T10:10:00Z",
+      review_hash: "current-review-hash",
+      created_at: "2026-08-08T10:10:00Z",
+    };
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "review",
+      current_draft: draft,
+      draft_revision: 1,
+      evidence_revision: 1,
+      versions: [currentReview],
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    await renderResumePage();
+
+    expect(await screen.findByRole("checkbox", { name: "راجعت المعلومات" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "تنزيل PDF" })).toBeEnabled();
+    expect(screen.getByLabelText("إجراءات اعتماد السيرة")).toHaveClass(
+      "xl:relative",
+      "xl:z-50",
+      "xl:bg-background",
+    );
+    expect(apiMocks.reviewResumeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("invalidates the restored review immediately when contact details change", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+      evidence_revision: 1,
+      versions: [{
+        id: "review-before-contact-edit",
+        workspace_id: "workspace-1",
+        version: 2,
+        base_version_id: null,
+        reason: "review",
+        status: "export_ready",
+        content: draft,
+        diff: {},
+        evidence_revision: 1,
+        reviewed_at: "2026-08-08T10:10:00Z",
+        review_hash: "review-before-contact-edit-hash",
+        created_at: "2026-08-08T10:10:00Z",
+      }],
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    await renderResumePage();
+
+    const review = await screen.findByRole("checkbox", { name: "راجعت المعلومات" });
+    expect(review).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "التواصل" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "البريد الإلكتروني" }),
+      "new@example.com",
+    );
+
+    expect(review).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "تنزيل PDF" })).toBeDisabled();
+    await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalled(), { timeout: 2_000 });
+    expect(review).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "تنزيل PDF" })).toBeDisabled();
+  });
+
+  it("does not trust the complete stage without a current export-ready review", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "complete",
+      current_draft: draft,
+      draft_revision: 2,
+      evidence_revision: 2,
+      versions: [],
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    await renderResumePage();
+
+    expect(await screen.findByRole("checkbox", { name: "راجعت المعلومات" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "تنزيل PDF" })).toBeDisabled();
+  });
+
   it("revokes a prepared PDF link when the workspace is permanently cleared", async () => {
     const user = userEvent.setup();
     apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
@@ -1506,6 +2297,11 @@ describe("resume workspace v2", () => {
 
     expect(await screen.findByRole("dialog", { name: "معاينة السيرة بصيغة PDF" })).toBeVisible();
     expect(screen.getByTitle("ملف السيرة بصيغة PDF")).toHaveAttribute("src", "blob:preview");
+    expect(screen.getByRole("link", { name: "تنزيل ملف PDF" })).toHaveAttribute("href", "blob:preview");
+    expect(screen.getByRole("link", { name: "تنزيل ملف PDF" })).toHaveAttribute(
+      "download",
+      `${profile.full_name}-resume.pdf`,
+    );
     await user.click(screen.getByRole("button", { name: "إغلاق معاينة PDF" }));
     expect(screen.queryByRole("dialog", { name: "معاينة السيرة بصيغة PDF" })).not.toBeInTheDocument();
     await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview"));

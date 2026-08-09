@@ -158,6 +158,9 @@ export function ResumeProofingPaper({
         <div className="inline-flex items-center gap-2 font-semibold text-foreground">
           <FileText className="h-4 w-4 text-primary-text" aria-hidden="true" />
           {locale === "ar" ? "ورقة التحرير" : "Proofing paper"}
+          <span className="border-s border-border ps-2 text-[10px] font-bold text-primary-text">
+            {locale === "ar" ? "ATS · هدف صفحة واحدة" : "ATS · ONE-PAGE TARGET"}
+          </span>
         </div>
         <div className="inline-flex items-center">
           <button type="button" className="grid h-8 w-8 place-items-center border-s border-border hover:text-primary-text disabled:opacity-40" aria-label={locale === "ar" ? "تصغير" : "Zoom out"} disabled={zoom <= 80} onClick={() => setZoom((value) => Math.max(80, value - 10))}><Minus className="h-3.5 w-3.5" /></button>

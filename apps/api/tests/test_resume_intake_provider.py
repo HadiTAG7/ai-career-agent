@@ -1032,6 +1032,87 @@ async def test_grounded_baseline_does_not_duplicate_generated_projects_languages
 
 
 @pytest.mark.asyncio
+async def test_provider_certification_experience_is_reclassified_without_baseline_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = build_resume_segments(
+        "Certificates\n"
+        "ERP Implementation Experience (Internship-based)\n"
+        "Work Experience Certificate"
+    )
+    source_handle = next(
+        segment.handle
+        for segment in segments
+        if "ERP Implementation Experience" in segment.text
+    )
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "certification",
+                        "label": "ERP Implementation Experience (Internship-based)",
+                        "detail": None,
+                        "source_handle": source_handle,
+                    }
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    erp_facts = [
+        fact
+        for fact in result
+        if fact.label == "ERP Implementation Experience (Internship-based)"
+    ]
+    assert len(erp_facts) == 1
+    assert erp_facts[0].category == FactCategory.EXPERIENCE
+    assert erp_facts[0].structured_value["record_type"] == "experience"
+
+
+def test_internship_context_is_not_misrepresented_as_an_employer() -> None:
+    record = resume_intake._record_from_candidate(
+        category=FactCategory.EXPERIENCE,
+        label="ERP Implementation Experience",
+        detail="Internship-based",
+        source_handle="segment_1",
+        source_excerpt="Certificates\nERP Implementation Experience (Internship-based)",
+    )
+
+    assert record.organization is None
+    assert record.responsibilities == ["Internship-based"]
+
+
+@pytest.mark.asyncio
+async def test_baseline_reclassifies_experience_but_keeps_actual_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(content=json.dumps({"facts": []}))
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        "Certificates\n"
+        "ERP Implementation Experience (Internship-based)\n"
+        "Work Experience Certificate"
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [(fact.category, fact.label) for fact in result] == [
+        (FactCategory.EXPERIENCE, "ERP Implementation Experience (Internship-based)"),
+        (FactCategory.CERTIFICATION, "Work Experience Certificate"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_grounded_baseline_fills_specific_skills_the_provider_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1493,6 +1574,7 @@ async def test_two_column_pdf_keeps_complete_resume_records_without_layout_fragm
         "Finance Trainee — Treasury, Reporting & Internal Controls",
         "Financial Markets Instructor",
         "Investment & Trading Professional",
+        "ERP Implementation Experience (Internship-based)",
     ]
     assert all(fact.label.casefold() != "profile" for fact in experiences)
     assert [fact.structured_value.get("organization") for fact in experiences] == [
@@ -1500,18 +1582,21 @@ async def test_two_column_pdf_keeps_complete_resume_records_without_layout_fragm
         "Meridian Petrochemical",
         "MarketLearn",
         None,
+        None,
     ]
     assert [fact.structured_value.get("source_section") for fact in experiences] == [
         "Professional Experience",
         "Professional Experience",
         "Professional Experience",
         "Investment & Trading Experience",
+        "Certificates",
     ]
-    assert [fact.structured_value["date_range"] for fact in experiences] == [
+    assert [fact.structured_value.get("date_range") for fact in experiences] == [
         "2025 – Present",
         "2024/01 – 2024/08",
         "2022 – 2025",
         "2018 – Present",
+        None,
     ]
     assert [fact.structured_value["responsibilities"] for fact in experiences] == [
         [
@@ -1543,6 +1628,7 @@ async def test_two_column_pdf_keeps_complete_resume_records_without_layout_fragm
             "Applied portfolio diversification and systematic execution to improve risk-adjusted "
             "consistency",
         ],
+        [],
     ]
 
     certifications = [fact for fact in result if fact.category == FactCategory.CERTIFICATION]
@@ -1550,7 +1636,6 @@ async def test_two_column_pdf_keeps_complete_resume_records_without_layout_fragm
         "CME-4 Certification (Both CME-4A & CME-4B)",
         "Advanced Microsoft Excel",
         "CME-1 Certification (Both CME-1A & CME-1B)",
-        "ERP Implementation Experience (Internship-based)",
     ]
 
     skills = [fact for fact in result if fact.category == FactCategory.SKILL]

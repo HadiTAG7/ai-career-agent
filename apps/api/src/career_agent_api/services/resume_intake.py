@@ -133,6 +133,21 @@ _EMPTY_CONTACT_LABEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_EXPERIENCE_LABEL_CUE_PATTERN = re.compile(
+    r"\b(?:experience|intern(?:ship)?)\b",
+    re.IGNORECASE,
+)
+_CERTIFICATION_LABEL_CUE_PATTERN = re.compile(
+    r"\b(?:certificat(?:e|es|ion|ions)|licen[cs](?:e|es)|credential(?:s)?)\b",
+    re.IGNORECASE,
+)
+_EXPERIENCE_CONTEXT_ONLY_PATTERN = re.compile(
+    r"^(?:intern(?:ship)?(?:[-\s]+based)?|training(?:[-\s]+based)?|"
+    r"practical\s+training|co-?op\s+training|"
+    r"تدريب(?:\s+(?:عملي|تعاوني))?|قائم(?:ة)?\s+على\s+التدريب)$",
+    re.IGNORECASE,
+)
+
 ResumeFactCategory = Literal[
     "education",
     "experience",
@@ -1620,6 +1635,8 @@ def _looks_like_organization(value: str) -> bool:
 
 def _looks_like_compact_organization(value: str) -> bool:
     clean = value.strip(" •*.\t")
+    if _EXPERIENCE_CONTEXT_ONLY_PATTERN.fullmatch(clean):
+        return False
     if _looks_like_organization(clean):
         return True
     return bool(
@@ -1885,21 +1902,38 @@ def _structured_candidate(
     *,
     source_handle: str,
 ) -> FactCandidate:
+    category = _normalized_candidate_category(candidate.category, candidate.label)
     record = _record_from_candidate(
-        category=candidate.category,
+        category=category,
         label=candidate.label,
         detail=candidate.detail,
         source_handle=source_handle,
         source_excerpt=candidate.source_excerpt,
     )
     return FactCandidate(
-        category=candidate.category,
+        category=category,
         label=candidate.label,
         detail=candidate.detail,
         structured_value=record.model_dump(mode="json", exclude_none=True),
         source_excerpt=candidate.source_excerpt,
         confidence=candidate.confidence,
     )
+
+
+def _normalized_candidate_category(
+    category: FactCategory,
+    label: str,
+) -> FactCategory:
+    if (
+        category == FactCategory.CERTIFICATION
+        and _EXPERIENCE_LABEL_CUE_PATTERN.search(label)
+        and not _CERTIFICATION_LABEL_CUE_PATTERN.search(label)
+    ):
+        # Resume section placement is only a routing hint.  Some resumes list practical training
+        # beside certificates; keep those entries as experience unless the label actually names a
+        # certificate, certification, license, or credential.
+        return FactCategory.EXPERIENCE
+    return category
 
 
 def _provider_input(
@@ -1974,7 +2008,8 @@ def _resolve_generated_facts(
             continue
         if _is_low_information_fact(category, label, detail):
             continue
-        key = (fact.category, label.casefold(), detail, fact.source_handle)
+        normalized_category = _normalized_candidate_category(category, label)
+        key = (normalized_category.value, label.casefold(), detail, fact.source_handle)
         if key in seen:
             continue
         seen.add(key)

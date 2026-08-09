@@ -249,7 +249,7 @@ async def test_ai_docx_import_uses_provider_and_returns_existing_ai_analysis_on_
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
-    assert metadata["extractor_version"] == "resume-records-v6"
+    assert metadata["extractor_version"] == "resume-records-v7"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert "Senior Python backend developer" not in str(metadata)
     assert {fact["verification_status"] for fact in result["facts"]} == {"extracted"}
@@ -318,7 +318,7 @@ async def test_local_import_ai_upgrade_stages_enrichment_for_review(
     assert metadata["ai_enhanced"] is True
     assert metadata["ai_provider"] == "mistral"
     assert metadata["ai_model"] == "resume-test-model"
-    assert metadata["extractor_version"] == "resume-records-v6"
+    assert metadata["extractor_version"] == "resume-records-v7"
     assert metadata["consent_version"] == "2026-08-07-v1:mistral"
     assert metadata["candidate_fact_count"] == 4
     assert {fact["label"] for fact in result["facts"]} == {
@@ -369,7 +369,7 @@ async def test_local_import_ai_upgrade_stages_enrichment_for_review(
     assert len(provider.contexts) == 1
 
 
-async def test_v5_ai_import_is_reanalyzed_once_by_v6_and_enriches_reviewed_facts(
+async def test_v6_ai_import_is_reanalyzed_once_by_v7_and_enriches_reviewed_facts(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     session_factory,
@@ -460,7 +460,7 @@ async def test_v5_ai_import_is_reanalyzed_once_by_v6_and_enriches_reviewed_facts
         source.source_metadata = {
             **source.source_metadata,
             "ai_enhanced": True,
-            "extractor_version": "resume-records-v5",
+            "extractor_version": "resume-records-v6",
             "ai_provider": "mistral",
             "ai_model": "legacy-resume-model",
         }
@@ -484,7 +484,7 @@ async def test_v5_ai_import_is_reanalyzed_once_by_v6_and_enriches_reviewed_facts
     assert upgraded_result["analysis_status"] == "ai_upgraded"
     assert upgraded_result["source"]["id"] == source_id
     assert upgraded_result["source"]["source_metadata"]["extractor_version"] == (
-        "resume-records-v6"
+        "resume-records-v7"
     )
     assert upgraded_result["source"]["source_metadata"]["candidate_fact_count"] == 5
     assert len(provider.contexts) == 1
@@ -807,6 +807,68 @@ async def test_batch_confirm_is_atomic_idempotent_and_advances_revision_once(
     assert stale_replay.status_code == 409, stale_replay.text
     assert stale_replay.json()["detail"]["code"] == "resume_evidence_revision_conflict"
     assert changed_after_commit.json()["verification_status"] == "unconfirmed"
+
+
+async def test_batch_review_accepts_and_rejects_atomically_with_one_revision(
+    client: httpx.AsyncClient,
+) -> None:
+    profile, _source = await create_profile_and_source(client)
+    imported = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        files={
+            "file": (
+                "partitioned-review.docx",
+                minimal_docx("Skills: Python and SQL\nBachelor of Computer Science"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    result = imported.json()
+    accepted_id = result["facts"][0]["id"]
+    rejected_ids = [fact["id"] for fact in result["facts"][1:]]
+    assert rejected_ids
+    before = (await client.get("/v1/profiles")).json()["evidence_revision"]
+    request_id = str(uuid4())
+    payload = {
+        "source_id": result["source"]["id"],
+        "client_request_id": request_id,
+        "fact_ids": [accepted_id],
+        "rejected_fact_ids": rejected_ids,
+        "expected_evidence_revision": before,
+    }
+
+    reviewed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json=payload,
+    )
+
+    assert reviewed.status_code == 200, reviewed.text
+    by_id = {fact["id"]: fact for fact in reviewed.json()["facts"]}
+    assert by_id[accepted_id]["verification_status"] == "confirmed"
+    assert all(by_id[fact_id]["verification_status"] == "unconfirmed" for fact_id in rejected_ids)
+    assert reviewed.json()["evidence_revision"] == before + 1
+
+    repeated = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json=payload,
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["evidence_revision"] == before + 1
+
+    conflicting_replay = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        json={
+            **payload,
+            "rejected_fact_ids": rejected_ids[:-1],
+        },
+    )
+    assert conflicting_replay.status_code == 409, conflicting_replay.text
+    assert (
+        conflicting_replay.json()["detail"]["code"]
+        == "resume_import_review_idempotency_conflict"
+    )
+    assert (await client.get("/v1/profiles")).json()["evidence_revision"] == before + 1
 
 
 async def test_batch_confirm_rejects_unconfirmed_fact_without_partial_mutation(

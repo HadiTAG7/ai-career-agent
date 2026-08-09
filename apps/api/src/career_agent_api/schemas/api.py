@@ -194,15 +194,28 @@ class CareerFactBatchConfirmCreate(BaseModel):
 
     source_id: UUID
     client_request_id: UUID
-    fact_ids: list[UUID] = Field(min_length=1, max_length=120)
+    fact_ids: list[UUID] = Field(default_factory=list, max_length=120)
+    rejected_fact_ids: list[UUID] = Field(default_factory=list, max_length=120)
     expected_evidence_revision: int = Field(ge=0)
 
-    @field_validator("fact_ids")
+    @field_validator("fact_ids", "rejected_fact_ids")
     @classmethod
     def unique_fact_ids(cls, value: list[UUID]) -> list[UUID]:
         if len(value) != len(set(value)):
             raise ValueError("fact_ids must be unique")
         return value
+
+    @model_validator(mode="after")
+    def reviewed_fact_partition(self) -> "CareerFactBatchConfirmCreate":
+        accepted = set(self.fact_ids)
+        rejected = set(self.rejected_fact_ids)
+        if not accepted and not rejected:
+            raise ValueError("At least one accepted or rejected fact is required")
+        if accepted & rejected:
+            raise ValueError("A fact cannot be both accepted and rejected")
+        if len(accepted | rejected) > 120:
+            raise ValueError("At most 120 facts can be reviewed in one request")
+        return self
 
 
 class CareerFactBatchConfirmRead(BaseModel):
@@ -297,6 +310,25 @@ class ResumeDraftSection(BaseModel):
     items: list[ResumeDraftItem] = Field(min_length=1, max_length=30)
 
 
+class ResumeVerifiedSupplementalTranslation(BaseModel):
+    """Server-owned proof for one independently verified evidence translation.
+
+    The source text is deliberately represented only by a digest.  This model is attached to
+    the in-memory draft returned by the writer and excluded from every serialized resume draft;
+    the workspace API persists it separately in provider metadata.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    handle: str = Field(min_length=1, max_length=120)
+    field: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_]+$")
+    value_index: int = Field(ge=0, le=100)
+    source_hash: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    translated_value: str = Field(min_length=1, max_length=4_000)
+    pair_id: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    verdict: Literal["pass"]
+
+
 class ResumeDraftContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -304,6 +336,12 @@ class ResumeDraftContent(BaseModel):
     professional_summary: str = Field(min_length=20, max_length=2_500)
     summary_evidence_handles: list[str] = Field(min_length=1, max_length=15)
     sections: list[ResumeDraftSection] = Field(min_length=1, max_length=8)
+    verified_supplemental_translations: list[ResumeVerifiedSupplementalTranslation] = Field(
+        default_factory=list,
+        max_length=100,
+        exclude=True,
+        repr=False,
+    )
 
     @field_validator("sections")
     @classmethod
@@ -351,6 +389,8 @@ ResumeQuickAction = Literal[
     "continue",
     "show_example",
     "no_exact_metric",
+    "additions_yes",
+    "additions_no",
     "generate",
     "improve",
     "review",

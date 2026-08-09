@@ -6,6 +6,7 @@ import logging
 import re
 import unicodedata
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from hashlib import sha256
@@ -25,6 +26,7 @@ from career_agent_api.schemas.api import (
     ResumeDraftSection,
     ResumeInterviewAnswerCreate,
     ResumeQuestionRead,
+    ResumeVerifiedSupplementalTranslation,
 )
 from career_agent_api.services.career_path import redact_for_ai
 from career_agent_api.services.resume_intake import ResumeRecord
@@ -328,6 +330,9 @@ Rules:
 12. Use stable lowercase snake_case IDs. Every ID must be unique.
 13. `category` must be one of education, experience, certification, skill, project, language, or
     achievement.
+14. When `gap` is present, the server has already selected the next missing record fields. Ask one
+    question for that exact gap and its `requested_fields`; do not substitute another missing
+    detail.
 """.strip()
 
 DRAFT_SYSTEM_INSTRUCTIONS = """
@@ -375,6 +380,43 @@ Grounding and safety rules:
 19. Use trading_experience only when the cited source explicitly belongs to an Investment &
     Trading Experience or Trading Experience section. Keep teaching, employment, internships, and
     other roles under experience even when their responsibilities mention markets or trading.
+20. The top-level `required_supplemental_evidence` list repeats confirmed additions that are
+    mandatory in the draft. Represent every entry in the item citing that exact handle, using its
+    validated `translated_value` verbatim. Render a compact `organization_or_context` as the
+    organization when appropriate; otherwise preserve it as a bullet. Never omit an entry merely
+    because the original resume bullets are already present.
+""".strip()
+
+SUPPLEMENTAL_TRANSLATION_SYSTEM_INSTRUCTIONS = """
+Translate the supplied confirmed resume additions into the requested output language.
+
+Rules:
+1. Each input entry is one complete confirmed value. Return exactly one translation for every
+   entry, in the same order. Never merge values or reuse another value's translation.
+2. Copy each `handle`, `field`, and `value_index` exactly. Do not add, remove, merge, or reorder
+   entries.
+3. Translate the full `value` literally while keeping it concise and suitable for resume
+   metadata or a bullet. Preserve every action-object relationship, qualification, and negation.
+4. Preserve every number, date, proper noun, and product name exactly. Do not invent context,
+   employment, impact, metrics, or seniority.
+5. Text marked `[redacted]` is private. Do not infer, restore, or replace it.
+6. Return only the structured translations requested by the schema.
+""".strip()
+
+SUPPLEMENTAL_TRANSLATION_VERIFICATION_SYSTEM_INSTRUCTIONS = """
+Independently verify each proposed resume translation against its supplied source fragment.
+
+Rules:
+1. Evaluate every entry independently and return exactly one verdict in the same order.
+2. Copy each opaque `pair_id` exactly. Do not return or rewrite either text value.
+3. Return `pass` only when the translation preserves every source fact and every translated fact
+   exists in the source.
+4. Actors, actions, objects, qualifications, negation, and scope must retain the same
+   relationships. Reject swapped actions or objects.
+5. Return `uncertain` whenever exact equivalence cannot be established; never guess.
+6. Be strict for unfamiliar vocabulary: reject omissions, generic substitutions, hallucinations,
+   and merely related wording. A `pass` verdict must have an empty `issue_codes` list.
+7. Return only the typed verdicts.
 """.strip()
 
 ADAPTIVE_TURN_SYSTEM_INSTRUCTIONS = """
@@ -617,6 +659,66 @@ class _GeneratedDraft(BaseModel):
     professional_summary: str = Field(min_length=20, max_length=2_500)
     summary_evidence_handles: list[str] = Field(min_length=1, max_length=15)
     sections: list[_GeneratedDraftSection] = Field(min_length=1, max_length=8)
+
+
+class _GeneratedSupplementalTranslation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    handle: str = Field(min_length=1, max_length=120)
+    field: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_]+$")
+    value_index: int = Field(ge=0, le=100)
+    translated_value: str = Field(min_length=1, max_length=4_000)
+
+
+class _GeneratedSupplementalTranslationSet(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    translations: list[_GeneratedSupplementalTranslation] = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+
+SupplementalVerificationIssue = Literal[
+    "omission",
+    "addition",
+    "relation_change",
+    "negation_change",
+    "number_change",
+    "entity_change",
+    "wrong_language",
+    "other",
+]
+
+
+class _GeneratedSupplementalTranslationVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    pair_id: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    verdict: Literal["pass", "fail", "uncertain"]
+    issue_codes: list[SupplementalVerificationIssue] = Field(max_length=8)
+
+
+class _GeneratedSupplementalTranslationVerificationSet(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    verifications: list[_GeneratedSupplementalTranslationVerification] = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+
+class _VerifiedSupplementalTranslations(list[dict[str, str]]):
+    """List-compatible translation result carrying server-only verifier proofs."""
+
+    def __init__(
+        self,
+        values: list[dict[str, str]],
+        *,
+        proofs: list[ResumeVerifiedSupplementalTranslation] | None = None,
+    ) -> None:
+        super().__init__(values)
+        self.proofs = list(proofs or [])
 
 
 def _heading_key(value: str) -> str:
@@ -1021,10 +1123,63 @@ _COMPARATIVE_NUMBER_WORDS = frozenset(
 # concept still needs a cited fact, while numbers, entities, seniority, and impact claims retain
 # their stricter validators.
 _BILINGUAL_SEMANTIC_GROUPS = (
+    {
+        "portfolio",
+        "portfolios",
+        "\u0645\u062d\u0641\u0638\u0629",
+        "\u0645\u062d\u0641\u0638\u062a\u064a",
+        "\u0645\u062d\u0641\u0638\u062a\u0647",
+        "\u0645\u062d\u0641\u0638\u062a\u0647\u0627",
+    },
+    {
+        "own",
+        "personal",
+        "personally",
+        "private",
+        "privately",
+        "self-managed",
+        "\u0628\u0646\u0641\u0633\u064a",
+        "\u062e\u0627\u0635",
+        "\u062e\u0627\u0635\u0629",
+        "\u0627\u0644\u062e\u0627\u0635\u0629",
+        "\u0634\u062e\u0635\u064a",
+        "\u0634\u062e\u0635\u064a\u0629",
+    },
+    {
+        "business",
+        "company",
+        "employer",
+        "firm",
+        "organization",
+        "\u062c\u0647\u0629",
+        "\u0634\u0631\u0643\u0629",
+    },
+    {
+        "never",
+        "no",
+        "not",
+        "without",
+        "\u0628\u062f\u0648\u0646",
+        "\u062f\u0648\u0646",
+        "\u063a\u064a\u0631",
+        "\u0644\u0627",
+        "\u0644\u064a\u0633",
+        "\u0644\u064a\u0633\u062a",
+    },
     {"experience", "experiences", "خبرة", "خبرات"},
     {"professional", "professionally", "مهني", "مهنية", "محترف", "محترفة"},
     {"finance", "financial", "مالية", "مالي", "تمويل"},
-    {"investment", "investments", "استثمار", "استثمارات"},
+    {
+        "invest",
+        "invested",
+        "investing",
+        "investment",
+        "investments",
+        "استثمار",
+        "استثمارات",
+        "استثماري",
+        "استثمارية",
+    },
     {"equity", "equities", "اسهم"},
     {
         "trading",
@@ -1044,9 +1199,31 @@ _BILINGUAL_SEMANTIC_GROUPS = (
     {"strategy", "strategies", "استراتيجية", "استراتيجيات"},
     {"development", "تطوير"},
     {"risk", "risks", "مخاطر"},
-    {"management", "ادارة"},
+    {
+        "manage",
+        "managed",
+        "management",
+        "manages",
+        "managing",
+        "أدير",
+        "ادارة",
+        "ادير",
+        "إدارة",
+        "يدير",
+    },
     {"educator", "trainer", "مدرب"},
-    {"trained", "training", "درب", "تدريب"},
+    {
+        "train",
+        "trained",
+        "training",
+        "trains",
+        "أدرب",
+        "ادرب",
+        "درب",
+        "دربت",
+        "تدريب",
+        "يدرب",
+    },
     {"student", "students", "طالب", "طلاب", "متدرب", "متدربين"},
     {"education", "educational", "تعليم", "تعليمي", "تعليمية"},
     {"content", "محتوى"},
@@ -1401,7 +1578,7 @@ _SUPPORT_CONTRAST_PATTERN = re.compile(
 
 def _contains_negation(value: str) -> bool:
     return any(
-        _canonical_word(match.group(0)) in _NEGATION_WORDS
+        bool(_word_variants(_canonical_word(match.group(0))) & _NEGATION_WORDS)
         for match in _WORD_PATTERN.finditer(value)
     )
 
@@ -1707,21 +1884,36 @@ def _sanitize_generated_draft(
                 raise ResumeWriterError("Resume writer returned no grounded headline")
             sanitized = sanitized.model_copy(update={"headline": evidence_headline})
 
-    summary_units = [
-        unit
-        for unit in _claim_units(sanitized.professional_summary)
-        if grounded(
-            unit,
-            sanitized.summary_evidence_handles,
-            positioning_text=target_role or "",
+    summary_units: list[str] = []
+    summary_handles: list[str] = []
+    summary_handle_candidates = list(
+        dict.fromkeys([*sanitized.summary_evidence_handles, *all_handles])
+    )
+    for unit in _claim_units(sanitized.professional_summary):
+        supporting_handle = next(
+            (
+                handle
+                for handle in summary_handle_candidates
+                if handle in evidence_by_handle
+                and grounded(
+                    unit,
+                    [handle],
+                    positioning_text=target_role or "",
+                )
+            ),
+            None,
         )
-    ]
+        if supporting_handle is None:
+            continue
+        summary_units.append(unit)
+        summary_handles.append(supporting_handle)
     grounded_summary = " ".join(summary_units)
     if len(grounded_summary) < 20:
         raise ResumeWriterError("Resume writer returned no grounded professional summary")
 
     sanitized_data = sanitized.model_dump(mode="python")
     sanitized_data["professional_summary"] = grounded_summary
+    sanitized_data["summary_evidence_handles"] = list(dict.fromkeys(summary_handles))
     grounded_sections: list[dict[str, object]] = []
     for section in sanitized_data["sections"]:
         grounded_items: list[dict[str, object]] = []
@@ -1729,6 +1921,18 @@ def _sanitize_generated_draft(
             handles = item["evidence_handles"]
             if not set(handles) <= set(evidence_by_handle):
                 continue
+            allowed_categories = _SECTION_SUPPORT_CATEGORIES[section["key"]]
+            allowed_handles = [
+                handle
+                for handle in handles
+                if evidence_by_handle[handle].category in allowed_categories
+            ]
+            if not allowed_handles:
+                continue
+            # Disallowed handles must remain uncovered so deterministic completion can restore
+            # their facts in the correct section. Re-ground every field on this restricted set.
+            item["evidence_handles"] = allowed_handles
+            handles = allowed_handles
             item_support = support(handles)
             try:
                 _validate_title_grounding(item["title"], item_support)
@@ -2024,6 +2228,744 @@ def _structured_list(evidence: ResumeEvidence, key: str) -> list[str]:
     )
 
 
+def _supplemental_entries(evidence: ResumeEvidence, *keys: str) -> list[tuple[str, str]]:
+    raw_details = evidence.structured_value.get("supplemental_details")
+    if not isinstance(raw_details, Mapping):
+        return []
+    selected = set(keys)
+    entries: list[tuple[str, str]] = []
+    for field_name, raw_detail in raw_details.items():
+        if selected and field_name not in selected:
+            continue
+        raw_value = raw_detail.get("value") if isinstance(raw_detail, Mapping) else raw_detail
+        candidates = raw_value if isinstance(raw_value, list) else [raw_value]
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            cleaned = candidate.strip()[:1_000]
+            if cleaned:
+                entries.append((str(field_name), cleaned))
+    return list(dict.fromkeys(entries))
+
+
+def _supplemental_detail_values(raw_detail: object) -> list[str]:
+    raw_value = raw_detail.get("value") if isinstance(raw_detail, Mapping) else raw_detail
+    candidates = raw_value if isinstance(raw_value, list) else [raw_value]
+    return list(
+        dict.fromkeys(
+            candidate.strip()[:1_000]
+            for candidate in candidates
+            if isinstance(candidate, str) and candidate.strip()
+        )
+    )
+
+
+def _supplemental_strings(evidence: ResumeEvidence, *keys: str) -> list[str]:
+    return list(
+        dict.fromkeys(value for _field_name, value in _supplemental_entries(evidence, *keys))
+    )
+
+
+def _supplemental_string(evidence: ResumeEvidence, *keys: str) -> str | None:
+    return next(iter(_supplemental_strings(evidence, *keys)), None)
+
+
+def _required_supplemental_atoms(
+    evidence: tuple[ResumeEvidence, ...],
+) -> list[tuple[ResumeEvidence, str, str, str]]:
+    atoms: list[tuple[ResumeEvidence, str, str, str]] = []
+    for support in evidence:
+        for field_name, value in _supplemental_entries(support):
+            safe_value = _redact_resume_text(value).strip()[:4_000]
+            if not safe_value:
+                continue
+            safe_field_name = re.sub(r"[^a-z0-9_]", "_", field_name.casefold())[:80]
+            atoms.append(
+                (
+                    support,
+                    safe_field_name or "supplemental_detail",
+                    value,
+                    safe_value,
+                )
+            )
+            if len(atoms) >= 100:
+                return atoms
+    return atoms
+
+
+def _required_supplemental_evidence(
+    evidence: tuple[ResumeEvidence, ...],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "handle": support.handle,
+            "field": field_name,
+            "value": safe_value,
+        }
+        for support, field_name, _original_value, safe_value in _required_supplemental_atoms(
+            evidence
+        )
+    ]
+
+
+def _replace_verified_supplemental_values(
+    evidence: ResumeEvidence,
+    *,
+    replacements: list[tuple[str, str, str]],
+) -> ResumeEvidence:
+    by_field: dict[str, dict[str, str]] = {}
+    text_replacements: dict[str, str] = {}
+    for field_name, source_value, translated_value in replacements:
+        existing = text_replacements.get(source_value)
+        if existing is not None and existing != translated_value:
+            raise ResumeWriterError(
+                "Verified supplemental evidence has conflicting translations"
+            )
+        text_replacements[source_value] = translated_value
+        by_field.setdefault(field_name, {})[source_value] = translated_value
+
+    # Apply all atoms to free-form addenda/detail in one pass. Longest-first alternation prevents
+    # a shorter value from mutating an overlapping longer value before its verified replacement.
+    text_pattern = (
+        re.compile(
+            "|".join(
+                re.escape(source)
+                for source in sorted(text_replacements, key=len, reverse=True)
+            )
+        )
+        if text_replacements
+        else None
+    )
+
+    def replace_text(value: str) -> str:
+        if text_pattern is None:
+            return value
+        return text_pattern.sub(
+            lambda match: text_replacements[match.group(0)],
+            value,
+        )
+
+    def replace_exact_value(value: str, field_replacements: dict[str, str]) -> str:
+        stripped = value.strip()
+        translated = field_replacements.get(stripped)
+        if translated is None:
+            return value
+        start = len(value) - len(value.lstrip())
+        end = len(value.rstrip())
+        return f"{value[:start]}{translated}{value[end:]}"
+
+    structured_value = dict(evidence.structured_value)
+    raw_details = structured_value.get("supplemental_details")
+    if isinstance(raw_details, Mapping):
+        translated_details = dict(raw_details)
+        for raw_field_name, raw_detail in raw_details.items():
+            safe_field_name = re.sub(
+                r"[^a-z0-9_]",
+                "_",
+                str(raw_field_name).casefold(),
+            )[:80]
+            normalized_field_name = safe_field_name or "supplemental_detail"
+            field_replacements = by_field.get(normalized_field_name)
+            if not field_replacements:
+                continue
+            if isinstance(raw_detail, Mapping):
+                translated_detail = dict(raw_detail)
+                raw_value = raw_detail.get("value")
+                if isinstance(raw_value, list):
+                    translated_detail["value"] = [
+                        replace_exact_value(value, field_replacements)
+                        if isinstance(value, str)
+                        else value
+                        for value in raw_value
+                    ]
+                elif isinstance(raw_value, str):
+                    translated_detail["value"] = replace_exact_value(
+                        raw_value,
+                        field_replacements,
+                    )
+                translated_details[raw_field_name] = translated_detail
+            elif isinstance(raw_detail, str):
+                translated_details[raw_field_name] = replace_exact_value(
+                    raw_detail,
+                    field_replacements,
+                )
+        structured_value["supplemental_details"] = translated_details
+
+    raw_addenda = structured_value.get("supplemental_addenda")
+    if isinstance(raw_addenda, list):
+        translated_addenda: list[object] = []
+        for raw_addendum in raw_addenda:
+            if not isinstance(raw_addendum, Mapping):
+                translated_addenda.append(raw_addendum)
+                continue
+            translated_addendum = dict(raw_addendum)
+            if isinstance(text := raw_addendum.get("text"), str):
+                translated_addendum["text"] = replace_text(text)
+            translated_addenda.append(translated_addendum)
+        structured_value["supplemental_addenda"] = translated_addenda
+
+    detail = replace_text(evidence.detail) if evidence.detail else None
+    return replace(
+        evidence,
+        detail=detail,
+        structured_value=structured_value,
+    )
+
+
+def _replace_verified_supplemental_value(
+    evidence: ResumeEvidence,
+    *,
+    field_name: str,
+    source_value: str,
+    translated_value: str,
+) -> ResumeEvidence:
+    return _replace_verified_supplemental_values(
+        evidence,
+        replacements=[(field_name, source_value, translated_value)],
+    )
+
+
+def _verified_supplemental_evidence_overlay(
+    evidence: tuple[ResumeEvidence, ...],
+    required_supplemental_evidence: list[dict[str, str]],
+) -> tuple[ResumeEvidence, ...]:
+    atoms = _required_supplemental_atoms(evidence)
+    if len(atoms) != len(required_supplemental_evidence):
+        raise ResumeWriterError("Verified supplemental evidence no longer matches its source")
+    replacements_by_handle: dict[str, list[tuple[str, str, str]]] = {}
+    for atom, required in zip(atoms, required_supplemental_evidence, strict=True):
+        support, field_name, source_value, safe_value = atom
+        if required.get("handle") != support.handle or required.get("field") != field_name:
+            raise ResumeWriterError("Verified supplemental evidence changed its source scope")
+        translated_value = required.get("translated_value", "").strip()
+        if not translated_value or translated_value == safe_value:
+            continue
+        replacements_by_handle.setdefault(support.handle, []).append(
+            (field_name, source_value, translated_value)
+        )
+    return tuple(
+        _replace_verified_supplemental_values(
+            support,
+            replacements=replacements_by_handle.get(support.handle, []),
+        )
+        for support in evidence
+    )
+
+
+def verified_supplemental_evidence_overlay(
+    evidence: tuple[ResumeEvidence, ...],
+    *,
+    language: PreferredLanguage,
+    translations: list[ResumeVerifiedSupplementalTranslation],
+) -> tuple[ResumeEvidence, ...]:
+    """Rebuild a previously verified overlay, bound to the current evidence atoms.
+
+    This is the persistence boundary used by the workspace API.  Unlike the private immediate
+    overlay above, it accepts no source text from metadata: every source value is rediscovered
+    from the current evidence, redacted, hashed, and bound to the stored pair id.  Every foreign
+    supplemental atom must have exactly one proof.
+    """
+
+    atoms = _required_supplemental_atoms(evidence)
+    expected_indexes = {
+        value_index
+        for value_index, (_support, _field_name, original_value, _safe_value) in enumerate(atoms)
+        if _requires_translation(original_value, language)
+    }
+    by_index: dict[int, ResumeVerifiedSupplementalTranslation] = {}
+    for translation in translations:
+        if translation.value_index in by_index:
+            raise ResumeWriterError("Verified supplemental evidence duplicated a source value")
+        by_index[translation.value_index] = translation
+    if set(by_index) != expected_indexes:
+        raise ResumeWriterError("Verified supplemental evidence no longer matches its source")
+
+    replacements_by_handle: dict[str, list[tuple[str, str, str]]] = {}
+    for value_index in sorted(expected_indexes):
+        if value_index >= len(atoms):
+            raise ResumeWriterError("Verified supplemental evidence changed its source index")
+        support, field_name, source_value, safe_value = atoms[value_index]
+        translation = by_index[value_index]
+        source_hash = sha256(safe_value.encode("utf-8")).hexdigest()
+        if (
+            translation.handle != support.handle
+            or translation.field != field_name
+            or translation.source_hash != source_hash
+            or translation.verdict != "pass"
+        ):
+            raise ResumeWriterError("Verified supplemental evidence changed its source scope")
+        translated_value = translation.translated_value.strip()
+        if (
+            not translated_value
+            or _redact_resume_text(translated_value).strip() != translated_value
+            or not _uses_requested_language(translated_value, language, allow_short=True)
+        ):
+            raise ResumeWriterError("Verified supplemental evidence has an unsafe translation")
+        expected_pair_id = _supplemental_translation_pair_id(
+            handle=support.handle,
+            field_name=field_name,
+            value_index=value_index,
+            source_value=safe_value,
+            translated_value=translated_value,
+        )
+        if translation.pair_id != expected_pair_id:
+            raise ResumeWriterError("Verified supplemental evidence changed its translation")
+        _validate_supplemental_translation_preservation(safe_value, translated_value)
+        _validate_inflated_roles(translated_value, safe_value)
+        _validate_high_risk_claims(translated_value, safe_value)
+        translated_numbers = {_ascii_number(number) for number in _numbers(translated_value)}
+        source_numbers = {_ascii_number(number) for number in _numbers(safe_value)}
+        if translated_numbers - source_numbers:
+            raise ResumeWriterError("Verified supplemental evidence invented a number")
+        replacements_by_handle.setdefault(support.handle, []).append(
+            (field_name, source_value, translated_value)
+        )
+    return tuple(
+        _replace_verified_supplemental_values(
+            support,
+            replacements=replacements_by_handle.get(support.handle, []),
+        )
+        for support in evidence
+    )
+
+
+def _compact_context_metadata(value: str) -> bool:
+    return len(value) <= 120 and len(value.split()) <= 8 and not re.search(
+        r"[,.!?;\n\u060c\u061b\u061f]",
+        value,
+    )
+
+
+def _without_supplemental_value(
+    evidence: ResumeEvidence,
+    removed_value: str,
+) -> ResumeEvidence:
+    structured_value = dict(evidence.structured_value)
+    raw_details = structured_value.get("supplemental_details")
+    remaining_details: dict[object, object] = {}
+    removed_fields: set[str] = set()
+    if isinstance(raw_details, Mapping):
+        for field_name, raw_detail in raw_details.items():
+            raw_value = raw_detail.get("value") if isinstance(raw_detail, Mapping) else raw_detail
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            remaining_values = [
+                value
+                for value in values
+                if not (isinstance(value, str) and value.strip() == removed_value)
+            ]
+            if len(remaining_values) != len(values):
+                removed_fields.add(str(field_name))
+            if not remaining_values:
+                continue
+            if isinstance(raw_value, list):
+                if isinstance(raw_detail, Mapping):
+                    updated_detail = dict(raw_detail)
+                    updated_detail["value"] = remaining_values
+                    remaining_details[field_name] = updated_detail
+                else:
+                    remaining_details[field_name] = remaining_values
+            else:
+                remaining_details[field_name] = raw_detail
+        if remaining_details:
+            structured_value["supplemental_details"] = remaining_details
+        else:
+            structured_value.pop("supplemental_details", None)
+    raw_addenda = structured_value.get("supplemental_addenda")
+    detail_replacements: list[tuple[str, str]] = []
+    if isinstance(raw_addenda, list):
+        remaining_addenda = []
+        for addendum in raw_addenda:
+            if not isinstance(addendum, Mapping):
+                remaining_addenda.append(addendum)
+                continue
+            addendum_text = str(addendum.get("text") or "").strip()
+            raw_requested_fields = addendum.get("requested_fields")
+            requested_fields = (
+                [str(field_name) for field_name in raw_requested_fields]
+                if isinstance(raw_requested_fields, list)
+                else []
+            )
+            if not removed_fields.intersection(requested_fields):
+                if addendum_text == removed_value:
+                    detail_replacements.append((addendum_text, ""))
+                    continue
+                remaining_addenda.append(addendum)
+                continue
+
+            rebuilt_values: list[str] = []
+            rebuilt_fields: list[str] = []
+            for field_name in requested_fields:
+                field_values = _supplemental_detail_values(
+                    remaining_details.get(field_name)
+                )
+                if not field_values:
+                    continue
+                rebuilt_fields.append(field_name)
+                rebuilt_values.extend(field_values)
+            rebuilt_text = "\n".join(dict.fromkeys(rebuilt_values))
+            detail_replacements.append((addendum_text, rebuilt_text))
+            if not rebuilt_text:
+                continue
+            rebuilt_addendum = dict(addendum)
+            rebuilt_addendum["text"] = rebuilt_text
+            rebuilt_addendum["requested_fields"] = rebuilt_fields
+            # The prompt that elicited a value is navigation context, not supporting evidence.
+            # Exclude it from this scoped copy so it cannot accidentally reintroduce the atom.
+            rebuilt_addendum.pop("question", None)
+            remaining_addenda.append(rebuilt_addendum)
+        if remaining_addenda:
+            structured_value["supplemental_addenda"] = remaining_addenda
+        else:
+            structured_value.pop("supplemental_addenda", None)
+    detail = evidence.detail or ""
+    for original_text, rebuilt_text in detail_replacements:
+        if not original_text:
+            continue
+        flexible_pattern = r"\s+".join(
+            re.escape(part) for part in original_text.split()
+        )
+        detail = re.sub(
+            flexible_pattern,
+            lambda _match, replacement=rebuilt_text: replacement,
+            detail,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    detail = re.sub(
+        re.escape(removed_value),
+        "",
+        detail,
+        flags=re.IGNORECASE,
+    )
+    detail = "\n".join(line.strip() for line in detail.splitlines() if line.strip())
+    return replace(
+        evidence,
+        detail=detail or None,
+        structured_value=structured_value,
+    )
+
+
+def _candidate_depends_on_supplemental(
+    candidate: str,
+    evidence: ResumeEvidence,
+    supplemental_value: str,
+) -> bool:
+    try:
+        validate_claim_grounding(candidate, [evidence.handle], (evidence,))
+    except ResumeWriterError:
+        return False
+    try:
+        validate_claim_grounding(
+            candidate,
+            [evidence.handle],
+            (_without_supplemental_value(evidence, supplemental_value),),
+        )
+    except ResumeWriterError:
+        return True
+    return False
+
+
+def _requires_translation(value: str, language: PreferredLanguage) -> bool:
+    arabic_letters, latin_letters = _script_letter_counts(value)
+    if language is PreferredLanguage.EN:
+        return arabic_letters > 0
+    if not latin_letters:
+        return False
+    if not arabic_letters:
+        return True
+    latin_tokens = re.findall(r"[A-Za-z][A-Za-z0-9+#._-]*", value)
+    # Mixed Arabic evidence commonly retains product and organization identifiers. Translate only
+    # when it also contains substantive Latin prose; proper-name tokens remain unchanged.
+    return any(
+        token[:1].islower() and not token.isupper()
+        for token in latin_tokens
+    )
+
+
+def _supplemental_translation_pair_id(
+    *,
+    handle: str,
+    field_name: str,
+    value_index: int,
+    source_value: str,
+    translated_value: str,
+) -> str:
+    serialized = json.dumps(
+        [handle, field_name, value_index, source_value, translated_value],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+_TRANSLATION_SCOPE_SPLIT_PATTERN = re.compile(
+    r"[,\u060c;\u061b.!?\u061f\r\n]+|"
+    r"\s+(?=(?:\u0648\s*)?(?:\u0644\u064a\u0633|\u0644\u064a\u0633\u062a|\u0644\u0645|\u0644\u0646|\u0644\u0627)\b)|"
+    r"\s+(?=(?:and\s+)?(?:not|never|without|no)\b)",
+    re.IGNORECASE,
+)
+
+
+def _translation_scope_fragments(value: str) -> list[str]:
+    return [
+        fragment.strip(" -\u2013\u2014,\u060c;\u061b")
+        for fragment in _TRANSLATION_SCOPE_SPLIT_PATTERN.split(value)
+        if fragment.strip()
+    ]
+
+
+def _required_latin_entities(value: str) -> set[str]:
+    has_arabic_context = bool(re.search(r"[\u0600-\u06ff]", value))
+    entities: set[str] = set()
+    for match in _CAPITALIZED_LATIN_PATTERN.finditer(value):
+        prefix = value[: match.start()].rstrip()
+        raw_entity = match.group(0)
+        entity = _canonical_word(raw_entity)
+        starts_sentence = not prefix or prefix[-1:] in {".", "!", "?", ":", ";", "-", "\n"}
+        identifier_like = (
+            raw_entity.isupper()
+            or any(character.isdigit() for character in raw_entity)
+            or any(character.isupper() for character in raw_entity[1:])
+        )
+        # An ordinary opening word in an English sentence is ambiguous, while a Latin token at
+        # the start of otherwise Arabic evidence (for example, Aramco) is an explicit entity.
+        if starts_sentence and not identifier_like and not has_arabic_context:
+            continue
+        entities.add(entity)
+    return entities
+
+
+def _source_bilingual_groups(value: str) -> set[frozenset[str]]:
+    groups: set[frozenset[str]] = set()
+    for word in _meaningful_words(value):
+        variants = _word_variants(word)
+        if not word.isascii():
+            for variant in tuple(variants):
+                for suffix in ("\u064a\u0629", "\u0627\u062a", "\u0648\u0646", "\u064a\u0646"):
+                    if variant.endswith(suffix) and len(variant) > len(suffix) + 2:
+                        variants.add(variant[: -len(suffix)])
+        groups.update(
+            group
+            for variant in variants
+            if (group := _BILINGUAL_SEMANTIC_INDEX.get(variant)) is not None
+        )
+    return groups
+
+
+def _validate_supplemental_semantic_scope(
+    source_value: str,
+    translated_value: str,
+) -> None:
+    source_groups_by_polarity: dict[bool, set[frozenset[str]]] = {
+        False: set(),
+        True: set(),
+    }
+    translated_by_polarity: dict[bool, dict[str, object]] = {
+        False: {"words": set(), "numbers": set()},
+        True: {"words": set(), "numbers": set()},
+    }
+    for fragment in _translation_scope_fragments(translated_value):
+        bucket = translated_by_polarity[_contains_negation(fragment)]
+        cast(set[str], bucket["words"]).update(_meaningful_words(fragment))
+        cast(set[str], bucket["numbers"]).update(
+            _ascii_number(number) for number in _numbers(fragment)
+        )
+
+    for fragment in _translation_scope_fragments(source_value):
+        groups = _source_bilingual_groups(fragment)
+        source_groups_by_polarity[_contains_negation(fragment)].update(groups)
+        entities = _required_latin_entities(fragment)
+        numbers = {_ascii_number(number) for number in _numbers(fragment)}
+        if not groups and not entities and not numbers:
+            continue
+        bucket = translated_by_polarity[_contains_negation(fragment)]
+        translated_words = cast(set[str], bucket["words"])
+        translated_numbers = cast(set[str], bucket["numbers"])
+        groups_preserved = all(
+            any(_word_supported(word, set(group)) for word in translated_words)
+            for group in groups
+        )
+        if (
+            not groups_preserved
+            or not entities <= translated_words
+            or not numbers <= translated_numbers
+        ):
+            raise ResumeWriterError(
+                "Supplemental translation did not preserve every semantic scope"
+            )
+
+    for fragment in _translation_scope_fragments(translated_value):
+        polarity = _contains_negation(fragment)
+        if not _source_bilingual_groups(fragment) <= source_groups_by_polarity[polarity]:
+            raise ResumeWriterError(
+                "Supplemental translation introduced a different semantic scope"
+            )
+
+
+def _validate_supplemental_translation_preservation(
+    source_value: str,
+    translated_value: str,
+) -> None:
+    if _contains_negation(source_value) != _contains_negation(translated_value):
+        raise ResumeWriterError("Supplemental translation changed a required negation")
+    source_numbers = {_ascii_number(value) for value in _numbers(source_value)}
+    translated_numbers = {_ascii_number(value) for value in _numbers(translated_value)}
+    if source_numbers - translated_numbers:
+        raise ResumeWriterError("Supplemental translation dropped a required number")
+    _validate_number_qualifier_preservation(translated_value, source_value)
+
+    translated_words = {_canonical_word(value) for value in _meaningful_words(translated_value)}
+    if not _required_latin_entities(source_value) <= translated_words:
+        raise ResumeWriterError("Supplemental translation dropped a required named entity")
+    _validate_supplemental_semantic_scope(source_value, translated_value)
+
+
+def _foreign_supplemental_has_grounded_translation(
+    evidence: ResumeEvidence,
+    language: PreferredLanguage,
+    provider_candidates: list[str],
+) -> bool:
+    return not _missing_foreign_supplemental_fields(
+        evidence,
+        language,
+        provider_candidates,
+    )
+
+
+def _missing_foreign_supplemental_fields(
+    evidence: ResumeEvidence,
+    language: PreferredLanguage,
+    provider_candidates: list[str],
+) -> list[str]:
+    missing_fields: list[str] = []
+    for field_name, supplemental_value in dict.fromkeys(
+        _supplemental_entries(evidence)
+    ):
+        if not _requires_translation(supplemental_value, language):
+            continue
+        if any(
+            _uses_requested_language(candidate, language, allow_short=True)
+            and _candidate_depends_on_supplemental(candidate, evidence, supplemental_value)
+            for candidate in provider_candidates
+        ):
+            continue
+        safe_field_name = re.sub(r"[^a-z0-9_]", "_", field_name.casefold())[:80]
+        missing_fields.append(safe_field_name or "supplemental_detail")
+    return list(dict.fromkeys(missing_fields))
+
+
+def _narrative_entries(evidence: ResumeEvidence) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for field_name in ("responsibilities", "outcomes", "tools"):
+        raw_value = evidence.structured_value.get(field_name)
+        candidates = raw_value if isinstance(raw_value, list) else [raw_value]
+        entries.extend(
+            (field_name, candidate.strip()[:1_000])
+            for candidate in candidates
+            if isinstance(candidate, str) and candidate.strip()
+        )
+    if (
+        not any(field_name in {"responsibilities", "outcomes"} for field_name, _ in entries)
+        and evidence.category in {"experience", "project"}
+        and evidence.detail
+    ):
+        entries.append(("detail", evidence.detail.strip()[:1_000]))
+    return list(dict.fromkeys(entries))
+
+
+def _without_text_atom(value: str | None, removed_value: str) -> str | None:
+    if not value:
+        return value
+    atom_pattern = r"\s+".join(re.escape(part) for part in removed_value.split())
+    if not atom_pattern:
+        return value
+    cleaned = re.sub(
+        rf"(?<!\w){atom_pattern}(?!\w)",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.;:!?\u060c\u061b\u061f])", r"\1", cleaned)
+    cleaned = cleaned.strip(" -\u2013\u2014,.;:!?\u060c\u061b\u061f")
+    return cleaned or None
+
+
+def _without_narrative_value(
+    evidence: ResumeEvidence,
+    removed_value: str,
+) -> ResumeEvidence:
+    structured_value = dict(evidence.structured_value)
+    for field_name in ("responsibilities", "outcomes", "tools"):
+        raw_value = structured_value.get(field_name)
+        if isinstance(raw_value, list):
+            remaining_values: list[object] = []
+            for value in raw_value:
+                if not isinstance(value, str):
+                    remaining_values.append(value)
+                    continue
+                if stripped := _without_text_atom(value, removed_value):
+                    remaining_values.append(stripped)
+            if remaining_values:
+                structured_value[field_name] = remaining_values
+            else:
+                structured_value.pop(field_name, None)
+        elif isinstance(raw_value, str):
+            stripped = _without_text_atom(raw_value, removed_value)
+            if stripped:
+                structured_value[field_name] = stripped
+            else:
+                structured_value.pop(field_name, None)
+    return replace(
+        evidence,
+        detail=_without_text_atom(evidence.detail, removed_value),
+        source_excerpt=_without_text_atom(evidence.source_excerpt, removed_value),
+        structured_value=structured_value,
+    )
+
+
+def _candidate_depends_on_narrative(
+    candidate: str,
+    evidence: ResumeEvidence,
+    narrative_value: str,
+) -> bool:
+    try:
+        validate_claim_grounding(candidate, [evidence.handle], (evidence,))
+    except ResumeWriterError:
+        return False
+    try:
+        validate_claim_grounding(
+            candidate,
+            [evidence.handle],
+            (_without_narrative_value(evidence, narrative_value),),
+        )
+    except ResumeWriterError:
+        return True
+    return False
+
+
+def _foreign_narrative_has_grounded_translation(
+    evidence: ResumeEvidence,
+    language: PreferredLanguage,
+    provider_candidates: list[str],
+) -> bool:
+    foreign_values = list(
+        dict.fromkeys(
+            value
+            for _field_name, value in _narrative_entries(evidence)
+            if _requires_translation(value, language)
+        )
+    )
+    return all(
+        any(
+            _uses_requested_language(candidate, language, allow_short=True)
+            and _candidate_depends_on_narrative(candidate, evidence, narrative_value)
+            for candidate in provider_candidates
+        )
+        for narrative_value in foreign_values
+    )
+
+
 def resume_evidence_coursework(evidence: ResumeEvidence) -> list[str]:
     coursework = _structured_list(evidence, "coursework")
     if coursework or not evidence.source_excerpt:
@@ -2083,6 +3025,9 @@ def _source_item_bullets(evidence: ResumeEvidence) -> list[str]:
         bullets.append(f"{label}: {coursework_text}")
     if not bullets and evidence.category in {"experience", "project"} and evidence.detail:
         bullets.append(evidence.detail.strip()[:1_000])
+    for supplemental in _supplemental_strings(evidence):
+        if not _bullet_covers_source(supplemental, bullets):
+            bullets.append(supplemental)
     return list(dict.fromkeys(bullet for bullet in bullets if bullet))
 
 
@@ -2151,7 +3096,7 @@ def _remove_redundant_metadata_bullets(
     return result
 
 
-_SOURCE_SEGMENT_HANDLE_PATTERN = re.compile(r"^segment_(\d+)(?:__\d+)?$")
+_SOURCE_SEGMENT_HANDLE_PATTERN = re.compile(r"^segment_(\d+)(?:__(\d+))?$")
 
 
 def _evidence_in_source_order(
@@ -2165,22 +3110,39 @@ def _evidence_in_source_order(
 
     def source_position(
         indexed: tuple[int, ResumeEvidence],
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int]:
         original_index, item = indexed
         positions = [
-            int(match.group(1))
+            (
+                int(match.group(1)),
+                int(match.group(2)) if match.group(2) is not None else None,
+            )
             for handle in item.source_handles
             if (match := _SOURCE_SEGMENT_HANDLE_PATTERN.fullmatch(handle)) is not None
         ]
         if positions:
+            segment_position, record_position = min(
+                positions,
+                key=lambda value: (
+                    value[0],
+                    value[1] if value[1] is not None else -1,
+                ),
+            )
+            excerpt_key = _presentation_key(item.source_excerpt or "")
+            label_key = _presentation_key(item.label)
+            label_position = excerpt_key.find(label_key) if label_key else -1
             return (
                 group_positions[item.source_group],
                 0,
-                min(positions),
+                segment_position,
+                record_position if record_position is not None else -1,
+                label_position if label_position >= 0 else original_index,
                 original_index,
             )
         return (
             group_positions[item.source_group],
+            1,
+            original_index,
             1,
             original_index,
             original_index,
@@ -2422,23 +3384,73 @@ def _item_section_key(
 
 def _evidence_item_fields(
     evidence: ResumeEvidence,
+    language: PreferredLanguage,
 ) -> tuple[str | None, str | None, str | None]:
     if evidence.category == "education":
-        organization = _structured_string(evidence, "institution")
+        organization = _structured_string(evidence, "institution") or _supplemental_string(
+            evidence, "institution"
+        )
+        supplemental_date = _supplemental_string(
+            evidence,
+            "graduation_date",
+            "date_range",
+            "year",
+        )
     elif evidence.category == "certification":
-        organization = _structured_string(evidence, "issuer")
+        organization = _structured_string(evidence, "issuer") or _supplemental_string(
+            evidence, "issuer"
+        )
+        supplemental_date = _supplemental_string(evidence, "year", "date_range")
     elif evidence.category == "language":
-        organization = _structured_string(evidence, "proficiency")
+        organization = _structured_string(evidence, "proficiency") or _supplemental_string(
+            evidence, "proficiency"
+        )
+        supplemental_date = None
     else:
-        organization = _structured_string(evidence, "organization")
+        organization = _structured_string(evidence, "organization") or _supplemental_string(
+            evidence, "organization"
+        )
+        context = _supplemental_string(evidence, "organization_or_context")
+        if (
+            not organization
+            and context
+            and _uses_requested_language(context, language, allow_short=True)
+            and _compact_context_metadata(context)
+        ):
+            organization = context
+        supplemental_date = _supplemental_string(evidence, "date_range", "year")
     return (
         organization,
-        _structured_string(evidence, "date_range"),
-        _structured_string(evidence, "location"),
+        _structured_string(evidence, "date_range") or supplemental_date,
+        _structured_string(evidence, "location")
+        or _supplemental_string(evidence, "location"),
     )
 
 
 _EXACT_ITEM_DEDUP_SECTION_KEYS = frozenset({"skill", "certification", "language"})
+
+
+def _provider_item_duplicates_source_record(
+    section_key: ResumeDraftSectionKey,
+    item: ResumeDraftItem,
+    evidence_by_handle: dict[str, ResumeEvidence],
+) -> bool:
+    """Identify a full source record repeated as an optional cross-section item.
+
+    A genuinely distinct achievement may cite an experience handle, but an achievement whose
+    title is the source record's own title is just a second rendering of that record.  Completion
+    drops that copy and restores the handle once in its canonical section.
+    """
+
+    title_key = _presentation_key(item.title)
+    if section_key != "achievement" or not title_key:
+        return False
+    return any(
+        (support := evidence_by_handle.get(handle)) is not None
+        and _evidence_section_key(support) != section_key
+        and _presentation_key(support.label) == title_key
+        for handle in item.evidence_handles
+    )
 
 
 def _merge_compatible_duplicate_items(
@@ -2539,6 +3551,12 @@ def _complete_draft_from_evidence(
                 item,
                 evidence_by_handle,
             )
+            if _provider_item_duplicates_source_record(
+                normalized_key,
+                item,
+                evidence_by_handle,
+            ):
+                continue
             if (
                 normalized_key in {"experience", "trading_experience", "project"}
                 and len(supporting_evidence) > 1
@@ -2550,11 +3568,46 @@ def _complete_draft_from_evidence(
             date_range = item.date_range
             location = item.location
             bullets = list(item.bullets)
+            provider_candidates = [
+                value
+                for value in (
+                    item.title,
+                    item.organization,
+                    item.date_range,
+                    item.location,
+                    *item.bullets,
+                )
+                if value
+            ]
             foreign_language_gaps = 0
             for support in supporting_evidence:
+                supplemental_source_values = set(_supplemental_strings(support))
+                narrative_source_values = {
+                    value for _field_name, value in _narrative_entries(support)
+                }
                 support_organization, support_date, support_location = _evidence_item_fields(
-                    support
+                    support,
+                    language,
                 )
+                missing_supplemental_fields = _missing_foreign_supplemental_fields(
+                    support,
+                    language,
+                    provider_candidates,
+                )
+                if missing_supplemental_fields:
+                    raise ResumeWriterError(
+                        "Resume writer omitted confirmed translated supplemental evidence "
+                        f"(evidence_handle={support.handle}; "
+                        f"fields={','.join(missing_supplemental_fields)})"
+                    )
+                if not _foreign_narrative_has_grounded_translation(
+                    support,
+                    language,
+                    provider_candidates,
+                ):
+                    raise ResumeWriterError(
+                        "Resume writer omitted a confirmed translated narrative detail"
+                    )
                 organization = organization or support_organization
                 date_range = date_range or support_date
                 location = location or support_location
@@ -2581,7 +3634,14 @@ def _complete_draft_from_evidence(
                         else:
                             bullets[replacement_index] = source_bullet
                     else:
-                        foreign_language_gaps += 1
+                        # Foreign supplemental values may be represented by translated item
+                        # metadata (including the title), which the scoped grounding check above
+                        # has already required. They are not missing responsibility bullets.
+                        if (
+                            source_bullet not in supplemental_source_values
+                            and source_bullet not in narrative_source_values
+                        ):
+                            foreign_language_gaps += 1
             bullets = _remove_redundant_metadata_bullets(
                 normalized_key,
                 title=item.title,
@@ -2606,7 +3666,12 @@ def _complete_draft_from_evidence(
                     }
                 )
             )
-            covered_handles.update(item.evidence_handles)
+            covered_handles.update(
+                handle
+                for handle in item.evidence_handles
+                if (support := evidence_by_handle.get(handle)) is not None
+                and _evidence_section_key(support) == normalized_key
+            )
 
     used_ids = {
         item.id
@@ -2619,8 +3684,6 @@ def _complete_draft_from_evidence(
         section_key = _evidence_section_key(support)
         bullets = _source_item_bullets(support)
         if section_key in {"experience", "trading_experience", "project"}:
-            if not bullets:
-                continue
             if any(
                 not _uses_requested_language(bullet, language, allow_short=True)
                 for bullet in bullets
@@ -2628,7 +3691,7 @@ def _complete_draft_from_evidence(
                 raise ResumeWriterError(
                     "Resume writer omitted a supported narrative record from the requested language"
                 )
-        organization, date_range, location = _evidence_item_fields(support)
+        organization, date_range, location = _evidence_item_fields(support, language)
         base_id = f"{section_key}_{support.handle[-12:]}".casefold()
         item_id = re.sub(r"[^a-z0-9_]", "_", base_id).strip("_")[:80] or "resume_item"
         suffix = 2
@@ -2727,7 +3790,7 @@ def build_evidence_fallback_draft(
             break
         if summary is None:
             continue
-        organization, date_range, location = _evidence_item_fields(support)
+        organization, date_range, location = _evidence_item_fields(support, language)
         item_id = re.sub(
             r"[^a-z0-9_]",
             "_",
@@ -3606,6 +4669,7 @@ class ResumeWriterProvider(ABC):
         conversation: list[ResumeConversationMessage | dict[str, str]] | None = None,
         required_category: ResumeWriterCategory | None = None,
         max_questions: int = 8,
+        gap: dict[str, object] | None = None,
     ) -> list[ResumeQuestionRead]:
         raise NotImplementedError
 
@@ -3713,6 +4777,7 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
         conversation: list[ResumeConversationMessage | dict[str, str]] | None = None,
         required_category: ResumeWriterCategory | None = None,
         max_questions: int = 8,
+        gap: dict[str, object] | None = None,
     ) -> list[ResumeQuestionRead]:
         safe_conversation: list[dict[str, str]] = []
         for raw_message in (conversation or [])[-12:]:
@@ -3728,6 +4793,34 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
             if safe_content:
                 safe_conversation.append({"role": message.role, "content": safe_content})
         bounded_max_questions = max(1, min(max_questions, 8))
+        safe_gap: dict[str, object] | None = None
+        if gap is not None:
+            gap_category = str(gap.get("category") or "")
+            if gap_category not in RESUME_SECTION_ORDER:
+                raise ResumeWriterError("Resume writer received an invalid assessment gap")
+            if required_category is not None and gap_category != required_category:
+                raise ResumeWriterError("Resume writer received a gap for the wrong section")
+            raw_fields = gap.get("requested_fields")
+            requested_fields = (
+                [str(value).strip()[:80] for value in raw_fields[:8] if str(value).strip()]
+                if isinstance(raw_fields, list)
+                else []
+            )
+            if not requested_fields:
+                raise ResumeWriterError("Resume writer received an assessment gap without fields")
+            safe_gap = {
+                "key": str(gap.get("key") or "")[:180],
+                "category": gap_category,
+                "requested_fields": requested_fields,
+                "reason": _redact_resume_text(str(gap.get("reason") or "")).strip()[:500],
+                "evidence_handles": [
+                    str(value).strip()[:80]
+                    for value in (gap.get("evidence_handles") or [])[:12]
+                    if str(value).strip()
+                ]
+                if isinstance(gap.get("evidence_handles"), list)
+                else [],
+            }
         parsed = await self._structured_response(
             schema=_GeneratedQuestionSet,
             schema_name="resume_follow_up_questions",
@@ -3742,6 +4835,7 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
                 "section_order": list(RESUME_SECTION_ORDER),
                 "required_category": required_category,
                 "max_questions": bounded_max_questions,
+                "gap": safe_gap,
             },
             max_tokens=min(self._max_tokens, 2_000),
             model_name=self.interview_model,
@@ -3763,6 +4857,211 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
             raise ResumeWriterError("Resume writer returned no question for the required section")
         return questions
 
+    async def _translate_required_supplemental_evidence(
+        self,
+        *,
+        language: PreferredLanguage,
+        evidence: tuple[ResumeEvidence, ...],
+    ) -> list[dict[str, str]]:
+        atoms = _required_supplemental_atoms(evidence)
+        required = [
+            {
+                "handle": support.handle,
+                "field": field_name,
+                "value": safe_value,
+                "translated_value": safe_value,
+            }
+            for support, field_name, _original_value, safe_value in atoms
+        ]
+        foreign_atoms = [
+            (value_index, support, field_name, safe_value)
+            for value_index, (support, field_name, original_value, safe_value) in enumerate(
+                atoms
+            )
+            if safe_value and _requires_translation(original_value, language)
+        ]
+        if not foreign_atoms:
+            return _VerifiedSupplementalTranslations(required)
+
+        translation_payload = [
+            {
+                "handle": support.handle,
+                "field": field_name,
+                "value_index": value_index,
+                "value": safe_value,
+            }
+            for value_index, support, field_name, safe_value in foreign_atoms
+        ]
+        validation_error: ResumeWriterError | None = None
+        for attempt in range(2):
+            instructions = SUPPLEMENTAL_TRANSLATION_SYSTEM_INSTRUCTIONS
+            if validation_error is not None:
+                instructions += (
+                    "\n\nThe prior translations failed deterministic validation: "
+                    f"{validation_error}. Return every entry in the same order and translate its "
+                    "complete meaning literally, including negation, numbers, and proper nouns."
+                )
+            try:
+                parsed = await self._structured_response(
+                    schema=_GeneratedSupplementalTranslationSet,
+                    schema_name="resume_supplemental_translations",
+                    system_instructions=instructions,
+                    payload={
+                        "language": language.value,
+                        "required_supplemental_evidence": translation_payload,
+                    },
+                    max_tokens=min(self._max_tokens, 2_000),
+                    model_name=self.model,
+                )
+                if not isinstance(parsed, _GeneratedSupplementalTranslationSet):
+                    raise ResumeWriterError(
+                        "Resume writer returned no usable supplemental translations"
+                    )
+                if len(parsed.translations) != len(foreign_atoms):
+                    raise ResumeWriterError(
+                        "Supplemental translation omitted a required value"
+                    )
+                translated_values: list[tuple[int, str]] = []
+                verification_payload: list[dict[str, object]] = []
+                expected_pair_ids: list[str] = []
+                for translation, atom in zip(
+                    parsed.translations,
+                    foreign_atoms,
+                    strict=True,
+                ):
+                    value_index, support, field_name, safe_value = atom
+                    if (
+                        translation.handle != support.handle
+                        or translation.field != field_name
+                        or translation.value_index != value_index
+                    ):
+                        raise ResumeWriterError(
+                            "Supplemental translation changed a required handle, field, "
+                            "or value index"
+                        )
+                    translated_value = translation.translated_value.strip()
+                    if _redact_resume_text(translated_value).strip() != translated_value:
+                        raise ResumeWriterError(
+                            "Supplemental translation included private contact data"
+                        )
+                    if not _uses_requested_language(
+                        translated_value,
+                        language,
+                        allow_short=True,
+                    ):
+                        raise ResumeWriterError(
+                            "Supplemental translation used the wrong output language"
+                        )
+                    _validate_supplemental_translation_preservation(
+                        safe_value,
+                        translated_value,
+                    )
+                    _validate_inflated_roles(translated_value, safe_value)
+                    _validate_high_risk_claims(translated_value, safe_value)
+                    translated_numbers = {
+                        _ascii_number(number) for number in _numbers(translated_value)
+                    }
+                    source_numbers = {
+                        _ascii_number(number) for number in _numbers(safe_value)
+                    }
+                    if translated_numbers - source_numbers:
+                        raise ResumeWriterError(
+                            "Supplemental translation invented a number"
+                        )
+                    pair_id = _supplemental_translation_pair_id(
+                        handle=support.handle,
+                        field_name=field_name,
+                        value_index=value_index,
+                        source_value=safe_value,
+                        translated_value=translated_value,
+                    )
+                    expected_pair_ids.append(pair_id)
+                    verification_payload.append(
+                        {
+                            "pair_id": pair_id,
+                            "handle": support.handle,
+                            "field": field_name,
+                            "value_index": value_index,
+                            "source_value": safe_value,
+                            "translated_value": translated_value,
+                        }
+                    )
+                    translated_values.append((value_index, translated_value))
+                verified = await self._structured_response(
+                    schema=_GeneratedSupplementalTranslationVerificationSet,
+                    schema_name="resume_supplemental_translation_verification",
+                    system_instructions=(
+                        SUPPLEMENTAL_TRANSLATION_VERIFICATION_SYSTEM_INSTRUCTIONS
+                    ),
+                    payload={
+                        "language": language.value,
+                        "translation_pairs": verification_payload,
+                    },
+                    max_tokens=min(self._max_tokens, 2_000),
+                    model_name=self.model,
+                )
+                if not isinstance(
+                    verified,
+                    _GeneratedSupplementalTranslationVerificationSet,
+                ) or len(verified.verifications) != len(foreign_atoms):
+                    raise ResumeWriterError(
+                        "Supplemental translation verification omitted a required value"
+                    )
+                for verdict, expected_pair_id in zip(
+                    verified.verifications,
+                    expected_pair_ids,
+                    strict=True,
+                ):
+                    if verdict.pair_id != expected_pair_id:
+                        raise ResumeWriterError(
+                            "Supplemental translation verifier changed a required pair"
+                        )
+                    if verdict.verdict != "pass" or verdict.issue_codes:
+                        raise ResumeWriterError(
+                            "Supplemental translation failed independent semantic verification "
+                            f"(pair_id={expected_pair_id})"
+                        )
+                for value_index, translated_value in translated_values:
+                    required[value_index]["translated_value"] = translated_value
+                proofs = [
+                    ResumeVerifiedSupplementalTranslation(
+                        handle=support.handle,
+                        field=field_name,
+                        value_index=value_index,
+                        source_hash=sha256(safe_value.encode("utf-8")).hexdigest(),
+                        translated_value=translated_value,
+                        pair_id=pair_id,
+                        verdict="pass",
+                    )
+                    for (
+                        value_index,
+                        support,
+                        field_name,
+                        safe_value,
+                    ), (_, translated_value), pair_id in zip(
+                        foreign_atoms,
+                        translated_values,
+                        expected_pair_ids,
+                        strict=True,
+                    )
+                ]
+                return _VerifiedSupplementalTranslations(required, proofs=proofs)
+            except ResumeWriterTransportError:
+                raise
+            except ValidationError:
+                validation_error = ResumeWriterError(
+                    "Supplemental translation returned invalid structured output"
+                )
+            except ResumeWriterError as exc:
+                validation_error = exc
+            if attempt == 1:
+                raise ResumeWriterOutputError(
+                    "Resume writer returned no usable supplemental translations"
+                ) from validation_error
+        raise ResumeWriterOutputError(
+            "Resume writer returned no usable supplemental translations"
+        )
+
     async def generate_draft(
         self,
         *,
@@ -3775,12 +5074,33 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
         all_evidence = (*evidence, *answer_evidence)
         if not all_evidence:
             raise ResumeWriterError("Resume writer has no professional evidence")
+        try:
+            async with asyncio.timeout(min(self._timeout_seconds, 55.0)):
+                required_supplemental_evidence = (
+                    await self._translate_required_supplemental_evidence(
+                        language=language,
+                        evidence=all_evidence,
+                    )
+                )
+        except TimeoutError:
+            raise ResumeWriterTransportError(
+                "Resume writer supplemental translation deadline exceeded",
+                transient=True,
+            ) from None
+        verified_supplemental_translations = list(
+            getattr(required_supplemental_evidence, "proofs", [])
+        )
+        validation_evidence = _verified_supplemental_evidence_overlay(
+            all_evidence,
+            required_supplemental_evidence,
+        )
         payload = {
             "language": language.value,
             "target_role": _redact_resume_text(target_role).strip()[:300]
             if target_role
             else None,
             "evidence": _serialized_evidence(all_evidence),
+            "required_supplemental_evidence": required_supplemental_evidence,
         }
         validation_error: ResumeWriterError | None = None
         for attempt in range(2):
@@ -3790,7 +5110,8 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
                     "\n\nThe prior draft was rejected by deterministic grounding checks: "
                     f"{validation_error}. Rewrite it more literally, remove the unsupported "
                     "wording, and keep the requested output language. Translate ordinary resume "
-                    "prose literally while preserving proper nouns and product names."
+                    "prose literally while preserving proper nouns and product names. Every entry "
+                    "in required_supplemental_evidence is mandatory in its matching item."
                 )
             try:
                 parsed = await self._structured_response(
@@ -3803,16 +5124,30 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
                 )
                 if not isinstance(parsed, _GeneratedDraft):
                     raise ResumeWriterError("Resume writer returned no usable draft")
-                sanitized = _sanitize_generated_draft(parsed, all_evidence, target_role)
-                draft = _validated_draft(sanitized, all_evidence, target_role)
+                sanitized = _sanitize_generated_draft(
+                    parsed,
+                    validation_evidence,
+                    target_role,
+                )
+                draft = _validated_draft(
+                    sanitized,
+                    validation_evidence,
+                    target_role,
+                )
                 draft = _complete_draft_from_evidence(
                     draft,
-                    all_evidence,
+                    validation_evidence,
                     language,
                     target_role,
                 )
                 _validate_requested_draft_language(draft, language)
-                return draft
+                return draft.model_copy(
+                    update={
+                        "verified_supplemental_translations": (
+                            verified_supplemental_translations
+                        )
+                    }
+                )
             except ResumeWriterTransportError:
                 raise
             except ResumeWriterError as exc:
@@ -4046,6 +5381,11 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
 def _provider_wall_clock_timeout(schema_name: str, configured_timeout: float) -> float:
     if schema_name == "adaptive_resume_interview_turn":
         return min(configured_timeout, 15.0)
+    if schema_name in {
+        "resume_supplemental_translations",
+        "resume_supplemental_translation_verification",
+    }:
+        return min(configured_timeout, 20.0)
     if schema_name == "resume_section_rewrite_candidate":
         return min(configured_timeout, 30.0)
     return min(configured_timeout, 45.0)

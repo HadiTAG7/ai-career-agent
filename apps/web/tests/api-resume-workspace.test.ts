@@ -152,6 +152,46 @@ describe("resume workspace API client", () => {
     expect(body.get("file")).toBe(file);
   });
 
+  it("sends one atomic import decision before preparing the guided ATS flow", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (request: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(request), init });
+      return jsonResponse({ id: "workspace-1", facts: [], evidence_revision: 8 });
+    }));
+    const { confirmCareerFactsBatch, prepareResumeImportFlow } = await import("@/lib/api-client");
+
+    await confirmCareerFactsBatch("profile-1", {
+      sourceId: "source-1",
+      clientRequestId: "request-1",
+      factIds: ["fact-1"],
+      rejectedFactIds: ["fact-2"],
+      expectedEvidenceRevision: 7,
+    });
+    await prepareResumeImportFlow("profile-1", {
+      sourceId: "source-1",
+      clientRequestId: "request-1",
+      expectedRevision: 3,
+      expectedEvidenceRevision: 8,
+    });
+
+    expect(calls[0].url.endsWith("/facts/confirm-batch")).toBe(true);
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      source_id: "source-1",
+      client_request_id: "request-1",
+      fact_ids: ["fact-1"],
+      rejected_fact_ids: ["fact-2"],
+      expected_evidence_revision: 7,
+    });
+    expect(calls[1].url.endsWith("/resume-workspace/import/prepare")).toBe(true);
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({
+      source_id: "source-1",
+      client_request_id: "request-1",
+      expected_revision: 3,
+      expected_evidence_revision: 8,
+    });
+  });
+
   it("sends strict draft, rewrite, review, and export payloads", async () => {
     vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
     const calls: Array<{ url: string; init?: RequestInit }> = [];

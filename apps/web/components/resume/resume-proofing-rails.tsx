@@ -113,8 +113,8 @@ type ProofingEvidenceRailProps = {
 
 export function ProofingEvidenceRail({ locale, workspace, facts, className }: ProofingEvidenceRailProps) {
   const confirmed = facts.filter((fact) => fact.verification_status === "confirmed");
-  const needsReview = facts.filter((fact) => fact.verification_status !== "confirmed");
-  const total = facts.length;
+  const needsReview = facts.filter((fact) => fact.verification_status === "extracted");
+  const total = confirmed.length + needsReview.length;
   const coverageMissing = Object.values(workspace.section_coverage).filter((complete) => !complete).length;
 
   return (

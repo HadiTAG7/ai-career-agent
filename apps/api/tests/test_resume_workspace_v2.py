@@ -1,6 +1,8 @@
+import asyncio
 import io
 import zipfile
 from copy import deepcopy
+from hashlib import sha256
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -9,7 +11,9 @@ from conftest import create_profile_and_source
 from sqlalchemy import func, select
 
 from career_agent_api.api import resume_workspace as workspace_api
+from career_agent_api.api import router as router_api
 from career_agent_api.models.domain import (
+    CareerFact,
     CareerProfile,
     ResumeDraftVersion,
     ResumeMessage,
@@ -22,8 +26,16 @@ from career_agent_api.models.enums import (
     ResumeMessageKind,
     ResumeMessageRole,
     ResumeMessageStatus,
+    VerificationStatus,
 )
-from career_agent_api.schemas.api import ResumeDraftContent, ResumeQuestionRead
+from career_agent_api.schemas.api import (
+    ResumeDraftContent,
+    ResumeQuestionRead,
+    ResumeVerifiedSupplementalTranslation,
+)
+from career_agent_api.services import resume_writer as resume_writer_module
+from career_agent_api.services.imports import FactCandidate
+from career_agent_api.services.resume_intake import ResumeIntakeProviderContext
 from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
     ResumeEvidence,
@@ -117,9 +129,7 @@ class StubWorkspaceProvider(ResumeWriterProvider):
                             {
                                 "id": "experience_1",
                                 "title": "Data Analyst" if english else "محلل بيانات",
-                                "organization": (
-                                    "Example Company" if english else "شركة تجريبية"
-                                ),
+                                "organization": ("Example Company" if english else "شركة تجريبية"),
                                 "date_range": None,
                                 "location": None,
                                 "bullets": [
@@ -356,9 +366,7 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
     assert confirmed.status_code == 200, confirmed.text
     workspace = confirmed.json()
     assert workspace["current_draft"]["sections"][0]["items"][0]["bullets"]
-    item_handles = workspace["current_draft"]["sections"][0]["items"][0][
-        "evidence_handles"
-    ]
+    item_handles = workspace["current_draft"]["sections"][0]["items"][0]["evidence_handles"]
     assert item_handles[0].startswith("fact_")
     assert "conversation_1" not in item_handles
     assert workspace["draft_revision"] == 1
@@ -392,9 +400,10 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
         rewrite_reloaded.json()["current_draft"]["sections"][0]["items"][0]["bullets"][0]
         == original_bullet
     )
-    assert rewrite_reloaded.json()["pending_suggestion"]["suggestion_id"] == suggestion[
-        "suggestion_id"
-    ]
+    assert (
+        rewrite_reloaded.json()["pending_suggestion"]["suggestion_id"]
+        == suggestion["suggestion_id"]
+    )
 
     accepted = await client.post(
         f"{base}/draft/suggestions/{suggestion['suggestion_id']}/accept",
@@ -495,9 +504,7 @@ async def test_accept_rejects_a_suggestion_based_on_an_older_draft(
     # suggestion behind. The endpoint must defend itself even if invalidation was missed.
     async with session_factory() as session:
         stored = await session.scalar(
-            select(ResumeWorkspace).where(
-                ResumeWorkspace.profile_id == UUID(profile["id"])
-            )
+            select(ResumeWorkspace).where(ResumeWorkspace.profile_id == UUID(profile["id"]))
         )
         assert stored is not None
         stored.draft_revision += 1
@@ -632,9 +639,7 @@ async def test_workspace_returns_only_recent_messages_but_keeps_old_idempotency(
     inserted_count = workspace_api.WORKSPACE_MESSAGE_RESPONSE_LIMIT + 10
     async with session_factory() as session:
         stored_workspace = await session.scalar(
-            select(ResumeWorkspace).where(
-                ResumeWorkspace.profile_id == UUID(profile["id"])
-            )
+            select(ResumeWorkspace).where(ResumeWorkspace.profile_id == UUID(profile["id"]))
         )
         assert stored_workspace is not None
         session.add_all(
@@ -849,10 +854,7 @@ async def test_conversation_language_can_change_before_answers_but_not_after(
         },
     )
     assert rejected.status_code == 409
-    assert (
-        rejected.json()["detail"]["code"]
-        == "resume_conversation_language_change_not_allowed"
-    )
+    assert rejected.json()["detail"]["code"] == "resume_conversation_language_change_not_allowed"
     current = (await client.get(base, headers=headers)).json()
     assert current["conversation_language"] == "en"
     assert current["revision"] == answered["revision"]
@@ -964,9 +966,7 @@ async def test_reset_workspace_is_guarded_idempotent_and_preserves_confirmed_fac
     assert confirmed_response.status_code == 200, confirmed_response.text
     confirmed = confirmed_response.json()
     old_workspace_id = confirmed["id"]
-    facts_before = (
-        await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
-    ).json()
+    facts_before = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
     assert facts_before
 
     stale = await client.delete(
@@ -985,9 +985,7 @@ async def test_reset_workspace_is_guarded_idempotent_and_preserves_confirmed_fac
     assert reset.status_code == 204, reset.text
     assert reset.content == b""
     assert (await client.get(base, headers=headers)).status_code == 404
-    facts_after = (
-        await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
-    ).json()
+    facts_after = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
     assert {fact["id"] for fact in facts_after} == {fact["id"] for fact in facts_before}
 
     repeated = await client.delete(
@@ -1068,9 +1066,7 @@ async def test_reset_explicitly_removes_all_limited_messages_and_chained_version
         await session.commit()
 
         message_count = await session.scalar(
-            select(func.count(ResumeMessage.id)).where(
-                ResumeMessage.workspace_id == workspace_id
-            )
+            select(func.count(ResumeMessage.id)).where(ResumeMessage.workspace_id == workspace_id)
         )
         version_count = await session.scalar(
             select(func.count(ResumeDraftVersion.id)).where(
@@ -1092,9 +1088,7 @@ async def test_reset_explicitly_removes_all_limited_messages_and_chained_version
         assert not list(
             (
                 await session.scalars(
-                    select(ResumeMessage.id).where(
-                        ResumeMessage.workspace_id == workspace_id
-                    )
+                    select(ResumeMessage.id).where(ResumeMessage.workspace_id == workspace_id)
                 )
             ).all()
         )
@@ -1309,9 +1303,7 @@ async def test_initial_generate_uses_same_language_evidence_fallback_on_provider
                 "date_range": "2024 - Present",
                 "responsibilities": [responsibility],
             },
-            "source_excerpt": (
-                "Cost Analyst | Harbor Company | 2024 - Present\n" + responsibility
-            ),
+            "source_excerpt": ("Cost Analyst | Harbor Company | 2024 - Present\n" + responsibility),
         },
     )
     assert fact.status_code == 201, fact.text
@@ -1472,9 +1464,7 @@ async def test_transport_fallback_preserves_exact_displayable_gpa_and_passes_rev
             "source_id": source["id"],
             "category": "education",
             "label": "Bachelor of Science in Finance",
-            "detail": (
-                "Completed a Bachelor of Science in Finance at Harbor University in 2023."
-            ),
+            "detail": ("Completed a Bachelor of Science in Finance at Harbor University in 2023."),
             "structured_value": {
                 "degree": "Bachelor of Science in Finance",
                 "institution": "Harbor University",
@@ -1518,7 +1508,8 @@ async def test_transport_fallback_preserves_exact_displayable_gpa_and_passes_rev
     assert generated.status_code == 200, generated.text
     workspace = generated.json()
     education = next(
-        section for section in workspace["current_draft"]["sections"]
+        section
+        for section in workspace["current_draft"]["sections"]
         if section["key"] == "education"
     )
     assert education["items"][0]["bullets"] == ["GPA: 3.6/4"]
@@ -1582,9 +1573,7 @@ async def test_correcting_understanding_invalidates_all_dependent_ai_output_and_
     facts = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
     corrected_fact = next(fact for fact in facts if fact["label"] == "نسّقت تقارير الفريق الأسبوعية")
     assert corrected_fact["source_id"] != onboarding_source["id"]
-    sources = (
-        await client.get(f"/v1/profiles/{profile['id']}/sources", headers=headers)
-    ).json()
+    sources = (await client.get(f"/v1/profiles/{profile['id']}/sources", headers=headers)).json()
     workspace_source = next(
         source
         for source in sources
@@ -1657,9 +1646,7 @@ async def test_guidance_quick_actions_never_create_facts_or_understandings(
         headers=headers,
         json={"language": "ar", "data_sharing_acknowledged": True},
     )
-    facts_before = (
-        await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
-    ).json()
+    facts_before = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
     response = await client.post(
         f"{base}/messages",
         headers=headers,
@@ -1674,13 +1661,8 @@ async def test_guidance_quick_actions_never_create_facts_or_understandings(
     assert response.json()["pending_understanding"] is None
     if action in {"skip", "continue"}:
         assert stub_provider.question_calls[-1]["required_category"] == "experience"
-        assert (
-            response.json()["provider_metadata"]["current_question"]["category"]
-            == "experience"
-        )
-    facts_after = (
-        await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)
-    ).json()
+        assert response.json()["provider_metadata"]["current_question"]["category"] == "experience"
+    facts_after = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
     assert len(facts_after) == len(facts_before)
 
 
@@ -2103,9 +2085,7 @@ async def test_every_pdf_input_change_invalidates_the_review_hash(
             select(CareerProfile).where(CareerProfile.id == UUID(profile["id"]))
         )
         stored_workspace = await session.scalar(
-            select(ResumeWorkspace).where(
-                ResumeWorkspace.profile_id == UUID(profile["id"])
-            )
+            select(ResumeWorkspace).where(ResumeWorkspace.profile_id == UUID(profile["id"]))
         )
         assert stored_profile is not None
         assert stored_workspace is not None
@@ -2287,9 +2267,7 @@ async def test_evidence_change_invalidates_review_and_blocks_export(
     reloaded = await client.get(base, headers=headers)
     assert reloaded.status_code == 200
     assert reloaded.json()["stage"] == "writing"
-    assert reloaded.json()["evidence_revision"] == current_profile.json()[
-        "evidence_revision"
-    ]
+    assert reloaded.json()["evidence_revision"] == current_profile.json()["evidence_revision"]
 
 
 async def test_removed_rewrite_target_is_rejected_by_schema(
@@ -2323,9 +2301,7 @@ def import_draft_docx(
     text: str = "Skills: Python and SQL\nBachelor of Computer Science",
 ) -> bytes:
     stream = io.BytesIO()
-    paragraphs = "".join(
-        f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in text.splitlines()
-    )
+    paragraphs = "".join(f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in text.splitlines())
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
       <w:body>{paragraphs}</w:body>
@@ -2336,315 +2312,1972 @@ def import_draft_docx(
     return stream.getvalue()
 
 
-async def create_from_import_workspace(client) -> tuple[dict, dict, dict, dict, dict]:
-    profile, other_source = await create_profile_and_source(client)
+async def test_retired_from_import_route_requires_guided_flow_without_mutation_or_provider_call(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source = await create_profile_and_source(client)
     headers = {"X-User-Id": "demo-user"}
-    imported = await client.post(
-        f"/v1/profiles/{profile['id']}/imports",
-        headers=headers,
-        files={
-            "file": (
-                "existing-resume.docx",
-                import_draft_docx(),
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-        },
-    )
-    assert imported.status_code == 201, imported.text
-    import_source = imported.json()["source"]
-    imported_fact = await client.post(
-        f"/v1/profiles/{profile['id']}/facts",
-        headers=headers,
-        json={
-            "source_id": import_source["id"],
-            "category": "experience",
-            "label": "Cost Analyst",
-            "detail": "Prepared monthly cost reports using Excel for Harbor Company.",
-            "structured_value": {
-                "title": "Cost Analyst",
-                "organization": "Harbor Company",
-                "date_range": "2024 - Present",
-                "responsibilities": [
-                    "Prepared monthly cost reports using Excel for Harbor Company."
-                ],
-            },
-            "source_excerpt": (
-                "Professional Experience\nCost Analyst | Harbor Company | 2024 - Present\n"
-                "Prepared monthly cost reports using Excel for Harbor Company."
-            ),
-        },
-    )
-    assert imported_fact.status_code == 201, imported_fact.text
-    confirmed_imported = await client.post(
-        f"/v1/profiles/{profile['id']}/facts/{imported_fact.json()['id']}/confirm",
-        headers=headers,
-    )
-    assert confirmed_imported.status_code == 200, confirmed_imported.text
-
-    other_fact = await client.post(
-        f"/v1/profiles/{profile['id']}/facts",
-        headers=headers,
-        json={
-            "source_id": other_source["id"],
-            "category": "experience",
-            "label": "External Payroll Analyst",
-            "detail": "Managed payroll reporting for External Company.",
-            "structured_value": {
-                "title": "External Payroll Analyst",
-                "organization": "External Company",
-                "responsibilities": ["Managed payroll reporting for External Company."],
-            },
-            "source_excerpt": "Managed payroll reporting for External Company.",
-        },
-    )
-    assert other_fact.status_code == 201, other_fact.text
-    confirmed_other = await client.post(
-        f"/v1/profiles/{profile['id']}/facts/{other_fact.json()['id']}/confirm",
-        headers=headers,
-    )
-    assert confirmed_other.status_code == 200, confirmed_other.text
-
     started = await client.post(
         f"/v1/profiles/{profile['id']}/resume-workspace",
         headers=headers,
         json={
             "language": "en",
             "conversation_language": "ar",
-            "data_sharing_acknowledged": False,
+            "data_sharing_acknowledged": True,
+        },
+    )
+    assert started.status_code == 201, started.text
+    before = started.json()
+    stub_provider.question_calls.clear()
+    stub_provider.draft_calls.clear()
+    stub_provider.adaptive_calls.clear()
+
+    retired = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": before["revision"],
+            "expected_evidence_revision": before["evidence_revision"],
+        },
+    )
+
+    assert retired.status_code == 410, retired.text
+    assert retired.json()["detail"]["code"] == "resume_import_guided_flow_required"
+    assert stub_provider.question_calls == []
+    assert stub_provider.draft_calls == []
+    assert stub_provider.adaptive_calls == []
+
+    reloaded = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert reloaded.status_code == 200, reloaded.text
+    after = reloaded.json()
+    assert after["current_draft"] is None
+    assert after["revision"] == before["revision"]
+    assert after["draft_revision"] == before["draft_revision"]
+
+
+async def _reviewed_import_ready_for_prepare(
+    client,
+    *,
+    data_sharing_acknowledged: bool = True,
+) -> tuple[dict, dict, list[dict], dict, dict]:
+    profile, _manual_source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    imported = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        headers=headers,
+        files={
+            "file": (
+                "assessment-resume.docx",
+                import_draft_docx(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    imported_result = imported.json()
+    before_review = (await client.get("/v1/profiles", headers=headers)).json()["evidence_revision"]
+    reviewed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        headers=headers,
+        json={
+            "source_id": imported_result["source"]["id"],
+            "client_request_id": str(uuid4()),
+            "fact_ids": [fact["id"] for fact in imported_result["facts"]],
+            "rejected_fact_ids": [],
+            "expected_evidence_revision": before_review,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    started = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "ar",
+            "data_sharing_acknowledged": data_sharing_acknowledged,
         },
     )
     assert started.status_code == 201, started.text
     return (
         profile,
-        import_source,
-        confirmed_imported.json(),
+        imported_result["source"],
+        reviewed.json()["facts"],
         headers,
         started.json(),
     )
 
 
-async def test_from_import_draft_uses_only_confirmed_source_facts_without_provider_call(
+async def test_import_prepare_rejects_unresolved_extracted_facts_without_mutation(
     client,
     stub_provider: StubWorkspaceProvider,
 ) -> None:
-    profile, source, imported_fact, headers, started = await create_from_import_workspace(client)
-    profile_state = await client.get("/v1/profiles", headers=headers)
-    assert profile_state.status_code == 200, profile_state.text
-    request_id = uuid4()
-    payload = {
-        "source_id": source["id"],
-        "client_request_id": str(request_id),
-        "expected_revision": started["revision"],
-        "expected_evidence_revision": profile_state.json()["evidence_revision"],
-    }
-
-    generated = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+    del stub_provider
+    profile, _manual_source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    imported = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
         headers=headers,
-        json=payload,
-    )
-
-    assert generated.status_code == 200, generated.text
-    workspace = generated.json()
-    assert stub_provider.draft_calls == []
-    assert workspace["current_draft"]["headline"] == "Cost Analyst"
-    serialized_draft = str(workspace["current_draft"])
-    assert "Harbor Company" in serialized_draft
-    assert "External Company" not in serialized_draft
-    assert workspace["provider_metadata"]["generation_fact_ids"] == [imported_fact["id"]]
-    assert workspace["draft_revision"] == 1
-    assert len(workspace["versions"]) == 1
-    assert workspace["versions"][0]["reason"] == "initial_generation"
-
-    repeated = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
-        headers=headers,
-        json=payload,
-    )
-    assert repeated.status_code == 200, repeated.text
-    duplicate = repeated.json()
-    assert duplicate["revision"] == workspace["revision"]
-    assert duplicate["draft_revision"] == workspace["draft_revision"]
-    assert duplicate["current_draft"] == workspace["current_draft"]
-    assert len(duplicate["versions"]) == 1
-    assert stub_provider.draft_calls == []
-
-    replacement = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
-        headers=headers,
-        json={**payload, "client_request_id": str(uuid4())},
-    )
-    assert replacement.status_code == 409, replacement.text
-    assert replacement.json()["detail"]["code"] == "resume_import_draft_exists"
-    preserved = await client.get(
-        f"/v1/profiles/{profile['id']}/resume-workspace",
-        headers=headers,
-    )
-    assert preserved.status_code == 200, preserved.text
-    assert preserved.json()["current_draft"] == workspace["current_draft"]
-    assert preserved.json()["draft_revision"] == workspace["draft_revision"]
-
-
-async def test_from_import_scopes_cross_language_evidence_for_ai_without_blocking_chat(
-    client,
-    stub_provider: StubWorkspaceProvider,
-) -> None:
-    profile, source, imported_fact, headers, _started = await create_from_import_workspace(client)
-    rejected_english = await client.post(
-        f"/v1/profiles/{profile['id']}/facts/{imported_fact['id']}/unconfirm",
-        headers=headers,
-    )
-    assert rejected_english.status_code == 200, rejected_english.text
-    arabic_fact = await client.post(
-        f"/v1/profiles/{profile['id']}/facts",
-        headers=headers,
-        json={
-            "source_id": source["id"],
-            "category": "experience",
-            "label": "محلل تكاليف",
-            "detail": "أعددت تقارير التكاليف الشهرية باستخدام إكسل.",
-            "structured_value": {
-                "title": "محلل تكاليف",
-                "organization": "شركة المرفأ",
-                "responsibilities": ["أعددت تقارير التكاليف الشهرية باستخدام إكسل."],
-            },
-            "source_excerpt": "محلل تكاليف في شركة المرفأ",
+        files={
+            "file": (
+                "unreviewed-resume.docx",
+                import_draft_docx(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
         },
     )
-    assert arabic_fact.status_code == 201, arabic_fact.text
-    confirmed_arabic = await client.post(
-        f"/v1/profiles/{profile['id']}/facts/{arabic_fact.json()['id']}/confirm",
+    assert imported.status_code == 201, imported.text
+    started = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
         headers=headers,
+        json={"language": "en", "conversation_language": "ar"},
     )
-    assert confirmed_arabic.status_code == 200, confirmed_arabic.text
-    refreshed = await client.get(
+    assert started.status_code == 201, started.text
+    evidence_revision = (await client.get("/v1/profiles", headers=headers)).json()[
+        "evidence_revision"
+    ]
+
+    rejected = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": imported.json()["source"]["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+            "expected_evidence_revision": evidence_revision,
+        },
+    )
+
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"]["code"] == "resume_import_review_incomplete"
+    reloaded = await client.get(
         f"/v1/profiles/{profile['id']}/resume-workspace",
         headers=headers,
     )
-    assert refreshed.status_code == 200, refreshed.text
-    profile_state = await client.get("/v1/profiles", headers=headers)
-    assert profile_state.status_code == 200, profile_state.text
+    assert reloaded.status_code == 200, reloaded.text
+    assert reloaded.json()["current_draft"] is None
+    assert "import_flow" not in reloaded.json()["provider_metadata"]
+
+
+async def test_import_prepare_is_source_scoped_idempotent_and_restorable(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source, reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    stub_provider.question_calls.clear()
+    request_id = str(uuid4())
     payload = {
         "source_id": source["id"],
-        "client_request_id": str(uuid4()),
-        "expected_revision": refreshed.json()["revision"],
-        "expected_evidence_revision": profile_state.json()["evidence_revision"],
+        "client_request_id": request_id,
+        "expected_revision": started["revision"],
+        "expected_evidence_revision": started["evidence_revision"],
     }
 
-    scoped = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
         headers=headers,
         json=payload,
     )
 
-    assert scoped.status_code == 200, scoped.text
-    workspace = scoped.json()
+    assert prepared.status_code == 200, prepared.text
+    workspace = prepared.json()
+    flow = workspace["provider_metadata"]["import_flow"]
     assert workspace["current_draft"] is None
-    assert workspace["provider_metadata"]["draft_mode"] == "import_translation_required"
-    assert workspace["provider_metadata"]["generation_fact_ids"] == [arabic_fact.json()["id"]]
-    assert workspace["provider_metadata"]["pending_import_source_id"] is None
-    assert "اكتب السيرة الآن" in workspace["messages"][-1]["content"]
+    assert flow["phase"] == "additions_choice"
+    assert flow["can_generate"] is False
+    assert flow["source_id"] == source["id"]
+    assert flow["page_target"] == 1
+    assert flow["assessment"]["page_target"] == 1
+    assert "score" not in flow["assessment"]
+    assert "ليس احتمال قبول وظيفي" in flow["assessment"]["disclaimer"]
+    assert set(workspace["provider_metadata"]["generation_fact_ids"]) == {
+        fact["id"] for fact in reviewed_facts
+    }
     assert stub_provider.draft_calls == []
 
     repeated = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
         headers=headers,
         json=payload,
     )
     assert repeated.status_code == 200, repeated.text
     assert repeated.json()["revision"] == workspace["revision"]
-    assert repeated.json()["current_draft"] is None
+    assert len(repeated.json()["messages"]) == len(workspace["messages"])
+
+    restored = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["provider_metadata"]["import_flow"] == flow
+    assert restored.json()["current_draft"] is None
 
 
-async def test_from_import_draft_rejects_stale_workspace_revision(
+async def test_active_import_flow_rejects_a_second_prepare_or_file_upload(
     client,
     stub_provider: StubWorkspaceProvider,
 ) -> None:
-    profile, source, _fact, headers, started = await create_from_import_workspace(client)
-    profile_state = (await client.get("/v1/profiles", headers=headers)).json()
-    changed = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace",
-        headers=headers,
-        json={
-            "language": "en",
-            "conversation_language": "en",
-            "data_sharing_acknowledged": False,
-        },
+    del stub_provider
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
     )
-    assert changed.status_code == 201, changed.text
-    assert changed.json()["revision"] > started["revision"]
-
-    rejected = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
         headers=headers,
         json={
             "source_id": source["id"],
             "client_request_id": str(uuid4()),
             "expected_revision": started["revision"],
-            "expected_evidence_revision": profile_state["evidence_revision"],
+            "expected_evidence_revision": started["evidence_revision"],
         },
     )
+    assert prepared.status_code == 200, prepared.text
 
-    assert rejected.status_code == 409, rejected.text
-    assert rejected.json()["detail"]["code"] == "resume_workspace_revision_conflict"
-    assert stub_provider.draft_calls == []
+    second_prepare = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": str(uuid4()),
+            "client_request_id": str(uuid4()),
+            "expected_revision": prepared.json()["revision"],
+            "expected_evidence_revision": prepared.json()["evidence_revision"],
+        },
+    )
+    assert second_prepare.status_code == 409, second_prepare.text
+    assert second_prepare.json()["detail"]["code"] == "resume_import_phase_conflict"
+
+    second_upload = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import",
+        headers=headers,
+        data={"data_sharing_acknowledged": "true"},
+        files={"file": ("second.pdf", b"not read because the flow is active", "application/pdf")},
+    )
+    assert second_upload.status_code == 409, second_upload.text
+    assert second_upload.json()["detail"]["code"] == "resume_import_phase_conflict"
+
     reloaded = await client.get(
         f"/v1/profiles/{profile['id']}/resume-workspace",
         headers=headers,
     )
     assert reloaded.status_code == 200, reloaded.text
-    assert reloaded.json()["current_draft"] is None
+    assert (
+        reloaded.json()["provider_metadata"]["import_flow"]
+        == (prepared.json()["provider_metadata"]["import_flow"])
+    )
 
 
-async def test_from_import_draft_rejects_stale_evidence_revision(
+async def test_slow_upload_cannot_publish_over_a_flow_started_in_another_tab(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del stub_provider
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+
+    class PausingIntakeProvider:
+        available = True
+        provider_name = "mistral"
+        model = "test-intake-model"
+
+        async def generate(
+            self,
+            context: ResumeIntakeProviderContext,
+        ) -> list[FactCandidate]:
+            provider_started.set()
+            await release_provider.wait()
+            return [
+                FactCandidate(
+                    category=FactCategory.SKILL,
+                    label="Tableau",
+                    detail="Dashboard reporting",
+                    structured_value={"title": "Tableau"},
+                    source_excerpt=context.segments[0].text,
+                    confidence=0.9,
+                )
+            ]
+
+    monkeypatch.setattr(
+        router_api,
+        "_resume_ai_provider",
+        lambda *_args, **_kwargs: PausingIntakeProvider(),
+    )
+    slow_upload = asyncio.create_task(
+        client.post(
+            f"/v1/profiles/{profile['id']}/resume-workspace/import",
+            headers=headers,
+            data={"data_sharing_acknowledged": "true"},
+            files={
+                "file": (
+                    "second-resume.docx",
+                    import_draft_docx("Skills: Tableau\nBachelor of Information Systems"),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+    )
+    await asyncio.wait_for(provider_started.wait(), timeout=2)
+
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": started["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    release_provider.set()
+    rejected_upload = await asyncio.wait_for(slow_upload, timeout=5)
+
+    assert rejected_upload.status_code == 409, rejected_upload.text
+    assert rejected_upload.json()["detail"]["code"] == "resume_import_phase_conflict"
+    reloaded = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert reloaded.status_code == 200, reloaded.text
+    assert (
+        reloaded.json()["provider_metadata"]["import_flow"]
+        == (prepared.json()["provider_metadata"]["import_flow"])
+    )
+    sources = await client.get(f"/v1/profiles/{profile['id']}/sources", headers=headers)
+    assert sources.status_code == 200, sources.text
+    assert all(item.get("original_filename") != "second-resume.docx" for item in sources.json())
+
+
+async def test_import_flow_additions_yes_blocks_early_generate_and_asks_open_question(
     client,
     stub_provider: StubWorkspaceProvider,
 ) -> None:
-    profile, source, _fact, headers, started = await create_from_import_workspace(client)
-    stale_evidence_revision = (await client.get("/v1/profiles", headers=headers)).json()[
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": started["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+
+    for quick_action in ("generate", "review", "improve"):
+        blocked = await client.post(
+            f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+            headers=headers,
+            json={
+                "content": "",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": prepared.json()["revision"],
+                "quick_action": quick_action,
+            },
+        )
+        assert blocked.status_code == 409, blocked.text
+        assert blocked.json()["detail"]["code"] == "resume_import_questions_incomplete"
+
+    additions = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared.json()["revision"],
+            "quick_action": "additions_yes",
+        },
+    )
+    assert additions.status_code == 200, additions.text
+    workspace = additions.json()
+    flow = workspace["provider_metadata"]["import_flow"]
+    question = workspace["provider_metadata"]["current_question"]
+    assert flow["phase"] == "additions_interview"
+    assert flow["can_generate"] is False
+    assert question["fields_requested"] == ["additional_information"]
+    assert question["generation_source"] == "server"
+    assert workspace["current_draft"] is None
+    assert stub_provider.draft_calls == []
+
+
+async def test_import_flow_selects_server_gap_and_reaches_draft_review(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": started["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    initial_flow = prepared.json()["provider_metadata"]["import_flow"]
+    first_gap = initial_flow["gap_queue"][0]
+    stub_provider.question_calls.clear()
+
+    first_question = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared.json()["revision"],
+            "quick_action": "additions_no",
+        },
+    )
+
+    assert first_question.status_code == 200, first_question.text
+    workspace = first_question.json()
+    flow = workspace["provider_metadata"]["import_flow"]
+    question = workspace["provider_metadata"]["current_question"]
+    assert flow["phase"] == "gap_interview"
+    assert flow["can_generate"] is False
+    assert flow["active_gap_key"] == first_gap["key"]
+    assert question["gap_key"] == first_gap["key"]
+    assert question["fields_requested"] == first_gap["requested_fields"]
+    assert stub_provider.question_calls[-1]["required_category"] == first_gap["category"]
+    assert stub_provider.question_calls[-1]["gap"]["key"] == first_gap["key"]
+    assert workspace["current_draft"] is None
+
+    for _ in range(25):
+        if workspace["provider_metadata"]["import_flow"]["can_generate"]:
+            break
+        skipped = await client.post(
+            f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+            headers=headers,
+            json={
+                "content": "",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": workspace["revision"],
+                "quick_action": "skip",
+            },
+        )
+        assert skipped.status_code == 200, skipped.text
+        workspace = skipped.json()
+    assert workspace["provider_metadata"]["import_flow"]["phase"] == "ready_to_generate"
+    assert workspace["provider_metadata"]["import_flow"]["can_generate"] is True
+    assert workspace["current_draft"] is None
+
+    generated = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+            "quick_action": "generate",
+        },
+    )
+    assert generated.status_code == 200, generated.text
+    final_workspace = generated.json()
+    assert final_workspace["current_draft"] is not None
+    assert final_workspace["provider_metadata"]["import_flow"]["phase"] == "draft_review"
+    assert final_workspace["provider_metadata"]["import_flow"]["can_generate"] is False
+    assert stub_provider.draft_calls
+
+
+async def test_confirmed_import_answer_filters_only_resolved_remaining_gaps(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def covering_adaptive_turn(**kwargs: object) -> SimpleNamespace:
+        stub_provider.adaptive_calls.append(kwargs)
+        answer = str(kwargs["answer"])
+        return SimpleNamespace(
+            understanding=answer,
+            proposed_records=[
+                {
+                    "record_type": "experience",
+                    "title": "Finance Analyst",
+                    "organization": "Harbor Company",
+                    "date_range": "2025 - Present",
+                    "responsibilities": [answer],
+                },
+                {
+                    "record_type": "language",
+                    "title": "English",
+                    "proficiency": "Fluent",
+                },
+            ],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(stub_provider, "generate_adaptive_turn", covering_adaptive_turn)
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": started["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    first_question = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared.json()["revision"],
+            "quick_action": "additions_no",
+        },
+    )
+    assert first_question.status_code == 200, first_question.text
+    workspace = first_question.json()
+    flow = workspace["provider_metadata"]["import_flow"]
+    queued_before = {
+        *(gap["key"] for gap in flow["gap_queue"]),
+        *([flow["active_gap_key"]] if flow.get("active_gap_key") else []),
+    }
+    resolved_by_answer = {"section:experience:core", "section:language:core"}
+    assert resolved_by_answer <= queued_before
+
+    answered = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "I work as a finance analyst and speak English fluently.",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    confirmed = await client.post(
+        (
+            f"/v1/profiles/{profile['id']}/resume-workspace/understandings/"
+            f"{answered.json()['pending_understanding']['id']}/confirm"
+        ),
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    final_flow = confirmed.json()["provider_metadata"]["import_flow"]
+    remaining_after = {
+        *(gap["key"] for gap in final_flow["gap_queue"]),
+        *([final_flow["active_gap_key"]] if final_flow.get("active_gap_key") else []),
+    }
+    assert resolved_by_answer.isdisjoint(remaining_after)
+    assert remaining_after <= queued_before
+    assert confirmed.json()["current_draft"] is None
+
+
+async def test_import_addition_replaces_core_gap_with_new_proficiency_gap(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def language_without_proficiency(**kwargs: object) -> SimpleNamespace:
+        stub_provider.adaptive_calls.append(kwargs)
+        return SimpleNamespace(
+            understanding="English is one of my languages.",
+            proposed_records=[
+                {
+                    "record_type": "language",
+                    "title": "English",
+                }
+            ],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(
+        stub_provider,
+        "generate_adaptive_turn",
+        language_without_proficiency,
+    )
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": started["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    initial_keys = {
+        gap["key"] for gap in prepared.json()["provider_metadata"]["import_flow"]["gap_queue"]
+    }
+    assert "section:language:core" in initial_keys
+
+    additions = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared.json()["revision"],
+            "quick_action": "additions_yes",
+        },
+    )
+    assert additions.status_code == 200, additions.text
+    answered = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "English",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": additions.json()["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    confirmed = await client.post(
+        (
+            f"/v1/profiles/{profile['id']}/resume-workspace/understandings/"
+            f"{answered.json()['pending_understanding']['id']}/confirm"
+        ),
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    workspace = confirmed.json()
+    flow = workspace["provider_metadata"]["import_flow"]
+    current_question = workspace["provider_metadata"].get("current_question") or {}
+    remaining = list(flow["gap_queue"])
+    if current_question.get("gap_key"):
+        remaining.append(
+            {
+                "key": current_question["gap_key"],
+                "category": current_question["category"],
+                "requested_fields": current_question["fields_requested"],
+            }
+        )
+    assert all(gap["key"] != "section:language:core" for gap in remaining)
+    assert any(
+        gap["category"] == "language" and gap["requested_fields"] == ["proficiency"]
+        for gap in remaining
+    )
+    assert workspace["current_draft"] is None
+
+
+def test_gap_field_mapping_does_not_spread_partial_education_answer() -> None:
+    values = workspace_api._mapped_gap_field_values(
+        ["degree", "field", "institution", "graduation_date"],
+        [{"record_type": "education", "title": "Finance"}],
+        answer="Finance",
+    )
+
+    assert values == {"field": "Finance"}
+    education = CareerFact(
+        id=uuid4(),
+        profile_id=uuid4(),
+        source_id=uuid4(),
+        category=FactCategory.EDUCATION,
+        label="King Fahd University",
+        detail=None,
+        structured_value={"institution": "King Fahd University"},
+        source_excerpt="King Fahd University",
+        verification_status=VerificationStatus.CONFIRMED,
+    )
+    assert (
+        workspace_api._record_targets_gap_fact(
+            {"record_type": "education", "title": "Finance"},
+            education,
+            answer="Finance",
+        )
+        is True
+    )
+
+
+def test_gap_enrichment_rejects_non_answer_and_unrelated_same_category_record() -> None:
+    target = CareerFact(
+        id=uuid4(),
+        profile_id=uuid4(),
+        source_id=uuid4(),
+        category=FactCategory.EXPERIENCE,
+        label="Investment & Trading Professional",
+        detail="Manage a personal investment portfolio.",
+        structured_value={"title": "Investment & Trading Professional"},
+        source_excerpt="Investment & Trading Professional",
+        verification_status=VerificationStatus.CONFIRMED,
+    )
+
+    assert workspace_api._is_gap_non_answer("لا أعرف") is True
+    assert (
+        workspace_api._record_targets_gap_fact(
+            {
+                "record_type": "experience",
+                "title": "Financial Analyst",
+                "organization": "Aramco",
+            },
+            target,
+            answer="عملت أيضًا محللًا ماليًا في أرامكو.",
+        )
+        is False
+    )
+    assert (
+        workspace_api._record_targets_gap_fact(
+            {
+                "record_type": "experience",
+                "title": "Financial Literacy Mentor",
+                "responsibilities": ["Volunteered as a financial literacy mentor."],
+            },
+            target,
+            answer="I volunteered as a financial literacy mentor.",
+        )
+        is False
+    )
+    assert (
+        workspace_api._record_targets_gap_fact(
+            {
+                "record_type": "experience",
+                "title": "محفظة استثمارية شخصية",
+                "organization": "محفظة شخصية",
+            },
+            target,
+            answer="هي محفظتي الاستثمارية الشخصية وأديرها بنفسي.",
+        )
+        is True
+    )
+
+
+async def test_fact_specific_gap_enriches_imported_portfolio_without_duplicate(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def portfolio_adaptive_turn(**kwargs: object) -> SimpleNamespace:
+        stub_provider.adaptive_calls.append(kwargs)
+        answer = str(kwargs["answer"])
+        return SimpleNamespace(
+            understanding=answer,
+            proposed_records=[
+                {
+                    "record_type": "experience",
+                    "title": "محفظة استثمارية شخصية",
+                    "organization": "محفظة شخصية",
+                    "date_range": "2018 - Present",
+                    "responsibilities": [answer],
+                }
+            ],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(stub_provider, "generate_adaptive_turn", portfolio_adaptive_turn)
+    profile, _manual_source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    imported = await client.post(
+        f"/v1/profiles/{profile['id']}/imports",
+        headers=headers,
+        files={
+            "file": (
+                "portfolio-resume.docx",
+                import_draft_docx(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    imported_result = imported.json()
+    extracted = imported_result["facts"]
+    shaped = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": imported_result["source"]["id"],
+            "category": "experience",
+            "label": "Investment & Trading Professional",
+            "detail": "Manage a personal investment portfolio and analyze opportunities.",
+            "structured_value": {
+                "title": "Investment & Trading Professional",
+                "date_range": "2018 - Present",
+                "responsibilities": [
+                    "Manage a personal investment portfolio and analyze opportunities."
+                ],
+            },
+            "source_excerpt": "Investment & Trading Professional, 2018 - Present",
+        },
+    )
+    assert shaped.status_code == 201, shaped.text
+    target_id = shaped.json()["id"]
+    evidence_revision = (await client.get("/v1/profiles", headers=headers)).json()[
         "evidence_revision"
     ]
-    extra = await client.post(
+    reviewed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
+        headers=headers,
+        json={
+            "source_id": imported_result["source"]["id"],
+            "client_request_id": str(uuid4()),
+            "fact_ids": [target_id],
+            "rejected_fact_ids": [fact["id"] for fact in extracted],
+            "expected_evidence_revision": evidence_revision,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    started = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+        json={
+            "language": "en",
+            "conversation_language": "ar",
+            "data_sharing_acknowledged": True,
+        },
+    )
+    assert started.status_code == 201, started.text
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": imported_result["source"]["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+            "expected_evidence_revision": started.json()["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    workspace = prepared.json()
+    for action in ["additions_no", *("skip" for _ in range(20))]:
+        if str(
+            workspace["provider_metadata"]["import_flow"].get("active_gap_key") or ""
+        ).startswith(f"fact:{UUID(target_id).hex}:"):
+            break
+        moved = await client.post(
+            f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+            headers=headers,
+            json={
+                "content": "",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": workspace["revision"],
+                "quick_action": action,
+            },
+        )
+        assert moved.status_code == 200, moved.text
+        workspace = moved.json()
+
+    flow = workspace["provider_metadata"]["import_flow"]
+    expected_gap_prefix = f"fact:{UUID(target_id).hex}:"
+    assert str(flow["active_gap_key"]).startswith(expected_gap_prefix)
+    assert workspace["provider_metadata"]["current_question"]["evidence_handles"] == [
+        f"fact_{UUID(target_id).hex}"
+    ]
+    before_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    before_evidence_revision = workspace["evidence_revision"]
+    answer = "هي محفظتي الاستثمارية الشخصية، أديرها بنفسي منذ عام 2018."
+    answered = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": answer,
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    confirmed = await client.post(
+        (
+            f"/v1/profiles/{profile['id']}/resume-workspace/understandings/"
+            f"{answered.json()['pending_understanding']['id']}/confirm"
+        ),
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    final_workspace = confirmed.json()
+    after_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    assert len(after_facts) == len(before_facts)
+    enriched = next(fact for fact in after_facts if fact["id"] == target_id)
+    supplemental = enriched["structured_value"]["supplemental_details"]
+    assert supplemental["organization_or_context"]["value"] == answer
+    assert supplemental["organization_or_context"]["source"]["kind"] == ("resume_gap_interview")
+    assert answer in enriched["detail"]
+    assert final_workspace["evidence_revision"] == before_evidence_revision + 1
+    final_flow = final_workspace["provider_metadata"]["import_flow"]
+    remaining_keys = {
+        *(gap["key"] for gap in final_flow["gap_queue"]),
+        *([final_flow["active_gap_key"]] if final_flow.get("active_gap_key") else []),
+    }
+    assert all(not key.startswith(expected_gap_prefix) for key in remaining_keys)
+    latest_evidence = stub_provider.question_calls[-1]["evidence"]
+    enriched_evidence = next(
+        item for item in latest_evidence if item.handle == f"fact_{UUID(target_id).hex}"
+    )
+    generated_supplemental = enriched_evidence.structured_value["supplemental_details"]
+    assert generated_supplemental["organization_or_context"]["value"] == answer
+    assert generated_supplemental["organization_or_context"]["source"]["kind"] == (
+        "resume_gap_interview"
+    )
+
+
+async def test_unrelated_same_category_answer_creates_new_fact_and_keeps_target_gap(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def aramco_adaptive_turn(**kwargs: object) -> SimpleNamespace:
+        stub_provider.adaptive_calls.append(kwargs)
+        answer = str(kwargs["answer"])
+        return SimpleNamespace(
+            understanding=answer,
+            proposed_records=[
+                {
+                    "record_type": "experience",
+                    "title": "Financial Analyst",
+                    "organization": "Aramco",
+                    "date_range": "2024",
+                    "responsibilities": [answer],
+                }
+            ],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(stub_provider, "generate_adaptive_turn", aramco_adaptive_turn)
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    target = await client.post(
         f"/v1/profiles/{profile['id']}/facts",
         headers=headers,
         json={
             "source_id": source["id"],
-            "category": "skill",
-            "label": "Power BI",
-            "detail": "Built finance reporting dashboards with Power BI.",
-            "source_excerpt": "Built finance reporting dashboards with Power BI.",
+            "category": "experience",
+            "label": "Investment & Trading Professional",
+            "detail": "Manage a personal investment portfolio.",
+            "structured_value": {
+                "title": "Investment & Trading Professional",
+                "date_range": "2018 - Present",
+                "responsibilities": ["Manage a personal investment portfolio."],
+            },
+            "source_excerpt": "Investment & Trading Professional, 2018 - Present",
         },
     )
-    assert extra.status_code == 201, extra.text
-    confirmed = await client.post(
-        f"/v1/profiles/{profile['id']}/facts/{extra.json()['id']}/confirm",
+    assert target.status_code == 201, target.text
+    target_id = target.json()["id"]
+    evidence_revision = (await client.get("/v1/profiles", headers=headers)).json()[
+        "evidence_revision"
+    ]
+    reviewed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/confirm-batch",
         headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "fact_ids": [target_id],
+            "rejected_fact_ids": [],
+            "expected_evidence_revision": evidence_revision,
+        },
     )
-    assert confirmed.status_code == 200, confirmed.text
+    assert reviewed.status_code == 200, reviewed.text
     refreshed = await client.get(
         f"/v1/profiles/{profile['id']}/resume-workspace",
         headers=headers,
     )
     assert refreshed.status_code == 200, refreshed.text
-    assert refreshed.json()["revision"] > started["revision"]
-
-    rejected = await client.post(
-        f"/v1/profiles/{profile['id']}/resume-workspace/draft/from-import",
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
         headers=headers,
         json={
             "source_id": source["id"],
             "client_request_id": str(uuid4()),
             "expected_revision": refreshed.json()["revision"],
-            "expected_evidence_revision": stale_evidence_revision,
+            "expected_evidence_revision": refreshed.json()["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    workspace = prepared.json()
+    expected_gap_prefix = f"fact:{UUID(target_id).hex}:"
+    for action in ["additions_no", *("skip" for _ in range(20))]:
+        if str(
+            workspace["provider_metadata"]["import_flow"].get("active_gap_key") or ""
+        ).startswith(expected_gap_prefix):
+            break
+        moved = await client.post(
+            f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+            headers=headers,
+            json={
+                "content": "",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": workspace["revision"],
+                "quick_action": action,
+            },
+        )
+        assert moved.status_code == 200, moved.text
+        workspace = moved.json()
+    assert str(workspace["provider_metadata"]["import_flow"]["active_gap_key"]).startswith(
+        expected_gap_prefix
+    )
+    before_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    answer = "عملت أيضًا محللًا ماليًا في أرامكو."
+    answered = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": answer,
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    confirmed = await client.post(
+        (
+            f"/v1/profiles/{profile['id']}/resume-workspace/understandings/"
+            f"{answered.json()['pending_understanding']['id']}/confirm"
+        ),
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    after_facts = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    assert len(after_facts) == len(before_facts) + 1
+    original = next(fact for fact in after_facts if fact["id"] == target_id)
+    assert "supplemental_details" not in original["structured_value"]
+    assert any(
+        fact["id"] != target_id
+        and fact["label"] == "Financial Analyst"
+        and fact["structured_value"].get("organization") == "Aramco"
+        for fact in after_facts
+    )
+    final_flow = confirmed.json()["provider_metadata"]["import_flow"]
+    remaining_keys = {
+        *(gap["key"] for gap in final_flow["gap_queue"]),
+        *([final_flow["active_gap_key"]] if final_flow.get("active_gap_key") else []),
+    }
+    assert any(key.startswith(expected_gap_prefix) for key in remaining_keys)
+
+
+@pytest.mark.parametrize("failure_kind", ["transport", "output"])
+async def test_import_generate_ai_failure_preserves_ready_flow_without_fallback(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    async def fail_generation(**kwargs: object) -> ResumeDraftContent:
+        stub_provider.draft_calls.append(kwargs)
+        if failure_kind == "transport":
+            raise ResumeWriterTransportError("temporary provider failure", transient=True)
+        raise ResumeWriterOutputError("invalid provider draft")
+
+    monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
+    profile, source, _reviewed_facts, headers, started = await _reviewed_import_ready_for_prepare(
+        client
+    )
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": started["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    workspace = prepared.json()
+    for action in ["additions_no", *("skip" for _ in range(25))]:
+        if workspace["provider_metadata"]["import_flow"]["can_generate"]:
+            break
+        advanced = await client.post(
+            f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+            headers=headers,
+            json={
+                "content": "",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": workspace["revision"],
+                "quick_action": action,
+            },
+        )
+        assert advanced.status_code == 200, advanced.text
+        workspace = advanced.json()
+    flow_before = workspace["provider_metadata"]["import_flow"]
+    assert flow_before["phase"] == "ready_to_generate"
+    assert flow_before["can_generate"] is True
+
+    failed = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+            "quick_action": "generate",
+        },
+    )
+    assert failed.status_code == 503, failed.text
+    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
+
+    restored = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    restored_workspace = restored.json()
+    restored_flow = restored_workspace["provider_metadata"]["import_flow"]
+    assert restored_workspace["current_draft"] is None
+    assert restored_workspace["draft_revision"] == workspace["draft_revision"]
+    assert restored_flow["phase"] == "ready_to_generate"
+    assert restored_flow["can_generate"] is True
+    assert len(stub_provider.draft_calls) == 1
+
+
+def _grounded_education_draft_from_facts(facts: list[dict]) -> dict:
+    education = next(fact for fact in facts if fact["category"] == "education")
+    text = str(education.get("detail") or education["label"])
+    assert len(text) >= 20
+    handle = f"fact_{UUID(education['id']).hex}"
+    return ResumeDraftContent.model_validate(
+        {
+            "headline": education["label"],
+            "professional_summary": text,
+            "summary_evidence_handles": [handle],
+            "sections": [
+                {
+                    "key": "education",
+                    "title": "Education",
+                    "items": [
+                        {
+                            "id": "education_1",
+                            "title": education["label"],
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    ).model_dump(mode="json")
+
+
+def _grounded_education_draft_from_evidence(
+    evidence: tuple[ResumeEvidence, ...],
+) -> ResumeDraftContent:
+    education = next(item for item in evidence if item.category == "education")
+    text = education.detail or education.label
+    assert len(text) >= 20
+    return ResumeDraftContent.model_validate(
+        {
+            "headline": education.label,
+            "professional_summary": text,
+            "summary_evidence_handles": [education.handle],
+            "sections": [
+                {
+                    "key": "education",
+                    "title": "Education",
+                    "items": [
+                        {
+                            "id": "education_1",
+                            "title": education.label,
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [education.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+async def _prepare_guided_import(client) -> tuple[dict, dict, list[dict], dict, dict]:
+    profile, source, facts, headers, started = await _reviewed_import_ready_for_prepare(client)
+    prepared = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/import/prepare",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "client_request_id": str(uuid4()),
+            "expected_revision": started["revision"],
+            "expected_evidence_revision": started["evidence_revision"],
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    return profile, source, facts, headers, prepared.json()
+
+
+async def _advance_guided_import_to_ready(
+    client,
+    *,
+    profile: dict,
+    headers: dict,
+    workspace: dict,
+) -> dict:
+    for action in ["additions_no", *("skip" for _ in range(25))]:
+        if workspace["provider_metadata"]["import_flow"]["can_generate"]:
+            return workspace
+        advanced = await client.post(
+            f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+            headers=headers,
+            json={
+                "content": "",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": workspace["revision"],
+                "quick_action": action,
+            },
+        )
+        assert advanced.status_code == 200, advanced.text
+        workspace = advanced.json()
+    raise AssertionError("guided import did not reach ready_to_generate")
+
+
+async def test_import_patch_cannot_create_draft_before_guided_flow_generation(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _source, facts, headers, prepared = await _prepare_guided_import(client)
+    flow_before = deepcopy(prepared["provider_metadata"]["import_flow"])
+
+    patched = await client.patch(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft",
+        headers=headers,
+        json={
+            "draft": _grounded_education_draft_from_facts(facts),
+            "expected_draft_revision": prepared["draft_revision"],
+        },
+    )
+
+    assert patched.status_code == 409, patched.text
+    assert patched.json()["detail"]["code"] == "resume_draft_required"
+    restored = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["current_draft"] is None
+    assert restored.json()["draft_revision"] == prepared["draft_revision"]
+    assert restored.json()["provider_metadata"]["import_flow"] == flow_before
+
+
+async def test_import_review_rejects_draft_when_flow_is_not_draft_review(
+    client,
+    session_factory,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _source, facts, headers, prepared = await _prepare_guided_import(client)
+    artificial_draft = _grounded_education_draft_from_facts(facts)
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(ResumeWorkspace).where(ResumeWorkspace.profile_id == UUID(profile["id"]))
+        )
+        assert stored is not None
+        stored.current_draft = artificial_draft
+        stored.draft_revision = 1
+        await session.commit()
+
+    reviewed = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/review",
+        headers=headers,
+        json={"expected_draft_revision": 1, "review_acknowledged": True},
+    )
+
+    assert reviewed.status_code == 409, reviewed.text
+    assert reviewed.json()["detail"]["code"] == "resume_import_phase_conflict"
+    restored = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["provider_metadata"]["import_flow"]["phase"] == "additions_choice"
+    assert restored.json()["current_draft"] == artificial_draft
+    assert restored.json()["revision"] == prepared["revision"]
+
+
+async def test_import_ai_generation_sets_draft_review_before_patch_and_review(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, _source, _facts, headers, prepared = await _prepare_guided_import(client)
+    workspace = await _advance_guided_import_to_ready(
+        client,
+        profile=profile,
+        headers=headers,
+        workspace=prepared,
+    )
+
+    async def generate_grounded_draft(**kwargs: object) -> ResumeDraftContent:
+        evidence = tuple(kwargs.get("evidence") or ())
+        assert all(isinstance(item, ResumeEvidence) for item in evidence)
+        return _grounded_education_draft_from_evidence(evidence)
+
+    monkeypatch.setattr(stub_provider, "generate_draft", generate_grounded_draft)
+    generated = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+            "quick_action": "generate",
+        },
+    )
+    assert generated.status_code == 200, generated.text
+    generated_workspace = generated.json()
+    assert generated_workspace["provider_metadata"]["import_flow"]["phase"] == "draft_review"
+
+    patched = await client.patch(
+        f"/v1/profiles/{profile['id']}/resume-workspace/draft",
+        headers=headers,
+        json={
+            "draft": generated_workspace["current_draft"],
+            "expected_draft_revision": generated_workspace["draft_revision"],
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["provider_metadata"]["import_flow"]["phase"] == "draft_review"
+
+    reviewed = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/review",
+        headers=headers,
+        json={
+            "expected_draft_revision": patched.json()["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["export_allowed"] is True
+
+
+async def test_import_gap_question_provider_failure_returns_503_without_canned_fallback_and_preserves_phase(  # noqa: E501
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, _source, _facts, headers, prepared = await _prepare_guided_import(client)
+    flow_before = deepcopy(prepared["provider_metadata"]["import_flow"])
+
+    async def fail_questions(**kwargs: object) -> list[ResumeQuestionRead]:
+        stub_provider.question_calls.append(kwargs)
+        raise ResumeWriterTransportError("question provider unavailable", transient=True)
+
+    monkeypatch.setattr(stub_provider, "generate_questions", fail_questions)
+    failed = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared["revision"],
+            "quick_action": "additions_no",
+        },
+    )
+
+    assert failed.status_code == 503, failed.text
+    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
+    restored = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["provider_metadata"]["import_flow"] == flow_before
+    assert restored.json()["provider_metadata"].get("current_question") is None
+    assert restored.json()["revision"] == prepared["revision"]
+    assert restored.json()["current_draft"] is None
+
+
+async def test_import_gap_skip_provider_failure_keeps_active_gap_and_does_not_record_skip(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, _source, _facts, headers, prepared = await _prepare_guided_import(client)
+    started = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared["revision"],
+            "quick_action": "additions_no",
+        },
+    )
+    assert started.status_code == 200, started.text
+    workspace = started.json()
+    flow_before = deepcopy(workspace["provider_metadata"]["import_flow"])
+    question_before = deepcopy(workspace["provider_metadata"]["current_question"])
+    active_gap = flow_before["active_gap_key"]
+    assert active_gap
+    assert flow_before["gap_queue"]
+
+    async def fail_questions(**kwargs: object) -> list[ResumeQuestionRead]:
+        stub_provider.question_calls.append(kwargs)
+        raise ResumeWriterTransportError("question provider unavailable", transient=True)
+
+    monkeypatch.setattr(stub_provider, "generate_questions", fail_questions)
+    failed = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+            "quick_action": "skip",
+        },
+    )
+
+    assert failed.status_code == 503, failed.text
+    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
+    restored = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    restored_workspace = restored.json()
+    restored_flow = restored_workspace["provider_metadata"]["import_flow"]
+    assert restored_flow == flow_before
+    assert active_gap not in restored_flow["skipped_gap_keys"]
+    assert restored_workspace["provider_metadata"]["current_question"] == question_before
+    assert restored_workspace["revision"] == workspace["revision"]
+
+
+async def test_import_confirmed_answer_question_failure_keeps_pending_understanding_and_rolls_back_fact(  # noqa: E501
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, _source, _facts, headers, prepared = await _prepare_guided_import(client)
+    started = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared["revision"],
+            "quick_action": "additions_no",
+        },
+    )
+    assert started.status_code == 200, started.text
+    workspace = started.json()
+    answered = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "I prepared monthly finance reports using Excel.",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    answered_workspace = answered.json()
+    pending_before = deepcopy(answered_workspace["pending_understanding"])
+    flow_before = deepcopy(answered_workspace["provider_metadata"]["import_flow"])
+    facts_before = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    evidence_revision_before = answered_workspace["evidence_revision"]
+
+    async def fail_questions(**kwargs: object) -> list[ResumeQuestionRead]:
+        stub_provider.question_calls.append(kwargs)
+        raise ResumeWriterTransportError("question provider unavailable", transient=True)
+
+    monkeypatch.setattr(stub_provider, "generate_questions", fail_questions)
+    failed = await client.post(
+        (
+            f"/v1/profiles/{profile['id']}/resume-workspace/understandings/"
+            f"{pending_before['id']}/confirm"
+        ),
+        headers=headers,
+        json={"expected_revision": answered_workspace["revision"]},
+    )
+
+    assert failed.status_code == 503, failed.text
+    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
+    restored = await client.get(
+        f"/v1/profiles/{profile['id']}/resume-workspace",
+        headers=headers,
+    )
+    assert restored.status_code == 200, restored.text
+    restored_workspace = restored.json()
+    facts_after = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    assert restored_workspace["pending_understanding"] == pending_before
+    assert restored_workspace["provider_metadata"]["import_flow"] == flow_before
+    assert restored_workspace["evidence_revision"] == evidence_revision_before
+    assert restored_workspace["revision"] == answered_workspace["revision"]
+    assert {fact["id"] for fact in facts_after} == {fact["id"] for fact in facts_before}
+
+
+async def test_import_quick_action_rejected_while_understanding_is_pending(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _source, _facts, headers, prepared = await _prepare_guided_import(client)
+    started = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": prepared["revision"],
+            "quick_action": "additions_no",
+        },
+    )
+    assert started.status_code == 200, started.text
+    answered = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "I prepared monthly finance reports using Excel.",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    pending_before = deepcopy(answered.json()["pending_understanding"])
+
+    rejected = await client.post(
+        f"/v1/profiles/{profile['id']}/resume-workspace/messages",
+        headers=headers,
+        json={
+            "content": "",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": answered.json()["revision"],
+            "quick_action": "skip",
         },
     )
 
     assert rejected.status_code == 409, rejected.text
-    assert rejected.json()["detail"]["code"] == "resume_evidence_revision_conflict"
-    assert stub_provider.draft_calls == []
-    reloaded = await client.get(
+    assert rejected.json()["detail"]["code"] == "resume_understanding_pending"
+    restored = await client.get(
         f"/v1/profiles/{profile['id']}/resume-workspace",
         headers=headers,
     )
-    assert reloaded.status_code == 200, reloaded.text
-    assert reloaded.json()["current_draft"] is None
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["pending_understanding"] == pending_before
+    assert restored.json()["revision"] == answered.json()["revision"]
+
+
+_ARBITRARY_ARABIC_SUPPLEMENT = "\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631"
+_PRIVATE_SUPPLEMENT = (
+    f"{_ARBITRARY_ARABIC_SUPPLEMENT}; candidate@example.test; +966 50 123 4567"
+)
+
+
+async def _create_verified_translation_workspace(
+    client,
+    *,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict, str, dict, dict, str]:
+    profile, source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    created = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "category": "project",
+            "label": "Creative Writing",
+            "detail": "Creative Writing portfolio",
+            "structured_value": {
+                "title": "Creative Writing",
+                "supplemental_details": {
+                    "responsibility_or_scope": {
+                        "value": _PRIVATE_SUPPLEMENT,
+                        "source": {"kind": "resume_gap_interview"},
+                    }
+                },
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    fact_id = created.json()["id"]
+    confirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{fact_id}/confirm",
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    async def generate_verified_draft(**kwargs: object) -> ResumeDraftContent:
+        evidence = tuple(kwargs.get("evidence") or ())
+        atoms = resume_writer_module._required_supplemental_atoms(evidence)
+        assert len(atoms) == 1
+        support, field_name, _original_value, safe_value = atoms[0]
+        translated_value = safe_value.replace(
+            _ARBITRARY_ARABIC_SUPPLEMENT,
+            "Write poetry",
+        )
+        proof = ResumeVerifiedSupplementalTranslation(
+            handle=support.handle,
+            field=field_name,
+            value_index=0,
+            source_hash=sha256(safe_value.encode("utf-8")).hexdigest(),
+            translated_value=translated_value,
+            pair_id=resume_writer_module._supplemental_translation_pair_id(
+                handle=support.handle,
+                field_name=field_name,
+                value_index=0,
+                source_value=safe_value,
+                translated_value=translated_value,
+            ),
+            verdict="pass",
+        )
+        return ResumeDraftContent.model_validate(
+            {
+                "headline": "Creative Writing",
+                "professional_summary": "Creative Writing. Write poetry.",
+                "summary_evidence_handles": [support.handle],
+                "sections": [
+                    {
+                        "key": "project",
+                        "title": "Projects",
+                        "items": [
+                            {
+                                "id": "creative_writing",
+                                "title": "Creative Writing",
+                                "organization": None,
+                                "date_range": None,
+                                "location": None,
+                                "bullets": ["Write poetry"],
+                                "evidence_handles": [support.handle],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ).model_copy(update={"verified_supplemental_translations": [proof]})
+
+    monkeypatch.setattr(stub_provider, "generate_draft", generate_verified_draft)
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "en", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+    generated = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Generate the resume",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+    assert generated.status_code == 200, generated.text
+    return profile, base, headers, generated.json(), fact_id
+
+
+async def test_verified_arbitrary_translation_survives_review_rewrite_and_export(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _profile, base, headers, workspace, _fact_id = (
+        await _create_verified_translation_workspace(
+            client,
+            stub_provider=stub_provider,
+            monkeypatch=monkeypatch,
+        )
+    )
+    assert "verified_supplemental_translations" not in workspace["current_draft"]
+    bundle = workspace["provider_metadata"]["verified_supplemental_translations"]
+    serialized_bundle = str(bundle)
+    assert bundle["language"] == "en"
+    assert bundle["entries"][0]["translated_value"].startswith("Write poetry")
+    assert _ARBITRARY_ARABIC_SUPPLEMENT not in serialized_bundle
+    assert "candidate@example.test" not in serialized_bundle
+    assert "+966 50 123 4567" not in serialized_bundle
+    initial_version = next(
+        version for version in workspace["versions"] if version["reason"] == "initial_generation"
+    )
+    assert initial_version["diff"]["verified_supplemental_translations"] == bundle
+
+    async def rewrite_with_overlay(**kwargs: object) -> SimpleNamespace:
+        evidence = tuple(kwargs.get("evidence") or ())
+        support = next(item for item in evidence if item.category == "project")
+        assert "Write poetry" in support.text
+        assert _ARBITRARY_ARABIC_SUPPLEMENT not in support.text
+        return SimpleNamespace(
+            text="Write poetry",
+            evidence_handles=kwargs["evidence_handles"],
+        )
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", rewrite_with_overlay)
+    rewrite = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={
+            "target_kind": "bullet",
+            "section_key": "project",
+            "item_id": "creative_writing",
+            "bullet_index": 0,
+            "mode": "professional",
+            "expected_draft_revision": workspace["draft_revision"],
+        },
+    )
+    assert rewrite.status_code == 200, rewrite.text
+    rejected = await client.post(
+        f"{base}/draft/suggestions/{rewrite.json()['suggestion_id']}/reject",
+        headers=headers,
+        json={"expected_draft_revision": workspace["draft_revision"]},
+    )
+    assert rejected.status_code == 200, rejected.text
+    reviewed = await client.post(
+        f"{base}/review",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    monkeypatch.setattr(workspace_api, "render_resume_pdf", lambda **_: b"%PDF-verified")
+    exported = await client.post(
+        f"{base}/export.pdf",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert exported.status_code == 200, exported.text
+    assert exported.content == b"%PDF-verified"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "pair", "fingerprint", "evidence"])
+async def test_verified_translation_tampering_and_evidence_changes_fail_closed(
+    client,
+    session_factory,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    profile, base, headers, workspace, fact_id = await _create_verified_translation_workspace(
+        client,
+        stub_provider=stub_provider,
+        monkeypatch=monkeypatch,
+    )
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(ResumeWorkspace).where(ResumeWorkspace.profile_id == UUID(profile["id"]))
+        )
+        assert stored is not None
+        if mutation in {"missing", "pair", "fingerprint"}:
+            metadata = deepcopy(stored.provider_metadata)
+            if mutation == "missing":
+                metadata.pop("verified_supplemental_translations")
+            elif mutation == "pair":
+                bundle = metadata["verified_supplemental_translations"]
+                bundle["entries"][0]["pair_id"] = "0" * 64
+            else:
+                bundle = metadata["verified_supplemental_translations"]
+                bundle["evidence_fingerprint"] = "0" * 64
+            stored.provider_metadata = metadata
+        else:
+            fact = await session.scalar(select(CareerFact).where(CareerFact.id == UUID(fact_id)))
+            assert fact is not None
+            structured_value = deepcopy(fact.structured_value)
+            structured_value["supplemental_details"]["responsibility_or_scope"][
+                "value"
+            ] += " changed"
+            fact.structured_value = structured_value
+        await session.commit()
+
+    reviewed = await client.post(
+        f"{base}/review",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert reviewed.status_code == 422, reviewed.text
+    assert reviewed.json()["detail"]["code"] == "resume_verified_translation_invalid"
+
+
+async def test_verified_overlay_change_invalidates_reviewed_export(
+    client,
+    session_factory,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, base, headers, workspace, _fact_id = (
+        await _create_verified_translation_workspace(
+            client,
+            stub_provider=stub_provider,
+            monkeypatch=monkeypatch,
+        )
+    )
+    reviewed = await client.post(
+        f"{base}/review",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(ResumeWorkspace).where(ResumeWorkspace.profile_id == UUID(profile["id"]))
+        )
+        assert stored is not None
+        metadata = deepcopy(stored.provider_metadata)
+        metadata["verified_supplemental_translations"]["entries"][0]["pair_id"] = (
+            "0" * 64
+        )
+        stored.provider_metadata = metadata
+        await session.commit()
+
+    exported = await client.post(
+        f"{base}/export.pdf",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert exported.status_code == 409, exported.text
+    assert exported.json()["detail"]["code"] == "resume_review_stale"
+
+
+async def test_failed_regeneration_preserves_matching_verified_overlay(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _profile, base, headers, workspace, _fact_id = (
+        await _create_verified_translation_workspace(
+            client,
+            stub_provider=stub_provider,
+            monkeypatch=monkeypatch,
+        )
+    )
+    original_bundle = deepcopy(
+        workspace["provider_metadata"]["verified_supplemental_translations"]
+    )
+    original_draft = deepcopy(workspace["current_draft"])
+
+    async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        raise ResumeWriterOutputError("no usable grounded draft")
+
+    monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
+    regenerated = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Regenerate the resume",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": workspace["revision"],
+        },
+    )
+    assert regenerated.status_code == 200, regenerated.text
+    regenerated_workspace = regenerated.json()
+    assert regenerated_workspace["current_draft"] == original_draft
+    assert regenerated_workspace["draft_revision"] == workspace["draft_revision"]
+    assert (
+        regenerated_workspace["provider_metadata"]["verified_supplemental_translations"]
+        == original_bundle
+    )
+    reviewed = await client.post(
+        f"{base}/review",
+        headers=headers,
+        json={
+            "expected_draft_revision": regenerated_workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+
+
+async def test_restore_recovers_version_bound_translation_and_patch_cannot_forge_it(
+    client,
+    session_factory,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, base, headers, workspace, _fact_id = (
+        await _create_verified_translation_workspace(
+            client,
+            stub_provider=stub_provider,
+            monkeypatch=monkeypatch,
+        )
+    )
+    original_bundle = deepcopy(
+        workspace["provider_metadata"]["verified_supplemental_translations"]
+    )
+    initial_version = next(
+        version for version in workspace["versions"] if version["reason"] == "initial_generation"
+    )
+    patched_draft = deepcopy(workspace["current_draft"])
+    patched_draft["verified_supplemental_translations"] = [
+        {
+            "handle": original_bundle["entries"][0]["handle"],
+            "field": original_bundle["entries"][0]["field"],
+            "value_index": 0,
+            "source_hash": "0" * 64,
+            "translated_value": "Forged translation",
+            "pair_id": "0" * 64,
+            "verdict": "pass",
+        }
+    ]
+    patched = await client.patch(
+        f"{base}/draft",
+        headers=headers,
+        json={
+            "draft": patched_draft,
+            "expected_draft_revision": workspace["draft_revision"],
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert (
+        patched.json()["provider_metadata"]["verified_supplemental_translations"]
+        == original_bundle
+    )
+
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(ResumeWorkspace).where(ResumeWorkspace.profile_id == UUID(profile["id"]))
+        )
+        assert stored is not None
+        tampered_metadata = deepcopy(stored.provider_metadata)
+        tampered_metadata["verified_supplemental_translations"]["entries"][0][
+            "pair_id"
+        ] = "f" * 64
+        stored.provider_metadata = tampered_metadata
+        await session.commit()
+
+    restored = await client.post(
+        f"{base}/versions/{initial_version['id']}/restore",
+        headers=headers,
+        json={"expected_draft_revision": patched.json()["draft_revision"]},
+    )
+    assert restored.status_code == 200, restored.text
+    assert (
+        restored.json()["provider_metadata"]["verified_supplemental_translations"]
+        == original_bundle
+    )

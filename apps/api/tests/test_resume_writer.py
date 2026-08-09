@@ -12,9 +12,10 @@ from pydantic import BaseModel, SecretStr, ValidationError
 from pypdf import PdfReader
 
 import career_agent_api.services.resume_writer as resume_writer_module
+from career_agent_api.api import resume_workspace as workspace_api
 from career_agent_api.core.config import Settings
 from career_agent_api.models.enums import FactCategory, PreferredLanguage, VerificationStatus
-from career_agent_api.schemas.api import ResumeExportContact, ResumeQuestionRead
+from career_agent_api.schemas.api import ResumeDraftContent, ResumeExportContact, ResumeQuestionRead
 from career_agent_api.services.resume_export import render_resume_pdf
 from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
@@ -123,6 +124,32 @@ class CapturingResumeWriter(_StructuredResumeWriterProvider):
         if isinstance(response, ResumeWriterError):
             raise response
         return schema.model_validate(response)
+
+
+def supplemental_verification_response(
+    *,
+    handle: str,
+    field: str,
+    pairs: list[tuple[str, str]],
+    verdict: str = "pass",
+    issue_codes: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "verifications": [
+            {
+                "pair_id": resume_writer_module._supplemental_translation_pair_id(
+                    handle=handle,
+                    field_name=field,
+                    value_index=value_index,
+                    source_value=source_value,
+                    translated_value=translated_value,
+                ),
+                "verdict": verdict,
+                "issue_codes": issue_codes or [],
+            }
+            for value_index, (source_value, translated_value) in enumerate(pairs)
+        ]
+    }
 
 
 @pytest.mark.asyncio
@@ -469,6 +496,1282 @@ def test_completion_separates_multiple_experience_handles_instead_of_hiding_a_re
         ["analyst_fact"],
         ["trainee_fact"],
     ]
+
+
+def test_completion_does_not_drop_confirmed_narrative_fact_without_bullets() -> None:
+    support = ResumeEvidence(
+        handle="incomplete_experience_fact",
+        category="experience",
+        label="Finance Intern",
+        detail=None,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Professional Experience",
+            "organization": "Northstar",
+            "date_range": "2025",
+            "responsibilities": [],
+        },
+        source_excerpt="Professional Experience\nFinance Intern — Northstar\n2025",
+    )
+    skill = ResumeEvidence(
+        handle="financial_analysis_skill",
+        category="skill",
+        label="Financial Analysis",
+        detail=None,
+        verification_status="confirmed",
+        source_excerpt="Skills\nFinancial Analysis",
+    )
+    draft = resume_writer_module.ResumeDraftContent.model_validate(
+        {
+            "headline": "Finance Intern",
+            "professional_summary": "Finance intern with confirmed financial analysis skills.",
+            "summary_evidence_handles": [skill.handle],
+            "sections": [
+                {
+                    "key": "skill",
+                    "title": "Skills",
+                    "items": [
+                        {
+                            "id": "financial_analysis",
+                            "title": "Financial Analysis",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [skill.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        draft,
+        (skill, support),
+        PreferredLanguage.EN,
+    )
+
+    experience = next(section for section in completed.sections if section.key == "experience")
+    assert len(experience.items) == 1
+    assert experience.items[0].title == "Finance Intern"
+    assert experience.items[0].bullets == []
+    assert experience.items[0].evidence_handles == [support.handle]
+
+
+@pytest.mark.asyncio
+async def test_generation_preserves_personal_portfolio_context_and_passes_review() -> None:
+    responsibility = "Manage a personal investment portfolio and analyze opportunities."
+    confirmed_context = (
+        "This is my self-managed personal investment portfolio, not work performed for a company."
+    )
+    support = ResumeEvidence(
+        handle="personal_portfolio_fact",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=f"{responsibility}\n{confirmed_context}",
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Trading Experience",
+            "date_range": "2018 - Present",
+            "responsibilities": [responsibility],
+            "supplemental_details": {
+                "organization_or_context": {
+                    "value": confirmed_context,
+                    "source": {
+                        "kind": "resume_gap_interview",
+                        "gap_key": "fact:portfolio:organization_or_context",
+                    },
+                }
+            },
+        },
+        source_excerpt=(
+            "Trading Experience\nInvestment & Trading Professional 2018 - Present\n"
+            f"{responsibility}"
+        ),
+    )
+    provider = CapturingResumeWriter(
+        {
+            "headline": "Investment & Trading Professional",
+            "professional_summary": responsibility,
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "trading_experience",
+                    "title": "Trading Experience",
+                    "items": [
+                        {
+                            "id": "personal_portfolio",
+                            "title": support.label,
+                            "organization": None,
+                            "date_range": "2018 - Present",
+                            "location": None,
+                            # Deliberately omit the confirmed follow-up. Completion must restore it.
+                            "bullets": [responsibility],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    draft = await provider.generate_draft(
+        language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(support,),
+        answers=[],
+    )
+
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["schema_name"] == "professional_resume_draft"
+    assert provider.calls[0]["payload"]["required_supplemental_evidence"] == [
+        {
+            "handle": support.handle,
+            "field": "organization_or_context",
+            "value": confirmed_context,
+            "translated_value": confirmed_context,
+        }
+    ]
+    trading = next(section for section in draft.sections if section.key == "trading_experience")
+    assert len(trading.items) == 1
+    assert responsibility in trading.items[0].bullets
+    assert confirmed_context in trading.items[0].bullets
+    validate_claim_grounding(
+        confirmed_context,
+        trading.items[0].evidence_handles,
+        (support,),
+    )
+    review_workspace = SimpleNamespace(
+        pending_understanding=None,
+        pending_suggestion=None,
+    )
+    assert workspace_api._review_blockers(draft, review_workspace, (support,)) == []
+
+
+@pytest.mark.asyncio
+async def test_foreign_supplemental_requires_grounded_translation_instead_of_bullet_count() -> None:
+    responsibilities = [
+        "Manage a personal investment portfolio and analyze opportunities.",
+        "Conduct technical and fundamental analysis of equity markets.",
+        "Develop trading strategies and risk management plans.",
+        "Review market trends and investment opportunities.",
+        "Track portfolio performance and trading decisions.",
+    ]
+    arabic_context = (
+        "\u0623\u0645\u0627\u0631\u0633 \u0627\u0644\u062a\u062f\u0627\u0648\u0644 "
+        "\u0648\u0627\u0644\u0627\u0633\u062a\u062b\u0645\u0627\u0631 \u0628\u0634\u0643\u0644 "
+        "\u0634\u062e\u0635\u064a \u0648\u0623\u062f\u064a\u0631 "
+        "\u0645\u062d\u0641\u0638\u062a\u064a "
+        "\u0627\u0644\u062e\u0627\u0635\u0629\u060c \u0648\u0644\u064a\u0633 "
+        "\u0644\u0635\u0627\u0644\u062d \u0634\u0631\u0643\u0629."
+    )
+    translated_context = (
+        "Personally manage trading and investments with a private portfolio, "
+        "not for a company."
+    )
+    support = ResumeEvidence(
+        handle="arabic_personal_portfolio_fact",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=f"{' '.join(responsibilities)}\n{arabic_context}",
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Trading Experience",
+            "date_range": "2018 - Present",
+            "responsibilities": responsibilities,
+            "supplemental_details": {
+                "organization_or_context": {
+                    "value": arabic_context,
+                    "source": {"kind": "resume_gap_interview"},
+                }
+            },
+        },
+        source_excerpt=(
+            "Investment & Trading Professional\n2018 - Present\n"
+            + "\n".join(responsibilities)
+        ),
+    )
+
+    def provider_response(*, translate_context: bool) -> dict[str, object]:
+        return {
+            "headline": "Investment & Trading Professional",
+            "professional_summary": responsibilities[0],
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "trading_experience",
+                    "title": "Trading Experience",
+                    "items": [
+                        {
+                            "id": "personal_portfolio",
+                            "title": support.label,
+                            "organization": None,
+                            "date_range": "2018 - Present",
+                            "location": None,
+                            # Actual failure: title, date, and five original English bullets were
+                            # present, but the Arabic addendum was not.
+                            "bullets": [
+                                *responsibilities,
+                                *([translated_context] if translate_context else []),
+                            ],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    provider = CapturingResumeWriter(
+        [
+            {
+                "translations": [
+                    {
+                        "handle": support.handle,
+                        "field": "organization_or_context",
+                        "value_index": 0,
+                        "translated_value": translated_context,
+                    }
+                ]
+            },
+            supplemental_verification_response(
+                handle=support.handle,
+                field="organization_or_context",
+                pairs=[(arabic_context, translated_context)],
+            ),
+            provider_response(translate_context=False),
+            provider_response(translate_context=True),
+        ]
+    )
+
+    draft = await provider.generate_draft(
+        language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(support,),
+        answers=[],
+    )
+
+    assert len(provider.calls) == 3
+    translation_call = provider.calls[0]
+    assert translation_call["schema_name"] == "resume_supplemental_translations"
+    assert translation_call["payload"]["required_supplemental_evidence"] == [
+        {
+            "handle": support.handle,
+            "field": "organization_or_context",
+            "value_index": 0,
+            "value": arabic_context,
+        }
+    ]
+    verification_call = provider.calls[1]
+    assert verification_call["schema_name"] == (
+        "resume_supplemental_translation_verification"
+    )
+    assert verification_call["payload"]["translation_pairs"][0][
+        "translated_value"
+    ] == translated_context
+    first_instructions = provider.calls[2]["system_instructions"]
+    assert "required_supplemental_evidence" in first_instructions
+    required_supplemental = provider.calls[2]["payload"][
+        "required_supplemental_evidence"
+    ]
+    assert required_supplemental == [
+        {
+            "handle": support.handle,
+            "field": "organization_or_context",
+            "value": arabic_context,
+            "translated_value": translated_context,
+        }
+    ]
+    assert len(provider.responses) == 1
+    trading = next(section for section in draft.sections if section.key == "trading_experience")
+    assert translated_context in trading.items[0].bullets
+    assert arabic_context not in " ".join(trading.items[0].bullets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_value", "partial_translation", "complete_translation"),
+    [
+        (
+            "\u0623\u062f\u064a\u0631 \u0645\u062d\u0641\u0638\u0629 "
+            "\u0627\u0633\u062a\u062b\u0645\u0627\u0631\u064a\u0629 "
+            "\u0648\u0623\u062f\u0631\u0651\u0628 \u0627\u0644\u0637\u0644\u0627\u0628",
+            "Portfolio",
+            "Manage an investment portfolio and train students",
+        ),
+        (
+            "Aramco \u0645\u062d\u0641\u0638\u0629 "
+            "\u0627\u0633\u062a\u062b\u0645\u0627\u0631\u064a\u0629 "
+            "\u0634\u062e\u0635\u064a\u0629",
+            "Personal investment portfolio",
+            "Aramco personal investment portfolio",
+        ),
+        (
+            "\u0645\u062d\u0641\u0638\u0629 \u0634\u062e\u0635\u064a\u0629 "
+            "\u0648\u0644\u064a\u0633\u062a \u0644\u0635\u0627\u0644\u062d "
+            "\u0634\u0631\u0643\u0629",
+            "Not a personal portfolio for a company",
+            "Personal portfolio, not for a company",
+        ),
+    ],
+    ids=[
+        "compound_atom",
+        "mixed_script_entity",
+        "negation_scope",
+    ],
+)
+async def test_supplemental_translation_requires_complete_scoped_semantics(
+    source_value: str,
+    partial_translation: str,
+    complete_translation: str,
+) -> None:
+    support = ResumeEvidence(
+        handle="scoped_supplemental_translation",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=source_value,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Trading Experience",
+            "supplemental_details": {
+                "organization_or_context": {"value": source_value},
+            },
+        },
+    )
+
+    def response(translated_value: str) -> dict[str, object]:
+        return {
+            "translations": [
+                {
+                    "handle": support.handle,
+                    "field": "organization_or_context",
+                    "value_index": 0,
+                    "translated_value": translated_value,
+                }
+            ]
+        }
+
+    invalid_provider = CapturingResumeWriter(
+        [response(partial_translation), response(partial_translation)]
+    )
+    with pytest.raises(
+        ResumeWriterOutputError,
+        match="no usable supplemental translations",
+    ):
+        await invalid_provider._translate_required_supplemental_evidence(
+            language=PreferredLanguage.EN,
+            evidence=(support,),
+        )
+    assert len(invalid_provider.calls) == 2
+
+    valid_provider = CapturingResumeWriter(
+        [
+            response(complete_translation),
+            supplemental_verification_response(
+                handle=support.handle,
+                field="organization_or_context",
+                pairs=[(source_value, complete_translation)],
+            ),
+        ]
+    )
+    translated = await valid_provider._translate_required_supplemental_evidence(
+        language=PreferredLanguage.EN,
+        evidence=(support,),
+    )
+    assert len(valid_provider.calls) == 2
+    assert translated == [
+        {
+            "handle": support.handle,
+            "field": "organization_or_context",
+            "value": source_value,
+            "translated_value": complete_translation,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_value", "bad_translation", "issue_code"),
+    [
+        (
+            "\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631",
+            "Designed nuclear reactors",
+            "addition",
+        ),
+        (
+            "\u0645\u062d\u0641\u0638\u0629 \u0634\u062e\u0635\u064a\u0629 "
+            "\u0648\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631",
+            "Personal portfolio",
+            "omission",
+        ),
+        (
+            "\u062d\u0644\u0644\u062a \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a "
+            "\u0627\u0644\u0645\u0627\u0644\u064a\u0629 \u0648\u062f\u0631\u0628\u062a "
+            "\u0627\u0644\u0637\u0644\u0627\u0628",
+            "Analyzed students and trained financial data",
+            "relation_change",
+        ),
+    ],
+    ids=["unknown_hallucination", "unknown_omission", "relation_swap"],
+)
+async def test_independent_translation_verifier_rejects_semantic_mismatch(
+    source_value: str,
+    bad_translation: str,
+    issue_code: str,
+) -> None:
+    support = ResumeEvidence(
+        handle="independent_translation_verification",
+        category="experience",
+        label="Creative Experience",
+        detail=source_value,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "responsibility_or_scope": {"value": source_value},
+            }
+        },
+    )
+    translation_response = {
+        "translations": [
+            {
+                "handle": support.handle,
+                "field": "responsibility_or_scope",
+                "value_index": 0,
+                "translated_value": bad_translation,
+            }
+        ]
+    }
+    rejected_verification = supplemental_verification_response(
+        handle=support.handle,
+        field="responsibility_or_scope",
+        pairs=[(source_value, bad_translation)],
+        verdict="fail",
+        issue_codes=[issue_code],
+    )
+    provider = CapturingResumeWriter(
+        [
+            translation_response,
+            rejected_verification,
+            translation_response,
+            rejected_verification,
+        ]
+    )
+
+    with pytest.raises(
+        ResumeWriterOutputError,
+        match="no usable supplemental translations",
+    ):
+        await provider._translate_required_supplemental_evidence(
+            language=PreferredLanguage.EN,
+            evidence=(support,),
+        )
+
+    assert [call["schema_name"] for call in provider.calls] == [
+        "resume_supplemental_translations",
+        "resume_supplemental_translation_verification",
+        "resume_supplemental_translations",
+        "resume_supplemental_translation_verification",
+    ]
+    verification_pair = provider.calls[1]["payload"]["translation_pairs"][0]
+    assert verification_pair["source_value"] == source_value
+    assert verification_pair["translated_value"] == bad_translation
+    assert len(verification_pair["pair_id"]) == 64
+    assert source_value not in provider.calls[2]["system_instructions"]
+
+
+@pytest.mark.asyncio
+async def test_verified_unknown_translation_survives_draft_grounding_end_to_end() -> None:
+    source_value = "\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631"
+    translated_value = "Write poetry"
+    support = ResumeEvidence(
+        handle="verified_poetry_translation",
+        category="experience",
+        label="Creative Writing",
+        detail=source_value,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Professional Experience",
+            "supplemental_details": {
+                "responsibility_or_scope": {"value": source_value},
+            },
+        },
+    )
+    provider = CapturingResumeWriter(
+        [
+            {
+                "translations": [
+                    {
+                        "handle": support.handle,
+                        "field": "responsibility_or_scope",
+                        "value_index": 0,
+                        "translated_value": translated_value,
+                    }
+                ]
+            },
+            supplemental_verification_response(
+                handle=support.handle,
+                field="responsibility_or_scope",
+                pairs=[(source_value, translated_value)],
+            ),
+            {
+                "headline": "Creative Writing",
+                "professional_summary": "Creative writing focused on poetry.",
+                "summary_evidence_handles": [support.handle],
+                "sections": [
+                    {
+                        "key": "experience",
+                        "title": "Professional Experience",
+                        "items": [
+                            {
+                                "id": "creative_writing",
+                                "title": "Creative Writing",
+                                "organization": None,
+                                "date_range": None,
+                                "location": None,
+                                "bullets": [translated_value],
+                                "evidence_handles": [support.handle],
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+    )
+
+    draft = await provider.generate_draft(
+        language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=(support,),
+        answers=[],
+    )
+
+    assert draft.sections[0].items[0].bullets == [translated_value]
+    assert len(draft.verified_supplemental_translations) == 1
+    proof = draft.verified_supplemental_translations[0]
+    assert proof.handle == support.handle
+    assert proof.field == "responsibility_or_scope"
+    assert proof.verdict == "pass"
+    assert "verified_supplemental_translations" not in draft.model_dump(mode="json")
+    assert source_value in support.text
+    assert translated_value not in support.text
+    overlay = resume_writer_module._verified_supplemental_evidence_overlay(
+        (support,),
+        [
+            {
+                "handle": support.handle,
+                "field": "responsibility_or_scope",
+                "value": source_value,
+                "translated_value": translated_value,
+            }
+        ],
+    )
+    validate_claim_grounding(translated_value, [support.handle], overlay)
+    assert translated_value in overlay[0].text
+    review_workspace = SimpleNamespace(
+        pending_understanding=None,
+        pending_suggestion=None,
+    )
+    assert workspace_api._review_blockers(draft, review_workspace, overlay) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_value", "translated_value"),
+    [
+        (
+            "\u0639\u0645\u0644\u062a \u0641\u064a \u0627\u0644\u0628\u062d\u062b "
+            "\u0648\u0627\u0644\u062a\u0637\u0648\u064a\u0631 \u062b\u0645 "
+            "\u0643\u062a\u0628\u062a \u0627\u0644\u0634\u0639\u0631",
+            "Worked in research and development, then wrote poetry",
+        ),
+        (
+            "\u0637\u0648\u0631\u062a Microsoft Dynamics 365 "
+            "\u0628\u0627\u0633\u062a\u062e\u062f\u0627\u0645 Python \u0648Power BI",
+            "Developed Microsoft Dynamics 365 using Python and Power BI",
+        ),
+    ],
+    ids=["research_development_then_poetry", "mixed_arabic_product_entities"],
+)
+async def test_full_value_translation_preserves_conjunctions_and_entities(
+    source_value: str,
+    translated_value: str,
+) -> None:
+    support = ResumeEvidence(
+        handle="full_value_translation",
+        category="project",
+        label="Selected Project",
+        detail=source_value,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "responsibility_or_scope": {"value": source_value},
+            }
+        },
+    )
+    provider = CapturingResumeWriter(
+        [
+            {
+                "translations": [
+                    {
+                        "handle": support.handle,
+                        "field": "responsibility_or_scope",
+                        "value_index": 0,
+                        "translated_value": translated_value,
+                    }
+                ]
+            },
+            supplemental_verification_response(
+                handle=support.handle,
+                field="responsibility_or_scope",
+                pairs=[(source_value, translated_value)],
+            ),
+        ]
+    )
+
+    translated = await provider._translate_required_supplemental_evidence(
+        language=PreferredLanguage.EN,
+        evidence=(support,),
+    )
+
+    assert provider.calls[0]["payload"]["required_supplemental_evidence"] == [
+        {
+            "handle": support.handle,
+            "field": "responsibility_or_scope",
+            "value_index": 0,
+            "value": source_value,
+        }
+    ]
+    assert translated[0]["translated_value"] == translated_value
+    overlay = resume_writer_module._verified_supplemental_evidence_overlay(
+        (support,),
+        translated,
+    )
+    assert translated_value in overlay[0].text
+    if "Microsoft" in source_value:
+        assert not resume_writer_module._requires_translation(
+            source_value,
+            PreferredLanguage.AR,
+        )
+
+
+@pytest.mark.asyncio
+async def test_translation_verifier_transport_failure_is_not_retried() -> None:
+    source_value = "\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631"
+    translated_value = "Write poetry"
+    support = ResumeEvidence(
+        handle="verification_transport",
+        category="experience",
+        label="Creative Writing",
+        detail=source_value,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "responsibility_or_scope": {"value": source_value},
+            }
+        },
+    )
+    provider = CapturingResumeWriter(
+        [
+            {
+                "translations": [
+                    {
+                        "handle": support.handle,
+                        "field": "responsibility_or_scope",
+                        "value_index": 0,
+                        "translated_value": translated_value,
+                    }
+                ]
+            },
+            ResumeWriterTransportError("verification timed out", transient=True),
+            supplemental_verification_response(
+                handle=support.handle,
+                field="responsibility_or_scope",
+                pairs=[(source_value, translated_value)],
+            ),
+        ]
+    )
+
+    with pytest.raises(ResumeWriterTransportError, match="verification timed out"):
+        await provider._translate_required_supplemental_evidence(
+            language=PreferredLanguage.EN,
+            evidence=(support,),
+        )
+
+    assert len(provider.calls) == 2
+    assert len(provider.responses) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["omission", "wrong_handle", "missing_negation"],
+)
+async def test_invalid_foreign_supplemental_translation_fails_closed_after_one_retry(
+    invalid_kind: str,
+) -> None:
+    arabic_context = (
+        "\u0623\u062f\u064a\u0631 \u0645\u062d\u0641\u0638\u0629 "
+        "\u0627\u0633\u062a\u062b\u0645\u0627\u0631\u064a\u0629 "
+        "\u0634\u062e\u0635\u064a\u0629\u060c \u0648\u0644\u064a\u0633\u062a "
+        "\u0644\u0635\u0627\u0644\u062d \u0634\u0631\u0643\u0629."
+    )
+    translated_context = (
+        "Manage a personal investment portfolio, not for a company"
+    )
+    support = ResumeEvidence(
+        handle="foreign_translation_validation",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=arabic_context,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Trading Experience",
+            "supplemental_details": {
+                "organization_or_context": {"value": arabic_context},
+            },
+        },
+    )
+    translation = {
+        "handle": support.handle,
+        "field": "organization_or_context",
+        "value_index": 0,
+        "translated_value": translated_context,
+    }
+    if invalid_kind == "omission":
+        invalid_response: dict[str, object] = {"translations": []}
+    elif invalid_kind == "wrong_handle":
+        invalid_response = {
+            "translations": [{**translation, "handle": "wrong_handle"}],
+        }
+    else:
+        invalid_response = {
+            "translations": [
+                {
+                    **translation,
+                    "translated_value": "Manage a personal investment portfolio",
+                }
+            ],
+        }
+    provider = CapturingResumeWriter([invalid_response, invalid_response])
+
+    with pytest.raises(
+        ResumeWriterOutputError,
+        match="no usable supplemental translations",
+    ):
+        await provider.generate_draft(
+            language=PreferredLanguage.EN,
+            target_role=None,
+            evidence=(support,),
+            answers=[],
+        )
+
+    assert len(provider.calls) == 2
+    assert {call["schema_name"] for call in provider.calls} == {
+        "resume_supplemental_translations"
+    }
+    retry_instructions = provider.calls[1]["system_instructions"]
+    assert "prior translations failed deterministic validation" in retry_instructions
+    assert arabic_context not in retry_instructions
+
+
+@pytest.mark.asyncio
+async def test_supplemental_translation_redacts_private_data_and_does_not_retry_transport() -> None:
+    private_context = (
+        "\u0623\u062f\u064a\u0631 \u0645\u062d\u0641\u0638\u062a\u064a "
+        "\u0627\u0644\u0627\u0633\u062a\u062b\u0645\u0627\u0631\u064a\u0629 "
+        "\u0627\u0644\u0634\u062e\u0635\u064a\u0629 \u0628\u0646\u0641\u0633\u064a "
+        "\u0648\u0644\u064a\u0633 \u0644\u0635\u0627\u0644\u062d \u0634\u0631\u0643\u0629; "
+        "candidate@example.test; +966 50 123 4567"
+    )
+    support = ResumeEvidence(
+        handle="private_foreign_supplemental",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=private_context,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "organization_or_context": {"value": private_context},
+            }
+        },
+    )
+    provider = CapturingResumeWriter(
+        ResumeWriterTransportError("provider request failed", transient=True)
+    )
+
+    with pytest.raises(ResumeWriterTransportError):
+        await provider.generate_draft(
+            language=PreferredLanguage.EN,
+            target_role=None,
+            evidence=(support,),
+            answers=[],
+        )
+
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["schema_name"] == "resume_supplemental_translations"
+    serialized_payload = str(provider.calls[0]["payload"])
+    assert "candidate@example.test" not in serialized_payload
+    assert "+966 50 123 4567" not in serialized_payload
+    assert all(
+        "@" not in entry["value"] and "+966" not in entry["value"]
+        for entry in provider.calls[0]["payload"]["required_supplemental_evidence"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_translation_and_verifier_receive_only_redacted_private_values() -> None:
+    private_context = (
+        "\u0623\u062f\u064a\u0631 \u0645\u062d\u0641\u0638\u062a\u064a "
+        "\u0627\u0644\u0627\u0633\u062a\u062b\u0645\u0627\u0631\u064a\u0629 "
+        "\u0627\u0644\u0634\u062e\u0635\u064a\u0629\u060c \u0648\u0644\u064a\u0633 "
+        "\u0644\u0635\u0627\u0644\u062d \u0634\u0631\u0643\u0629; "
+        "candidate@example.test; +966 50 123 4567"
+    )
+    safe_context = _redact_resume_text(private_context)
+    translated_value = (
+        "Manage my personal investment portfolio, not for a company; "
+        "[redacted]; [redacted]"
+    )
+    support = ResumeEvidence(
+        handle="redacted_verified_translation",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=private_context,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "organization_or_context": {"value": private_context},
+            }
+        },
+    )
+    provider = CapturingResumeWriter(
+        [
+            {
+                "translations": [
+                    {
+                        "handle": support.handle,
+                        "field": "organization_or_context",
+                        "value_index": 0,
+                        "translated_value": translated_value,
+                    }
+                ]
+            },
+            supplemental_verification_response(
+                handle=support.handle,
+                field="organization_or_context",
+                pairs=[(safe_context, translated_value)],
+            ),
+        ]
+    )
+
+    translated = await provider._translate_required_supplemental_evidence(
+        language=PreferredLanguage.EN,
+        evidence=(support,),
+    )
+
+    serialized_calls = str(provider.calls)
+    assert "candidate@example.test" not in serialized_calls
+    assert "+966 50 123 4567" not in serialized_calls
+    assert safe_context in str(provider.calls[0]["payload"])
+    assert safe_context in str(provider.calls[1]["payload"])
+    assert translated[0]["value"] == safe_context
+    assert translated[0]["translated_value"] == translated_value
+
+
+def test_required_supplemental_payload_redacts_contact_details() -> None:
+    private_value = (
+        "Personal investment portfolio; candidate@example.test; +966 50 123 4567"
+    )
+    support = ResumeEvidence(
+        handle="private_supplemental_fact",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=None,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "organization_or_context": {"value": private_value},
+            }
+        },
+    )
+
+    payload = resume_writer_module._required_supplemental_evidence((support,))
+    serialized_payload = str(payload)
+
+    assert "Personal investment portfolio" in serialized_payload
+    assert "candidate@example.test" not in serialized_payload
+    assert "+966 50 123 4567" not in serialized_payload
+
+
+def test_every_foreign_supplemental_value_requires_its_own_grounded_translation() -> None:
+    arabic_context = (
+        "\u0645\u062d\u0641\u0638\u0629 \u0627\u0633\u062a\u062b\u0645\u0627\u0631\u064a\u0629 "
+        "\u0634\u062e\u0635\u064a\u0629"
+    )
+    arabic_negation = (
+        "\u0644\u064a\u0633\u062a \u0644\u0635\u0627\u0644\u062d \u0634\u0631\u0643\u0629"
+    )
+    full_answer = f"{arabic_context}. {arabic_negation}."
+    provenance = {
+        "kind": "resume_gap_interview",
+        "gap_key": "experience:record:organization_or_context",
+    }
+    support = ResumeEvidence(
+        handle="two_supplemental_values",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=full_answer,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "organization_or_context": {
+                    "value": [arabic_context, arabic_negation],
+                    "source": provenance,
+                },
+            },
+            "supplemental_addenda": [
+                {
+                    "text": full_answer,
+                    "requested_fields": ["organization_or_context"],
+                    "question": "portfolio context",
+                    "source": provenance,
+                }
+            ],
+        },
+    )
+    translated_context = "Personal investment portfolio"
+
+    without_context = resume_writer_module._without_supplemental_value(
+        support,
+        arabic_context,
+    )
+    assert without_context.structured_value["supplemental_details"][
+        "organization_or_context"
+    ] == {
+        "value": [arabic_negation],
+        "source": provenance,
+    }
+    assert without_context.structured_value["supplemental_addenda"] == [
+        {
+            "text": arabic_negation,
+            "requested_fields": ["organization_or_context"],
+            "source": provenance,
+        }
+    ]
+    assert arabic_context not in str(without_context.detail)
+    assert arabic_context not in str(without_context.structured_value)
+
+    assert not resume_writer_module._foreign_supplemental_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        [translated_context],
+    )
+    assert resume_writer_module._foreign_supplemental_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        [translated_context, "Not for a company"],
+    )
+
+
+def test_education_full_answer_addendum_is_scoped_per_translated_field() -> None:
+    degree = "\u0628\u0643\u0627\u0644\u0648\u0631\u064a\u0648\u0633"
+    field = "\u0645\u0627\u0644\u064a\u0629"
+    institution = (
+        "\u062c\u0627\u0645\u0639\u0629 \u0627\u0644\u0645\u0644\u0643 \u0641\u0647\u062f "
+        "\u0644\u0644\u0628\u062a\u0631\u0648\u0644 "
+        "\u0648\u0627\u0644\u0645\u0639\u0627\u062f\u0646"
+    )
+    full_answer = " ".join(
+        (
+            "\u062d\u0635\u0644\u062a \u0639\u0644\u0649",
+            degree,
+            "\u0641\u064a",
+            field,
+            "\u0645\u0646",
+            institution,
+            "\u0648\u062a\u062e\u0631\u062c\u062a \u0639\u0627\u0645 2025",
+        )
+    )
+    provenance = {
+        "kind": "resume_gap_interview",
+        "gap_key": "education:record",
+    }
+    supplemental_values = {
+        "degree": degree,
+        "field": field,
+        "institution": institution,
+        "graduation_date": "2025",
+    }
+    support = ResumeEvidence(
+        handle="arabic_education_gap_answer",
+        category="education",
+        label="Education",
+        detail=full_answer,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                field_name: {"value": value, "source": provenance}
+                for field_name, value in supplemental_values.items()
+            },
+            "supplemental_addenda": [
+                {
+                    "text": full_answer,
+                    "requested_fields": list(supplemental_values),
+                    "question": "education details",
+                    "source": provenance,
+                }
+            ],
+        },
+    )
+    translated_title = "Bachelor in Finance"
+    translated_institution = "King Fahd University of Petroleum and Minerals"
+
+    assert not resume_writer_module._foreign_supplemental_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        [translated_institution, "2025"],
+    )
+    assert not resume_writer_module._foreign_supplemental_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        [translated_title, "2025"],
+    )
+    assert resume_writer_module._foreign_supplemental_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        [translated_title, translated_institution, "2025"],
+    )
+
+    provider_draft = ResumeDraftContent.model_validate(
+        {
+            "headline": translated_title,
+            "professional_summary": "Finance graduate with confirmed education details.",
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "education",
+                    "title": "Education",
+                    "items": [
+                        {
+                            "id": "finance_degree",
+                            "title": translated_title,
+                            "organization": translated_institution,
+                            "date_range": "2025",
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        provider_draft,
+        (support,),
+        PreferredLanguage.EN,
+    )
+
+    education_item = completed.sections[0].items[0]
+    assert education_item.title == translated_title
+    assert education_item.organization == translated_institution
+    assert education_item.date_range == "2025"
+
+
+def test_foreign_narrative_requires_a_translation_for_every_distinct_atom() -> None:
+    financial_analysis = (
+        "\u062d\u0644\u0644\u062a \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a "
+        "\u0627\u0644\u0645\u0627\u0644\u064a\u0629"
+    )
+    sales_reports = (
+        "\u0623\u0639\u062f\u062f\u062a \u062a\u0642\u0627\u0631\u064a\u0631 "
+        "\u0627\u0644\u0645\u0628\u064a\u0639\u0627\u062a"
+    )
+    excel = "\u0625\u0643\u0633\u0644"
+    support = ResumeEvidence(
+        handle="arabic_finance_narrative",
+        category="experience",
+        label="Finance Analyst",
+        detail=f"{financial_analysis}. {sales_reports}. {excel}.",
+        verification_status="confirmed",
+        structured_value={
+            "responsibilities": [financial_analysis],
+            "outcomes": [sales_reports],
+            "tools": [excel],
+        },
+        source_excerpt=f"Finance Analyst\n{financial_analysis}\n{sales_reports}\n{excel}",
+    )
+    first_analysis = "Analyzed financial data using Excel."
+    duplicate_analysis = "Financial data analysis using Excel."
+    translated_sales = "Produced sales reports."
+
+    assert not resume_writer_module._foreign_narrative_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        [first_analysis, duplicate_analysis],
+    )
+    assert not resume_writer_module._foreign_narrative_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        ["Financial data analysis.", translated_sales],
+    )
+    assert resume_writer_module._foreign_narrative_has_grounded_translation(
+        support,
+        PreferredLanguage.EN,
+        [first_analysis, translated_sales],
+    )
+
+    def provider_draft(bullets: list[str]) -> ResumeDraftContent:
+        return ResumeDraftContent.model_validate(
+            {
+                "headline": "Finance Analyst",
+                "professional_summary": "Finance analyst with financial reporting experience.",
+                "summary_evidence_handles": [support.handle],
+                "sections": [
+                    {
+                        "key": "experience",
+                        "title": "Professional Experience",
+                        "items": [
+                            {
+                                "id": "finance_analyst",
+                                "title": "Finance Analyst",
+                                "organization": None,
+                                "date_range": None,
+                                "location": None,
+                                "bullets": bullets,
+                                "evidence_handles": [support.handle],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(ResumeWriterError, match="translated narrative detail"):
+        resume_writer_module._complete_draft_from_evidence(
+            provider_draft([first_analysis, duplicate_analysis]),
+            (support,),
+            PreferredLanguage.EN,
+        )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        provider_draft([first_analysis, translated_sales]),
+        (support,),
+        PreferredLanguage.EN,
+    )
+    completed_bullets = completed.sections[0].items[0].bullets
+    assert completed_bullets == [first_analysis, translated_sales]
+    assert not any(
+        value in " ".join(completed_bullets)
+        for value in (financial_analysis, sales_reports, excel)
+    )
+
+
+def test_hadi_english_narrative_completion_is_unchanged() -> None:
+    responsibilities = [
+        "Performed monthly variance analysis, cost control, and internal financial reviews",
+        "Supported audit processes, compliance checks, and management reporting",
+    ]
+    support = ResumeEvidence(
+        handle="hadi_cost_control",
+        category="experience",
+        label="Cost Control & Finance Analyst",
+        detail=None,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Professional Experience",
+            "organization": "Northstar Consumer Brands",
+            "date_range": "2025 - Present",
+            "responsibilities": responsibilities,
+            "tools": ["Excel"],
+        },
+    )
+    provider_draft = ResumeDraftContent.model_validate(
+        {
+            "headline": support.label,
+            "professional_summary": responsibilities[0],
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "experience",
+                    "title": "Professional Experience",
+                    "items": [
+                        {
+                            "id": "cost_control_finance_analyst",
+                            "title": support.label,
+                            "organization": "Northstar Consumer Brands",
+                            "date_range": "2025 - Present",
+                            "location": None,
+                            "bullets": responsibilities,
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        provider_draft,
+        (support,),
+        PreferredLanguage.EN,
+    )
+
+    assert completed.sections[0].items[0].bullets == responsibilities
+
+
+def test_same_language_compact_organization_context_becomes_item_metadata() -> None:
+    context = "Self-managed personal investment portfolio"
+    responsibility = "Analyze investment opportunities for a personal portfolio."
+    support = ResumeEvidence(
+        handle="compact_personal_portfolio_context",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=f"{responsibility}\n{context}",
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Trading Experience",
+            "responsibilities": [responsibility],
+            "supplemental_details": {
+                "organization_or_context": {"value": context},
+            },
+        },
+    )
+    provider_draft = ResumeDraftContent.model_validate(
+        {
+            "headline": support.label,
+            "professional_summary": responsibility,
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "trading_experience",
+                    "title": "Trading Experience",
+                    "items": [
+                        {
+                            "id": "personal_portfolio",
+                            "title": support.label,
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [responsibility],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        provider_draft,
+        (support,),
+        PreferredLanguage.EN,
+    )
+
+    item = completed.sections[0].items[0]
+    assert item.organization == context
+    assert context not in item.bullets
 
 
 @pytest.mark.asyncio
@@ -1970,6 +3273,782 @@ def test_generated_draft_sanitizer_omits_unsupported_fragments() -> None:
     _validated_draft(sanitized, evidence(), "Data Analyst")
 
 
+def test_sanitizer_drops_wrong_section_items_and_completion_restores_every_fact() -> None:
+    responsibility = "Prepared monthly financial reports for cost control"
+    supports = (
+        ResumeEvidence(
+            handle="wrong_section_experience",
+            category="experience",
+            label="Finance Analyst",
+            detail=responsibility,
+            verification_status="confirmed",
+            structured_value={"responsibilities": [responsibility]},
+        ),
+        ResumeEvidence(
+            handle="wrong_section_certification",
+            category="certification",
+            label="CFA Level I",
+            detail="CFA Institute, 2025",
+            verification_status="confirmed",
+            structured_value={"issuer": "CFA Institute", "date_range": "2025"},
+        ),
+        ResumeEvidence(
+            handle="correct_skill_anchor",
+            category="skill",
+            label="Excel",
+            detail="Used Excel for financial reporting",
+            verification_status="confirmed",
+        ),
+    )
+    generated = _GeneratedDraft.model_validate(
+        {
+            "headline": "Finance Analyst",
+            "professional_summary": f"{responsibility}.",
+            "summary_evidence_handles": ["wrong_section_experience"],
+            "sections": [
+                {
+                    "key": "certification",
+                    "title": "Certifications",
+                    "items": [
+                        {
+                            "id": "experience_in_certifications",
+                            "title": "Finance Analyst",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [responsibility],
+                            "evidence_handles": ["wrong_section_experience"],
+                        }
+                    ],
+                },
+                {
+                    "key": "experience",
+                    "title": "Professional Experience",
+                    "items": [
+                        {
+                            "id": "certification_in_experience",
+                            "title": "CFA Level I",
+                            "organization": "CFA Institute",
+                            "date_range": "2025",
+                            "location": None,
+                            "bullets": ["CFA Institute, 2025"],
+                            "evidence_handles": ["wrong_section_certification"],
+                        }
+                    ],
+                },
+                {
+                    "key": "skill",
+                    "title": "Skills",
+                    "items": [
+                        {
+                            "id": "excel",
+                            "title": "Excel",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": ["correct_skill_anchor"],
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+
+    sanitized = _sanitize_generated_draft(generated, supports)
+    assert [section.key for section in sanitized.sections] == ["skill"]
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        _validated_draft(sanitized, supports),
+        supports,
+        PreferredLanguage.EN,
+    )
+
+    restored = {
+        item.evidence_handles[0]: section.key
+        for section in completed.sections
+        for item in section.items
+    }
+    assert restored == {
+        "wrong_section_experience": "experience",
+        "wrong_section_certification": "certification",
+        "correct_skill_anchor": "skill",
+    }
+
+
+def test_sanitizer_restricts_mixed_handles_before_marking_facts_covered() -> None:
+    skill = ResumeEvidence(
+        handle="financial_analysis_skill",
+        category="skill",
+        label="Financial Analysis",
+        detail="Applied financial analysis in university coursework",
+        verification_status="confirmed",
+    )
+    education = ResumeEvidence(
+        handle="finance_education",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Harbor University, 2025",
+        verification_status="confirmed",
+        structured_value={
+            "institution": "Harbor University",
+            "date_range": "2025",
+        },
+    )
+    supports = (skill, education)
+    generated = _GeneratedDraft.model_validate(
+        {
+            "headline": skill.label,
+            "professional_summary": f"{skill.detail}.",
+            "summary_evidence_handles": [skill.handle],
+            "sections": [
+                {
+                    "key": "skill",
+                    "title": "Skills",
+                    "items": [
+                        {
+                            "id": "education_disguised_as_skill",
+                            "title": education.label,
+                            "organization": "Harbor University",
+                            "date_range": "2025",
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [skill.handle, education.handle],
+                        },
+                        {
+                            "id": "financial_analysis",
+                            "title": skill.label,
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [skill.handle],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    sanitized = _sanitize_generated_draft(generated, supports)
+    assert [item.id for item in sanitized.sections[0].items] == ["financial_analysis"]
+    assert sanitized.sections[0].items[0].evidence_handles == [skill.handle]
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        _validated_draft(sanitized, supports),
+        supports,
+        PreferredLanguage.EN,
+    )
+
+    assert [section.key for section in completed.sections] == ["education", "skill"]
+    completed_items = {
+        item.evidence_handles[0]: (section.key, item.title)
+        for section in completed.sections
+        for item in section.items
+    }
+    assert completed_items == {
+        education.handle: ("education", education.label),
+        skill.handle: ("skill", skill.label),
+    }
+
+
+def test_achievement_claim_does_not_cover_its_source_experience_record() -> None:
+    responsibility = "Prepared monthly financial reports"
+    support = ResumeEvidence(
+        handle="experience_supporting_achievement",
+        category="experience",
+        label="Finance Analyst",
+        detail=responsibility,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Professional Experience",
+            "responsibilities": [responsibility],
+        },
+    )
+    generated = _GeneratedDraft.model_validate(
+        {
+            "headline": support.label,
+            "professional_summary": f"{responsibility}.",
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "achievement",
+                    "title": "Achievements",
+                    "items": [
+                        {
+                            "id": "monthly_reporting_achievement",
+                            "title": responsibility,
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    sanitized = _sanitize_generated_draft(generated, (support,))
+    completed = resume_writer_module._complete_draft_from_evidence(
+        _validated_draft(sanitized, (support,)),
+        (support,),
+        PreferredLanguage.EN,
+    )
+
+    assert [section.key for section in completed.sections] == [
+        "experience",
+        "achievement",
+    ]
+    experience = completed.sections[0].items[0]
+    achievement = completed.sections[1].items[0]
+    assert experience.title == support.label
+    assert experience.evidence_handles == [support.handle]
+    assert achievement.id == "monthly_reporting_achievement"
+    assert achievement.evidence_handles == [support.handle]
+
+
+def test_full_experience_record_is_not_duplicated_as_same_title_achievement() -> None:
+    support = ResumeEvidence(
+        handle="erp_implementation_experience",
+        category="experience",
+        label="ERP Implementation Experience",
+        detail="ERP Implementation Experience (Internship-based)",
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Certificates",
+            "responsibilities": ["Internship-based"],
+        },
+    )
+    generated = _GeneratedDraft.model_validate(
+        {
+            "headline": support.label,
+            "professional_summary": "ERP Implementation Experience (Internship-based).",
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "experience",
+                    "title": "Professional Experience",
+                    "items": [
+                        {
+                            "id": "erp_experience",
+                            "title": support.label,
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": ["Internship-based"],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                },
+                {
+                    "key": "achievement",
+                    "title": "Achievements",
+                    "items": [
+                        {
+                            "id": "erp_achievement_duplicate",
+                            "title": support.label,
+                            "organization": "Internship-based",
+                            "date_range": None,
+                            "location": None,
+                            "bullets": ["Internship-based"],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+
+    sanitized = _sanitize_generated_draft(generated, (support,))
+    completed = resume_writer_module._complete_draft_from_evidence(
+        _validated_draft(sanitized, (support,)),
+        (support,),
+        PreferredLanguage.EN,
+    )
+
+    assert [section.key for section in completed.sections] == ["experience"]
+    represented = [
+        item
+        for section in completed.sections
+        for item in section.items
+        if support.handle in item.evidence_handles
+    ]
+    assert len(represented) == 1
+    assert represented[0].title == support.label
+
+
+def test_same_title_achievement_only_is_restored_once_in_canonical_section() -> None:
+    support = ResumeEvidence(
+        handle="erp_canonical_fallback",
+        category="experience",
+        label="ERP Implementation Experience",
+        detail="ERP Implementation Experience (Internship-based)",
+        verification_status="confirmed",
+        structured_value={"responsibilities": ["Internship-based"]},
+    )
+    draft = ResumeDraftContent.model_validate(
+        {
+            "headline": support.label,
+            "professional_summary": "ERP Implementation Experience (Internship-based).",
+            "summary_evidence_handles": [support.handle],
+            "sections": [
+                {
+                    "key": "achievement",
+                    "title": "Achievements",
+                    "items": [
+                        {
+                            "id": "erp_achievement_only",
+                            "title": support.label,
+                            "organization": "Internship-based",
+                            "date_range": None,
+                            "location": None,
+                            "bullets": ["Internship-based"],
+                            "evidence_handles": [support.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        draft,
+        (support,),
+        PreferredLanguage.EN,
+    )
+
+    assert [section.key for section in completed.sections] == ["experience"]
+    assert completed.sections[0].items[0].title == support.label
+    assert completed.sections[0].items[0].evidence_handles == [support.handle]
+
+
+def test_compact_sections_follow_shared_source_segment_record_order() -> None:
+    certification_order = [
+        "CME-4 Certification",
+        "Advanced Microsoft Excel",
+        "CME-1 Certification",
+    ]
+    skill_order = [
+        "Trading Strategy Development",
+        "Backtesting & Optimization",
+        "Risk & Money Management",
+        "Portfolio Construction",
+        "Market Analysis",
+        "Options Strategies (Covered Calls)",
+    ]
+    language_order = ["English", "Arabic"]
+    certification_excerpt = "Certificates:\n" + "\n".join(certification_order)
+    skill_excerpt = "Financial Skills:\n" + ", ".join(skill_order)
+    language_excerpt = "Languages:\n" + " ".join(language_order)
+
+    def compact_support(
+        *,
+        category: str,
+        label: str,
+        handle: str,
+        segment: str,
+        source_excerpt: str,
+        detail: str | None = None,
+    ) -> ResumeEvidence:
+        structured_value: dict[str, object] = {"source_handles": [segment]}
+        if category == "language":
+            structured_value["proficiency"] = (
+                "Fluent" if label == "English" else "Native/Bilingual"
+            )
+        return ResumeEvidence(
+            handle=handle,
+            category=category,
+            label=label,
+            detail=detail,
+            verification_status="confirmed",
+            structured_value=structured_value,
+            source_excerpt=source_excerpt,
+            source_handles=(segment,),
+            source_group="uploaded_resume",
+        )
+
+    certifications = {
+        label: compact_support(
+            category="certification",
+            label=label,
+            handle=f"cert_{index}",
+            segment="segment_8",
+            source_excerpt=certification_excerpt,
+        )
+        for index, label in enumerate(certification_order)
+    }
+    skills = {
+        label: compact_support(
+            category="skill",
+            label=label,
+            handle=f"skill_{index}",
+            segment="segment_9",
+            source_excerpt=skill_excerpt,
+            detail=(
+                "Trading Strategy Development supports disciplined execution"
+                if label == "Trading Strategy Development"
+                else None
+            ),
+        )
+        for index, label in enumerate(skill_order)
+    }
+    languages = {
+        label: compact_support(
+            category="language",
+            label=label,
+            handle=f"language_{index}",
+            segment="segment_12",
+            source_excerpt=language_excerpt,
+        )
+        for index, label in enumerate(language_order)
+    }
+    provider_certification_order = [
+        "CME-1 Certification",
+        "Advanced Microsoft Excel",
+        "CME-4 Certification",
+    ]
+    provider_skill_order = [
+        "Market Analysis",
+        "Risk & Money Management",
+        "Portfolio Construction",
+        "Options Strategies (Covered Calls)",
+        "Trading Strategy Development",
+        "Backtesting & Optimization",
+    ]
+    provider_language_order = ["Arabic", "English"]
+    supports = tuple(
+        [certifications[label] for label in provider_certification_order]
+        + [skills[label] for label in provider_skill_order]
+        + [languages[label] for label in provider_language_order]
+    )
+
+    def provider_items(
+        ordered_labels: list[str],
+        support_by_label: dict[str, ResumeEvidence],
+        prefix: str,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "id": f"{prefix}_{index}",
+                "title": label,
+                "organization": (
+                    support_by_label[label].structured_value.get("proficiency")
+                    if prefix == "language"
+                    else None
+                ),
+                "date_range": None,
+                "location": None,
+                "bullets": [],
+                "evidence_handles": [support_by_label[label].handle],
+            }
+            for index, label in enumerate(ordered_labels)
+        ]
+
+    generated = _GeneratedDraft.model_validate(
+        {
+            "headline": "Trading Strategy Development",
+            "professional_summary": (
+                "Trading Strategy Development supports disciplined execution."
+            ),
+            "summary_evidence_handles": [
+                skills["Trading Strategy Development"].handle
+            ],
+            "sections": [
+                {
+                    "key": "certification",
+                    "title": "Certifications",
+                    "items": provider_items(
+                        provider_certification_order,
+                        certifications,
+                        "certification",
+                    ),
+                },
+                {
+                    "key": "skill",
+                    "title": "Skills",
+                    "items": provider_items(
+                        provider_skill_order,
+                        skills,
+                        "skill",
+                    ),
+                },
+                {
+                    "key": "language",
+                    "title": "Languages",
+                    "items": provider_items(
+                        provider_language_order,
+                        languages,
+                        "language",
+                    ),
+                },
+            ],
+        }
+    )
+    completed = resume_writer_module._complete_draft_from_evidence(
+        _validated_draft(_sanitize_generated_draft(generated, supports), supports),
+        supports,
+        PreferredLanguage.EN,
+    )
+    sections = {section.key: section for section in completed.sections}
+
+    assert [item.title for item in sections["certification"].items] == (
+        certification_order
+    )
+    assert [item.title for item in sections["skill"].items] == skill_order
+    assert [item.title for item in sections["language"].items] == language_order
+
+
+def test_source_order_uses_explicit_segment_record_suffix_before_input_order() -> None:
+    supports = tuple(
+        ResumeEvidence(
+            handle=f"skill_{record_index}",
+            category="skill",
+            label=f"Skill {record_index}",
+            detail=None,
+            verification_status="confirmed",
+            source_handles=(f"segment_9__{record_index}",),
+            source_group="uploaded_resume",
+        )
+        for record_index in (3, 1, 2)
+    )
+
+    ordered = resume_writer_module._evidence_in_source_order(supports)
+
+    assert [item.label for item in ordered] == ["Skill 1", "Skill 2", "Skill 3"]
+
+
+def test_source_order_breaks_shared_segment_suffix_ties_by_excerpt_position() -> None:
+    source_excerpt = "Skills: Skill 1, Skill 2, Skill 3"
+    supports = tuple(
+        ResumeEvidence(
+            handle=f"shared_skill_{record_index}",
+            category="skill",
+            label=f"Skill {record_index}",
+            detail=None,
+            verification_status="confirmed",
+            source_excerpt=source_excerpt,
+            source_handles=("segment_9__1",),
+            source_group="uploaded_resume",
+        )
+        for record_index in (3, 1, 2)
+    )
+
+    ordered = resume_writer_module._evidence_in_source_order(supports)
+
+    assert [item.label for item in ordered] == ["Skill 1", "Skill 2", "Skill 3"]
+
+
+def test_verified_overlay_replaces_overlapping_values_by_exact_atom_index() -> None:
+    short_source = "\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631"
+    long_source = (
+        "\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631 "
+        "\u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0639\u0632\u0641 "
+        "\u0639\u0644\u0649 \u0627\u0644\u0639\u0648\u062f"
+    )
+    short_translation = "Write poetry"
+    long_translation = "Write poetry while playing the oud"
+    support = ResumeEvidence(
+        handle="overlapping_supplemental_values",
+        category="project",
+        label="Creative Work",
+        detail=f"{short_source}. {long_source}.",
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "responsibility_or_scope": {
+                    "value": [short_source, long_source],
+                }
+            },
+            "supplemental_addenda": [
+                {
+                    "text": f"{short_source}\n{long_source}",
+                    "requested_fields": ["responsibility_or_scope"],
+                }
+            ],
+        },
+    )
+    required = [
+        {
+            "handle": support.handle,
+            "field": "responsibility_or_scope",
+            "value": short_source,
+            "translated_value": short_translation,
+        },
+        {
+            "handle": support.handle,
+            "field": "responsibility_or_scope",
+            "value": long_source,
+            "translated_value": long_translation,
+        },
+    ]
+
+    immediate = resume_writer_module._verified_supplemental_evidence_overlay(
+        (support,),
+        required,
+    )[0]
+    proofs = [
+        resume_writer_module.ResumeVerifiedSupplementalTranslation(
+            handle=support.handle,
+            field="responsibility_or_scope",
+            value_index=value_index,
+            source_hash=resume_writer_module.sha256(source.encode("utf-8")).hexdigest(),
+            translated_value=translated,
+            pair_id=resume_writer_module._supplemental_translation_pair_id(
+                handle=support.handle,
+                field_name="responsibility_or_scope",
+                value_index=value_index,
+                source_value=source,
+                translated_value=translated,
+            ),
+            verdict="pass",
+        )
+        for value_index, (source, translated) in enumerate(
+            (
+                (short_source, short_translation),
+                (long_source, long_translation),
+            )
+        )
+    ]
+    persisted = resume_writer_module.verified_supplemental_evidence_overlay(
+        (support,),
+        language=PreferredLanguage.EN,
+        translations=proofs,
+    )[0]
+
+    for overlaid in (immediate, persisted):
+        values = overlaid.structured_value["supplemental_details"][
+            "responsibility_or_scope"
+        ]["value"]
+        assert values == [short_translation, long_translation]
+        assert overlaid.detail == f"{short_translation}. {long_translation}."
+        addendum = overlaid.structured_value["supplemental_addenda"][0]["text"]
+        assert addendum == f"{short_translation}\n{long_translation}"
+        assert short_source not in overlaid.text
+        assert long_source not in overlaid.text
+
+
+def test_sanitizer_repairs_summary_attribution_before_balanced_completion() -> None:
+    cost_responsibility = (
+        "Performed monthly variance analysis at Northstar Consumer Brands"
+    )
+    trainee_responsibility = "Reconciled accounts at Meridian Petrochemical"
+    trading_responsibility = (
+        "Active trader in U.S. and regional equity markets since 2018"
+    )
+    cost = ResumeEvidence(
+        handle="cost_control_summary",
+        category="experience",
+        label="Finance Analyst",
+        detail=cost_responsibility,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Professional Experience",
+            "organization": "Northstar Consumer Brands",
+            "responsibilities": [cost_responsibility],
+        },
+        source_handles=("segment_4",),
+    )
+    trainee = ResumeEvidence(
+        handle="trainee_summary",
+        category="experience",
+        label="Finance Trainee",
+        detail=trainee_responsibility,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Professional Experience",
+            "organization": "Meridian Petrochemical",
+            "responsibilities": [trainee_responsibility],
+        },
+        source_handles=("segment_5",),
+    )
+    trading = ResumeEvidence(
+        handle="trading_summary",
+        category="experience",
+        label="Investment & Trading Professional",
+        detail=trading_responsibility,
+        verification_status="confirmed",
+        structured_value={
+            "source_section": "Investment & Trading Experience",
+            "responsibilities": [trading_responsibility],
+        },
+        source_handles=("segment_7",),
+    )
+    education = ResumeEvidence(
+        handle="education_summary",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Harbor University, 2025",
+        verification_status="confirmed",
+        structured_value={
+            "institution": "Harbor University",
+            "date_range": "2025",
+        },
+        source_handles=("segment_1",),
+    )
+    supports = (education, cost, trainee, trading)
+    combined_unsupported_unit = (
+        f"{cost_responsibility} and {trainee_responsibility.casefold()}."
+    )
+    grounded_education_unit = (
+        "Bachelor of Science in Finance from Harbor University."
+    )
+    generated = _GeneratedDraft.model_validate(
+        {
+            "headline": cost.label,
+            "professional_summary": (
+                f"{combined_unsupported_unit} {grounded_education_unit}"
+            ),
+            "summary_evidence_handles": [
+                cost.handle,
+                trainee.handle,
+                trading.handle,
+                education.handle,
+            ],
+            "sections": [
+                {
+                    "key": "education",
+                    "title": "Education",
+                    "items": [
+                        {
+                            "id": "finance_degree",
+                            "title": education.label,
+                            "organization": "Harbor University",
+                            "date_range": "2025",
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [education.handle],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    sanitized = _sanitize_generated_draft(generated, supports)
+    assert sanitized.professional_summary == grounded_education_unit
+    assert sanitized.summary_evidence_handles == [education.handle]
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        _validated_draft(sanitized, supports),
+        supports,
+        PreferredLanguage.EN,
+    )
+
+    assert completed.summary_evidence_handles == [
+        cost.handle,
+        trainee.handle,
+        trading.handle,
+    ]
+    for responsibility in (
+        cost_responsibility,
+        trainee_responsibility,
+        trading_responsibility,
+    ):
+        assert responsibility in completed.professional_summary
+
+
 def test_generated_draft_sanitizer_separates_cross_fact_headline_roles() -> None:
     combined_evidence = (
         *evidence(),
@@ -3079,6 +5158,73 @@ async def test_section_rewrite_has_one_total_wall_clock_budget() -> None:
     assert len(provider.calls) == 0
 
 
+@pytest.mark.asyncio
+async def test_translation_verification_pipeline_has_one_total_wall_clock_budget() -> None:
+    source_value = "\u0623\u0643\u062a\u0628 \u0627\u0644\u0634\u0639\u0631"
+    translated_value = "Write poetry"
+    support = ResumeEvidence(
+        handle="translation_pipeline_deadline",
+        category="project",
+        label="Creative Writing",
+        detail=source_value,
+        verification_status="confirmed",
+        structured_value={
+            "supplemental_details": {
+                "responsibility_or_scope": {"value": source_value},
+            }
+        },
+    )
+
+    class SlowTranslationWriter(CapturingResumeWriter):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    {
+                        "translations": [
+                            {
+                                "handle": support.handle,
+                                "field": "responsibility_or_scope",
+                                "value_index": 0,
+                                "translated_value": translated_value,
+                            }
+                        ]
+                    },
+                    supplemental_verification_response(
+                        handle=support.handle,
+                        field="responsibility_or_scope",
+                        pairs=[(source_value, translated_value)],
+                    ),
+                ]
+            )
+            self.started_schemas: list[str] = []
+
+        async def _structured_response(self, **kwargs: Any) -> BaseModel:
+            self.started_schemas.append(str(kwargs["schema_name"]))
+            await asyncio.sleep(0.03)
+            return await super()._structured_response(**kwargs)
+
+    provider = SlowTranslationWriter()
+    provider._timeout_seconds = 0.05
+
+    with pytest.raises(ResumeWriterTransportError) as captured:
+        await provider.generate_draft(
+            language=PreferredLanguage.EN,
+            target_role=None,
+            evidence=(support,),
+            answers=[],
+        )
+
+    assert captured.value.transient is True
+    assert provider.started_schemas == [
+        "resume_supplemental_translations",
+        "resume_supplemental_translation_verification",
+    ]
+    assert [call["schema_name"] for call in provider.calls] == [
+        "resume_supplemental_translations"
+    ]
+    assert len(provider.responses) == 1
+
+
 def test_provider_uses_dedicated_interview_and_writer_models_with_one_key() -> None:
     provider = get_resume_writer_provider(
         Settings(
@@ -3278,6 +5424,22 @@ async def test_mistral_provider_reuses_client_and_bounds_interactive_failures(
         max_tokens=4_000,
         model_name="writer-model",
     )
+    translation = await provider._structured_response(
+        schema=TinyResponse,
+        schema_name="resume_supplemental_translations",
+        system_instructions="Return JSON",
+        payload={"translation": 1},
+        max_tokens=2_000,
+        model_name="writer-model",
+    )
+    verification = await provider._structured_response(
+        schema=TinyResponse,
+        schema_name="resume_supplemental_translation_verification",
+        system_instructions="Return JSON",
+        payload={"verification": 1},
+        max_tokens=2_000,
+        model_name="writer-model",
+    )
     rewrite = await provider._structured_response(
         schema=TinyResponse,
         schema_name="resume_section_rewrite_candidate",
@@ -3289,15 +5451,19 @@ async def test_mistral_provider_reuses_client_and_bounds_interactive_failures(
 
     assert adaptive.value == "ok"
     assert draft.value == "ok"
+    assert translation.value == "ok"
+    assert verification.value == "ok"
     assert rewrite.value == "ok"
     assert len(FakeAsyncOpenAI.instances) == 1
     client = FakeAsyncOpenAI.instances[0]
     assert client.options == [
         {"timeout": 15.0, "max_retries": 0},
         {"timeout": 45.0, "max_retries": 0},
+        {"timeout": 20.0, "max_retries": 0},
+        {"timeout": 20.0, "max_retries": 0},
         {"timeout": 30.0, "max_retries": 0},
     ]
-    assert len(client.completions.calls) == 3
+    assert len(client.completions.calls) == 5
 
     client.completions.delay = 0.05
     provider._timeout_seconds = 0.01

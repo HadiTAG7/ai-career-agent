@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from copy import deepcopy
 from datetime import UTC, datetime
 from functools import partial
@@ -22,12 +23,17 @@ from career_agent_api.db.session import get_db
 from career_agent_api.models.domain import (
     CareerFact,
     CareerProfile,
+    ClaimEvidence,
+    DocumentClaim,
+    DocumentVersion,
     EvidenceSource,
+    MatchAnalysis,
     ResumeDraftVersion,
     ResumeMessage,
     ResumeWorkspace,
 )
 from career_agent_api.models.enums import (
+    DocumentStatus,
     FactCategory,
     PreferredLanguage,
     ResumeDraftStatus,
@@ -52,8 +58,14 @@ from career_agent_api.schemas.api import (
     ResumeRewriteCreate,
     ResumeRewriteSuggestionRead,
     ResumeUnderstandingActionCreate,
+    ResumeVerifiedSupplementalTranslation,
     ResumeWorkspaceRead,
     ResumeWorkspaceStartCreate,
+)
+from career_agent_api.services.resume_assessment import (
+    ResumeAssessmentGap,
+    build_resume_assessment,
+    deterministic_gap_question,
 )
 from career_agent_api.services.resume_export import render_resume_pdf
 from career_agent_api.services.resume_writer import (
@@ -69,6 +81,7 @@ from career_agent_api.services.resume_writer import (
     resume_evidence_coursework,
     resume_patch_uses_requested_language,
     validate_claim_grounding,
+    verified_supplemental_evidence_overlay,
 )
 
 router = APIRouter(
@@ -82,6 +95,8 @@ CONSENT_VERSION = "2026-08-08-v2"
 AUTOSAVE_SNAPSHOT_LIMIT = 30
 WORKSPACE_MESSAGE_RESPONSE_LIMIT = 50
 WORKSPACE_VERSION_RESPONSE_LIMIT = 20
+VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY = "verified_supplemental_translations"
+VERIFIED_SUPPLEMENTAL_TRANSLATIONS_SCHEMA = "resume_verified_supplemental.v1"
 VERSION_HISTORY_DEFAULT_LIMIT = 30
 VERSION_HISTORY_MAX_LIMIT = 50
 PROFESSIONAL_CATEGORIES = {
@@ -125,11 +140,9 @@ async def _owned_profile(
     *,
     for_update: bool = False,
 ) -> CareerProfile:
-    statement = (
-        select(CareerProfile).where(
-            CareerProfile.id == profile_id,
-            CareerProfile.owner_id == owner_id,
-        )
+    statement = select(CareerProfile).where(
+        CareerProfile.id == profile_id,
+        CareerProfile.owner_id == owner_id,
     )
     if for_update:
         statement = statement.with_for_update()
@@ -171,9 +184,7 @@ async def _load_workspace(
             .limit(WORKSPACE_MESSAGE_RESPONSE_LIMIT)
         )
         relationship_options.append(
-            selectinload(
-                ResumeWorkspace.messages.and_(ResumeMessage.id.in_(latest_message_ids))
-            )
+            selectinload(ResumeWorkspace.messages.and_(ResumeMessage.id.in_(latest_message_ids)))
         )
     if include_versions:
         latest_version_ids = (
@@ -188,9 +199,7 @@ async def _load_workspace(
         )
         relationship_options.append(
             selectinload(
-                ResumeWorkspace.versions.and_(
-                    ResumeDraftVersion.id.in_(latest_version_ids)
-                )
+                ResumeWorkspace.versions.and_(ResumeDraftVersion.id.in_(latest_version_ids))
             )
         )
     if relationship_options:
@@ -217,6 +226,17 @@ async def _profile_facts(session: AsyncSession, profile_id: UUID) -> list[Career
     )
 
 
+def _facts_selected_by_metadata(
+    facts: list[CareerFact],
+    metadata: dict[str, Any],
+) -> list[CareerFact]:
+    raw_ids = metadata.get("generation_fact_ids")
+    if not isinstance(raw_ids, list):
+        return facts
+    selected_ids = {str(value) for value in raw_ids if str(value).strip()}
+    return [fact for fact in facts if str(fact.id) in selected_ids]
+
+
 async def _workspace_facts(
     session: AsyncSession,
     workspace: ResumeWorkspace,
@@ -225,11 +245,7 @@ async def _workspace_facts(
 
     facts = await _profile_facts(session, workspace.profile_id)
     metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
-    raw_ids = metadata.get("generation_fact_ids")
-    if not isinstance(raw_ids, list):
-        return facts
-    selected_ids = {str(value) for value in raw_ids if str(value).strip()}
-    return [fact for fact in facts if str(fact.id) in selected_ids]
+    return _facts_selected_by_metadata(facts, metadata)
 
 
 def _provider_consent_version(provider: ResumeWriterProvider) -> str:
@@ -295,11 +311,7 @@ def _first_question(
         if fact.verification_status is VerificationStatus.CONFIRMED
     }
     next_category = next(
-        (
-            category
-            for category in RESUME_SECTION_ORDER
-            if category not in categories
-        ),
+        (category for category in RESUME_SECTION_ORDER if category not in categories),
         RESUME_SECTION_ORDER[-1],
     )
     if next_category == "experience":
@@ -442,14 +454,18 @@ def _resume_review_hash(
 ) -> str:
     """Fingerprint every persisted input that can change the rendered PDF."""
 
+    metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
     snapshot = {
-        "schema_version": "resume_pdf_review.v2",
+        "schema_version": "resume_pdf_review.v3",
         "current_draft": workspace.current_draft,
         "evidence_revision": workspace.evidence_revision,
         "profile_full_name": profile.full_name,
         "profile_city": profile.city,
         "language": workspace.language.value,
         "contact": ResumeExportContact.model_validate(workspace.contact).model_dump(mode="json"),
+        VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY: metadata.get(
+            VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY
+        ),
     }
     return sha256(
         json.dumps(
@@ -532,6 +548,88 @@ def _evidence_fingerprint(evidence: tuple[Any, ...]) -> str:
     ).hexdigest()
 
 
+def _store_verified_supplemental_translations(
+    workspace: ResumeWorkspace,
+    *,
+    draft: ResumeDraftContent,
+    evidence: tuple[Any, ...],
+) -> None:
+    """Persist only server-generated verifier proofs, never source evidence or contact PII."""
+
+    metadata = dict(workspace.provider_metadata)
+    metadata.pop(VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY, None)
+    proofs = list(draft.verified_supplemental_translations)
+    if proofs:
+        # Revalidate the in-memory proof at the persistence boundary.  The source itself remains
+        # in CareerFact; metadata receives only its redacted hash and the verified translation.
+        verified_supplemental_evidence_overlay(
+            evidence,
+            language=workspace.language,
+            translations=proofs,
+        )
+        metadata[VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY] = {
+            "schema_version": VERIFIED_SUPPLEMENTAL_TRANSLATIONS_SCHEMA,
+            "language": workspace.language.value,
+            "evidence_fingerprint": _evidence_fingerprint(evidence),
+            "entries": [proof.model_dump(mode="json") for proof in proofs],
+        }
+    workspace.provider_metadata = metadata
+
+
+def _workspace_evidence_with_verified_translations(
+    workspace: ResumeWorkspace,
+    evidence: tuple[Any, ...],
+    *,
+    metadata_override: dict[str, Any] | None = None,
+) -> tuple[Any, ...]:
+    """Rebuild the translation overlay only when every persisted binding is current."""
+
+    metadata = (
+        metadata_override
+        if metadata_override is not None
+        else workspace.provider_metadata
+        if isinstance(workspace.provider_metadata, dict)
+        else {}
+    )
+    raw_bundle = metadata.get(VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY)
+    try:
+        if raw_bundle is None:
+            proofs: list[ResumeVerifiedSupplementalTranslation] = []
+        else:
+            if not isinstance(raw_bundle, dict) or set(raw_bundle) != {
+                "schema_version",
+                "language",
+                "evidence_fingerprint",
+                "entries",
+            }:
+                raise ResumeWriterError("Verified supplemental evidence metadata is invalid")
+            if (
+                raw_bundle.get("schema_version")
+                != VERIFIED_SUPPLEMENTAL_TRANSLATIONS_SCHEMA
+                or raw_bundle.get("language") != workspace.language.value
+                or raw_bundle.get("evidence_fingerprint") != _evidence_fingerprint(evidence)
+            ):
+                raise ResumeWriterError("Verified supplemental evidence metadata is stale")
+            raw_entries = raw_bundle.get("entries")
+            if not isinstance(raw_entries, list):
+                raise ResumeWriterError("Verified supplemental evidence metadata is invalid")
+            proofs = [
+                ResumeVerifiedSupplementalTranslation.model_validate(entry)
+                for entry in raw_entries
+            ]
+        return verified_supplemental_evidence_overlay(
+            evidence,
+            language=workspace.language,
+            translations=proofs,
+        )
+    except (ResumeWriterError, ValueError) as exc:
+        raise _api_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "resume_verified_translation_invalid",
+            "Confirmed translated evidence changed or is incomplete; regenerate the resume",
+        ) from exc
+
+
 def _first_interview_section(facts: list[CareerFact]) -> ResumeWriterCategory:
     confirmed_categories = {
         fact.category.value
@@ -539,11 +637,7 @@ def _first_interview_section(facts: list[CareerFact]) -> ResumeWriterCategory:
         if fact.verification_status is VerificationStatus.CONFIRMED
     }
     return next(
-        (
-            category
-            for category in RESUME_SECTION_ORDER
-            if category not in confirmed_categories
-        ),
+        (category for category in RESUME_SECTION_ORDER if category not in confirmed_categories),
         RESUME_SECTION_ORDER[-1],
     )
 
@@ -593,8 +687,575 @@ async def _generate_ordered_question(
     return question
 
 
+def _import_flow(workspace: ResumeWorkspace) -> dict[str, Any] | None:
+    metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
+    raw_flow = metadata.get("import_flow")
+    return dict(raw_flow) if isinstance(raw_flow, dict) else None
+
+
+def _additional_information_question(
+    language: PreferredLanguage,
+    source_id: str,
+) -> dict[str, Any]:
+    if language is PreferredLanguage.AR:
+        question = "ما المعلومات المهمة التي تريد إضافتها ولم تكن موجودة في الملف؟"
+        why = "سأحفظ فقط ما تؤكده ثم أعود إلى النواقص المحددة في التحليل."
+        placeholder = "مثال: مشروع، تدريب، تطوع، شهادة، أو مسؤولية لم تُذكر في الملف."
+    else:
+        question = "What important information would you like to add that was not in the file?"
+        why = "I will save only what you confirm, then return to the assessed gaps."
+        placeholder = (
+            "For example, a project, internship, volunteer role, certification, or responsibility."
+        )
+    return {
+        "id": f"additional_information_{source_id.replace('-', '')[-12:]}",
+        "category": "achievement",
+        "fields_requested": ["additional_information"],
+        "question": question,
+        "why_it_matters": why,
+        "placeholder": placeholder,
+        "required": False,
+        "quick_replies": ["skip"],
+        "generation_source": "server",
+    }
+
+
+async def _question_for_assessment_gap(
+    provider: ResumeWriterProvider,
+    *,
+    workspace: ResumeWorkspace,
+    evidence: tuple[Any, ...],
+    gap: ResumeAssessmentGap,
+) -> dict[str, Any]:
+    language = _conversation_language(workspace)
+    question_metadata = deterministic_gap_question(gap, language)
+    if not provider.available or not _has_current_consent(workspace, provider):
+        raise _api_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "resume_writer_unavailable",
+            "The AI resume writer is unavailable; retry this gap question",
+        )
+    try:
+        questions = await provider.generate_questions(
+            language=language,
+            target_role=None,
+            evidence=evidence,
+            conversation=_workspace_conversation(workspace),
+            required_category=cast(ResumeWriterCategory, gap.category.value),
+            max_questions=1,
+            gap=gap.model_dump(mode="json"),
+        )
+        if not questions or questions[0].category is not gap.category:
+            raise ResumeWriterError(
+                "Resume writer returned a question for the wrong assessment gap"
+            )
+    except ResumeWriterError as exc:
+        logger.warning("Assessment gap question generation failed: %s", exc)
+        raise _api_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "resume_writer_unavailable",
+            "The AI resume writer could not generate the next gap question; retry",
+        ) from exc
+    generated = questions[0]
+    return {
+        **question_metadata,
+        "question": generated.question,
+        "why_it_matters": generated.why_it_matters,
+        "placeholder": generated.placeholder,
+        "generation_source": "ai",
+    }
+
+
+async def _advance_import_gap(
+    *,
+    workspace: ResumeWorkspace,
+    provider: ResumeWriterProvider,
+    evidence: tuple[Any, ...],
+) -> dict[str, Any] | None:
+    flow = _import_flow(workspace)
+    if flow is None:
+        return None
+    raw_queue = flow.get("gap_queue")
+    queue = list(raw_queue) if isinstance(raw_queue, list) else []
+    if not queue:
+        flow.update(
+            {
+                "phase": "ready_to_generate",
+                "can_generate": True,
+                "active_gap_key": None,
+                "gap_queue": [],
+            }
+        )
+        workspace.provider_metadata = {
+            **workspace.provider_metadata,
+            "import_flow": flow,
+            "current_question": None,
+            "pending_question": None,
+        }
+        return None
+    raw_gap = queue.pop(0)
+    try:
+        gap = ResumeAssessmentGap.model_validate(raw_gap)
+    except ValueError as exc:
+        raise ResumeWriterError("Stored resume assessment gap is invalid") from exc
+    question = await _question_for_assessment_gap(
+        provider,
+        workspace=workspace,
+        evidence=evidence,
+        gap=gap,
+    )
+    flow.update(
+        {
+            "phase": "gap_interview",
+            "can_generate": False,
+            "active_gap_key": gap.key,
+            "gap_queue": queue,
+        }
+    )
+    workspace.provider_metadata = {
+        **workspace.provider_metadata,
+        "import_flow": flow,
+        "current_question": question,
+        "pending_question": None,
+    }
+    return question
+
+
+def _record_import_gap_outcome(
+    workspace: ResumeWorkspace,
+    outcome_key: str,
+) -> None:
+    flow = _import_flow(workspace)
+    if flow is None:
+        return
+    active_gap_key = str(flow.get("active_gap_key") or "").strip()
+    if not active_gap_key:
+        return
+    recorded = [str(value) for value in flow.get(outcome_key, []) if str(value).strip()]
+    flow[outcome_key] = list(dict.fromkeys([*recorded, active_gap_key]))
+    flow["active_gap_key"] = None
+    workspace.provider_metadata = {
+        **workspace.provider_metadata,
+        "import_flow": flow,
+    }
+
+
+def _refresh_import_gap_queue(
+    workspace: ResumeWorkspace,
+    facts: list[CareerFact],
+    *,
+    complete_active_gap: bool,
+) -> None:
+    """Reassess gaps while preserving the user's completed and skipped progress."""
+
+    flow = _import_flow(workspace)
+    if flow is None:
+        return
+    assessment = build_resume_assessment(facts)
+    reassessed_keys = {gap.key for gap in assessment.gaps}
+    active_gap_key = str(flow.get("active_gap_key") or "").strip()
+    if complete_active_gap and active_gap_key and active_gap_key not in reassessed_keys:
+        _record_import_gap_outcome(workspace, "completed_gap_keys")
+        flow = _import_flow(workspace) or flow
+    completed = {str(value) for value in flow.get("completed_gap_keys", []) if str(value).strip()}
+    skipped = {str(value) for value in flow.get("skipped_gap_keys", []) if str(value).strip()}
+    excluded = completed | skipped
+    flow["assessment"] = assessment.model_dump(mode="json")
+    flow["gap_queue"] = [
+        gap.model_dump(mode="json") for gap in assessment.gaps if gap.key not in excluded
+    ]
+    flow["active_gap_key"] = None
+    workspace.provider_metadata = {
+        **workspace.provider_metadata,
+        "import_flow": flow,
+    }
+
+
 def _fact_handle(fact: CareerFact) -> str:
     return f"fact_{fact.id.hex}"
+
+
+def _active_fact_gap_target(
+    workspace: ResumeWorkspace,
+    facts: list[CareerFact],
+) -> tuple[CareerFact, str, list[str], dict[str, Any]] | None:
+    """Resolve a fact-specific guided gap without trusting client-authored identifiers."""
+
+    flow = _import_flow(workspace)
+    if flow is None or flow.get("phase") != "gap_interview":
+        return None
+    metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
+    raw_question = metadata.get("current_question")
+    question = dict(raw_question) if isinstance(raw_question, dict) else {}
+    gap_key = str(question.get("gap_key") or flow.get("active_gap_key") or "").strip()
+    if not gap_key.startswith("fact:"):
+        return None
+
+    raw_handles = question.get("evidence_handles")
+    raw_fields = question.get("fields_requested")
+    if not isinstance(raw_handles, list) or not isinstance(raw_fields, list):
+        assessment = flow.get("assessment")
+        gaps = assessment.get("gaps") if isinstance(assessment, dict) else None
+        matching_gap = next(
+            (
+                gap
+                for gap in gaps or []
+                if isinstance(gap, dict) and str(gap.get("key") or "") == gap_key
+            ),
+            None,
+        )
+        if isinstance(matching_gap, dict):
+            raw_handles = matching_gap.get("evidence_handles")
+            raw_fields = matching_gap.get("requested_fields")
+    handles = [str(value).strip() for value in raw_handles or [] if str(value).strip()]
+    fields = [str(value).strip() for value in raw_fields or [] if str(value).strip()]
+    if len(handles) != 1 or not fields or not handles[0].startswith("fact_"):
+        return None
+
+    fact_key = gap_key.split(":", 2)[1].replace("-", "").casefold()
+    handle_key = handles[0].removeprefix("fact_").replace("-", "").casefold()
+    if not fact_key or handle_key != fact_key:
+        return None
+    target = next(
+        (
+            fact
+            for fact in facts
+            if _fact_handle(fact) == handles[0]
+            and fact.verification_status is VerificationStatus.CONFIRMED
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    return target, gap_key, list(dict.fromkeys(fields))[:8], question
+
+
+_GAP_NON_ANSWERS = {
+    "n/a",
+    "no",
+    "none",
+    "not sure",
+    "i do not know",
+    "i don't know",
+    "skip",
+    "تخطي",
+    "لا أعرف",
+    "لا اعرف",
+    "لا أدري",
+    "لا ادري",
+    "ما أعرف",
+    "ما اعرف",
+    "غير متأكد",
+}
+
+
+def _is_gap_non_answer(value: str) -> bool:
+    normalized = re.sub(r"[^\w\s']", " ", value.casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if normalized in {item.casefold() for item in _GAP_NON_ANSWERS}:
+        return True
+    return any(
+        normalized.startswith(prefix)
+        for prefix in (
+            "i do not know ",
+            "i don't know ",
+            "لا أعرف ",
+            "لا اعرف ",
+            "لا أدري ",
+            "لا ادري ",
+            "ما أعرف ",
+            "ما اعرف ",
+        )
+    )
+
+
+def _identity_tokens(value: object) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+    tokens: set[str] = set()
+    for raw_token in re.findall(r"\w+", value.casefold(), flags=re.UNICODE):
+        if raw_token in {
+            "a",
+            "an",
+            "and",
+            "at",
+            "of",
+            "professional",
+            "the",
+            "خبرة",
+            "شخصية",
+            "في",
+            "من",
+        }:
+            continue
+        if (
+            raw_token.startswith(("invest", "trad", "portfolio"))
+            or "استثمار" in raw_token
+            or "تداول" in raw_token
+            or "محفظ" in raw_token
+        ):
+            tokens.add("investment_portfolio")
+        else:
+            tokens.add(raw_token)
+    return tokens
+
+
+def _answer_explicitly_describes_another_record(answer: str) -> bool:
+    normalized = re.sub(r"\s+", " ", answer.casefold()).strip()
+    return any(
+        marker in normalized
+        for marker in (
+            "also worked",
+            "another experience",
+            "another job",
+            "another role",
+            "separate experience",
+            "خبرة أخرى",
+            "خبرة اخرى",
+            "وظيفة أخرى",
+            "وظيفة اخرى",
+            "عمل آخر",
+            "عمل اخر",
+            "عملت أيضاً",
+            "عملت أيضا",
+            "اشتغلت أيضاً",
+            "اشتغلت أيضا",
+        )
+    )
+
+
+def _record_targets_gap_fact(
+    record: dict[str, Any],
+    fact: CareerFact,
+    *,
+    answer: str,
+) -> bool:
+    """Conservatively distinguish a supplement from a separate same-category record."""
+
+    target_handle = _fact_handle(fact)
+    raw_handles = record.get("source_handles")
+    handles = {
+        str(value).strip()
+        for value in (raw_handles if isinstance(raw_handles, list) else [])
+        if str(value).strip()
+    }
+    if target_handle in handles:
+        return True
+    if _answer_explicitly_describes_another_record(answer):
+        return False
+
+    structured = fact.structured_value if isinstance(fact.structured_value, dict) else {}
+    target_identity = set()
+    for value in (
+        fact.label,
+        structured.get("title"),
+        structured.get("degree"),
+        structured.get("name"),
+    ):
+        target_identity.update(_identity_tokens(value))
+    record_identity = set()
+    for value in (record.get("title"), record.get("degree"), record.get("name")):
+        record_identity.update(_identity_tokens(value))
+    if target_identity and record_identity and target_identity & record_identity:
+        return True
+
+    anchors = [
+        str(record.get(key) or "").strip()
+        for key in ("organization", "institution", "issuer")
+        if str(record.get(key) or "").strip()
+    ]
+    title = str(record.get("title") or "").strip()
+    # A new role/qualification with its own organization is a separate fact. A bare employer
+    # answer (title == employer) remains a valid response to an organization-only gap.
+    if anchors and title and all(title.casefold() != anchor.casefold() for anchor in anchors):
+        return False
+    if anchors and title and any(title.casefold() == anchor.casefold() for anchor in anchors):
+        return True
+    # A field-of-study answer such as "Finance" has no dedicated canonical property, so the
+    # provider must place it in title. Keep this narrow education-only allowance. For every other
+    # category, a new non-matching title is a separate record, even when no organization was given.
+    if fact.category is FactCategory.EDUCATION and record_identity and not anchors:
+        return True
+    return not record_identity
+
+
+def _first_record_field(records: list[dict[str, Any]], *keys: str) -> Any | None:
+    for record in records:
+        for key in keys:
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, list):
+                cleaned = [str(item).strip() for item in value if str(item).strip()]
+                if cleaned:
+                    return cleaned
+    return None
+
+
+def _mapped_gap_field_values(
+    requested_fields: list[str],
+    records: list[dict[str, Any]],
+    *,
+    answer: str,
+) -> dict[str, Any]:
+    aliases: dict[str, tuple[str, ...]] = {
+        "degree": ("degree",),
+        "field": ("field", "field_of_study", "major", "specialization"),
+        "institution": ("institution",),
+        "graduation_date": ("graduation_date", "date_range", "year"),
+        "organization_or_context": ("organization", "context"),
+        "date_range": ("date_range", "year"),
+        "responsibility_or_contribution": (
+            "responsibilities",
+            "outcomes",
+            "contribution",
+        ),
+        "contribution": ("contribution", "responsibilities", "outcomes"),
+        "tools": ("tools",),
+        "issuer": ("issuer",),
+        "year": ("year", "date_range"),
+        "proficiency": ("proficiency",),
+        "usage_context": ("usage_context", "responsibilities", "outcomes"),
+        "example": ("example", "usage_example", "responsibilities", "outcomes"),
+    }
+    values: dict[str, Any] = {}
+    for field in requested_fields:
+        value = _first_record_field(records, *aliases.get(field, (field,)))
+        if value is None and field == "field":
+            # The canonical record schema has no dedicated field-of-study property. A title that
+            # is not a degree is the provider's only structured representation of "Finance".
+            candidate = _first_record_field(records, "title")
+            degree = _first_record_field(records, "degree")
+            if candidate is not None and candidate != degree:
+                value = candidate
+        if value is not None:
+            values[field] = value
+    if len(requested_fields) == 1:
+        # The full answer is the evidence for a direct one-field question. Keep it verbatim even
+        # when the provider also returns a shorter normalized value (for example, "personal
+        # portfolio"), otherwise qualifications such as "not work for a company" disappear.
+        # Never apply this rule to a multi-field gap, where one sentence could falsely complete
+        # several unrelated fields.
+        values[requested_fields[0]] = answer.strip()[:4_000]
+    return values
+
+
+def _enrich_fact_from_confirmed_gap(
+    fact: CareerFact,
+    *,
+    gap_key: str,
+    field_values: dict[str, Any],
+    question: dict[str, Any],
+    confirmed_text: str,
+    source_message_id: str | None,
+    confirmed_at: datetime,
+) -> None:
+    """Attach a confirmed answer to its source fact while keeping explicit provenance."""
+
+    answer = confirmed_text.strip()[:10_000]
+    if fact.original_extraction is None:
+        fact.original_extraction = {
+            "category": fact.category.value,
+            "label": fact.label,
+            "detail": fact.detail,
+            "structured_value": deepcopy(fact.structured_value),
+            "source_excerpt": fact.source_excerpt,
+            "source_id": str(fact.source_id),
+        }
+    structured = deepcopy(fact.structured_value) if isinstance(fact.structured_value, dict) else {}
+    raw_details = structured.get("supplemental_details")
+    supplemental_details = dict(raw_details) if isinstance(raw_details, dict) else {}
+    provenance = {
+        "kind": "resume_gap_interview",
+        "gap_key": gap_key,
+        "message_id": source_message_id,
+        "confirmed_at": confirmed_at.isoformat(),
+    }
+    for field, value in field_values.items():
+        supplemental_details[field] = {
+            "value": value,
+            "source": provenance,
+        }
+    structured["supplemental_details"] = supplemental_details
+
+    raw_addenda = structured.get("supplemental_addenda")
+    addenda = list(raw_addenda) if isinstance(raw_addenda, list) else []
+    addendum = {
+        "text": answer,
+        "requested_fields": list(field_values),
+        "question": str(question.get("question") or "")[:2_000],
+        "source": provenance,
+    }
+    addenda = [
+        value
+        for value in addenda
+        if not (
+            isinstance(value, dict)
+            and str(value.get("text") or "").strip().casefold() == answer.casefold()
+            and value.get("requested_fields") == list(field_values)
+        )
+    ]
+    structured["supplemental_addenda"] = [*addenda[-19:], addendum]
+    fact.structured_value = structured
+    if answer and answer.casefold() not in str(fact.detail or "").casefold():
+        fact.detail = f"{fact.detail.strip()}\n{answer}" if fact.detail else answer
+    fact.user_correction_reason = "User-confirmed guided resume gap answer"
+    fact.user_corrected_at = confirmed_at
+
+
+async def _invalidate_enriched_fact_dependents(
+    session: AsyncSession,
+    *,
+    workspace: ResumeWorkspace,
+    fact_id: UUID,
+    changed_at: datetime,
+) -> None:
+    """Invalidate outputs whose reviewed claims depended on the enriched evidence."""
+
+    document_ids = list(
+        (
+            await session.scalars(
+                select(DocumentVersion.id)
+                .join(DocumentClaim, DocumentClaim.document_id == DocumentVersion.id)
+                .join(ClaimEvidence, ClaimEvidence.claim_id == DocumentClaim.id)
+                .where(ClaimEvidence.fact_id == fact_id)
+                .distinct()
+            )
+        ).all()
+    )
+    if document_ids:
+        await session.execute(
+            update(DocumentVersion)
+            .where(DocumentVersion.id.in_(document_ids))
+            .values(
+                status=DocumentStatus.DRAFT,
+                reviewed_at=None,
+                reviewed_by_owner_id=None,
+                review_hash=None,
+                evidence_revision_at_review=None,
+            )
+        )
+    await session.execute(
+        update(MatchAnalysis)
+        .where(
+            MatchAnalysis.profile_id == workspace.profile_id,
+            MatchAnalysis.invalidated_at.is_(None),
+        )
+        .values(
+            invalidated_at=changed_at,
+            invalidation_reason="Confirmed resume gap enriched professional evidence",
+        )
+    )
+    workspace.pending_suggestion = None
+    if workspace.current_draft and workspace.stage in {
+        ResumeWorkspaceStage.REVIEW,
+        ResumeWorkspaceStage.COMPLETE,
+    }:
+        workspace.stage = ResumeWorkspaceStage.WRITING
+    workspace.provider_metadata = {
+        **workspace.provider_metadata,
+        "review_invalidated_reason": "professional_evidence_changed",
+    }
 
 
 def _remap_patch_evidence_handles(
@@ -864,6 +1525,7 @@ async def _create_version(
             "active_import_source_id",
             "generation_fact_ids",
             "generation_evidence_fingerprint",
+            VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY,
         )
         if key in metadata
     }
@@ -874,7 +1536,8 @@ async def _create_version(
         reason=reason,
         status=status_value,
         content=workspace.current_draft,
-        diff={**scope_diff, **(diff or {})},
+        # Server-owned evidence scope always wins over caller-supplied version annotations.
+        diff={**(diff or {}), **scope_diff},
         evidence_revision=workspace.evidence_revision,
         reviewed_at=datetime.now(UTC) if reviewed_by else None,
         reviewed_by_owner_id=reviewed_by,
@@ -906,12 +1569,10 @@ def _quick_action_example(language: PreferredLanguage, category: str) -> str:
     examples = {
         "ar": {
             "education": (
-                "مثال: بكالوريوس نظم معلومات من جامعة كذا، تخرجت عام 2024، "
-                "ومعدلي 4.2 من 5."
+                "مثال: بكالوريوس نظم معلومات من جامعة كذا، تخرجت عام 2024، ومعدلي 4.2 من 5."
             ),
             "experience": (
-                "مثال: أنشأت تقارير أسبوعية باستخدام Power BI وساعدت الفريق "
-                "على متابعة المبيعات."
+                "مثال: أنشأت تقارير أسبوعية باستخدام Power BI وساعدت الفريق على متابعة المبيعات."
             ),
             "project": (
                 "مثال: بنيت مشروعًا لتحليل البيانات باستخدام Python، وكان دوري "
@@ -919,8 +1580,7 @@ def _quick_action_example(language: PreferredLanguage, category: str) -> str:
             ),
             "skill": "مثال: استخدمت Excel لإعداد التقارير وPython لتنظيف البيانات في مشروع جامعي.",
             "achievement": (
-                "مثال: نظمت عمل الفريق وسلّمنا المشروع في موعده؛ لا تحتاج إلى "
-                "اختراع رقم غير معروف."
+                "مثال: نظمت عمل الفريق وسلّمنا المشروع في موعده؛ لا تحتاج إلى اختراع رقم غير معروف."
             ),
         },
         "en": {
@@ -964,10 +1624,60 @@ async def _handle_resume_quick_action(
     sequence = user_message.sequence + 1
     category = str(current_question.get("category") or "achievement")
     conversation_language = _conversation_language(workspace)
+    import_flow = _import_flow(workspace)
     assistant_kind = ResumeMessageKind.STATUS
     structured_payload: dict[str, Any] = {"quick_action": action}
 
-    if action == "show_example":
+    if action in {"additions_yes", "additions_no"}:
+        if import_flow is None or import_flow.get("phase") != "additions_choice":
+            raise _api_error(
+                status.HTTP_409_CONFLICT,
+                "resume_import_phase_conflict",
+                "Reload the resume import before choosing whether to add information",
+            )
+        if action == "additions_yes":
+            next_question = _additional_information_question(
+                conversation_language,
+                str(import_flow.get("source_id") or "resume"),
+            )
+            import_flow.update(
+                {
+                    "phase": "additions_interview",
+                    "can_generate": False,
+                    "active_gap_key": None,
+                }
+            )
+            workspace.provider_metadata = {
+                **workspace.provider_metadata,
+                "import_flow": import_flow,
+                "current_question": next_question,
+                "pending_question": None,
+            }
+            assistant_content = str(next_question["question"])
+            assistant_kind = ResumeMessageKind.QUESTION
+            structured_payload = {"question": next_question, "quick_action": action}
+        else:
+            next_question = await _advance_import_gap(
+                workspace=workspace,
+                provider=provider,
+                evidence=evidence,
+            )
+            if next_question is None:
+                assistant_content = (
+                    "لم يتبقَّ نقص ذو أولوية. يمكنك الآن كتابة السيرة ومراجعتها."
+                    if conversation_language is PreferredLanguage.AR
+                    else "No priority gaps remain. You can now write and review the resume."
+                )
+                structured_payload = {
+                    "quick_action": action,
+                    "import_flow_phase": "ready_to_generate",
+                    "can_generate": True,
+                }
+            else:
+                assistant_content = str(next_question["question"])
+                assistant_kind = ResumeMessageKind.QUESTION
+                structured_payload = {"question": next_question, "quick_action": action}
+    elif action == "show_example":
         assistant_content = _quick_action_example(conversation_language, category)
     elif action == "no_exact_metric":
         if conversation_language is PreferredLanguage.AR:
@@ -1005,6 +1715,54 @@ async def _handle_resume_quick_action(
         }
         assistant_kind = ResumeMessageKind.QUESTION
         structured_payload = {"question": next_question, "quick_action": action}
+    elif (
+        action in {"skip", "continue"}
+        and import_flow is not None
+        and import_flow.get("phase") in {"additions_interview", "gap_interview"}
+    ):
+        workspace.pending_understanding = None
+        skipped_gap_key = (
+            str(import_flow.get("active_gap_key") or "").strip()
+            if import_flow.get("phase") == "gap_interview"
+            else ""
+        )
+        next_question = await _advance_import_gap(
+            workspace=workspace,
+            provider=provider,
+            evidence=evidence,
+        )
+        # Do not record a skip until the next AI question has been generated. A failed provider
+        # call therefore leaves the active gap untouched and safe to retry.
+        if skipped_gap_key:
+            refreshed_flow = _import_flow(workspace)
+            if refreshed_flow is not None:
+                skipped = [
+                    str(value)
+                    for value in refreshed_flow.get("skipped_gap_keys", [])
+                    if str(value).strip()
+                ]
+                refreshed_flow["skipped_gap_keys"] = list(
+                    dict.fromkeys([*skipped, skipped_gap_key])
+                )
+                workspace.provider_metadata = {
+                    **workspace.provider_metadata,
+                    "import_flow": refreshed_flow,
+                }
+        if next_question is None:
+            assistant_content = (
+                "اكتملت أسئلة النواقص. يمكنك الآن كتابة السيرة ومراجعتها."
+                if conversation_language is PreferredLanguage.AR
+                else "The gap questions are complete. You can now write and review the resume."
+            )
+            structured_payload = {
+                "quick_action": action,
+                "import_flow_phase": "ready_to_generate",
+                "can_generate": True,
+            }
+        else:
+            assistant_content = str(next_question["question"])
+            assistant_kind = ResumeMessageKind.QUESTION
+            structured_payload = {"question": next_question, "quick_action": action}
     elif action in {"skip", "continue"}:
         workspace.pending_understanding = None
         next_category = _next_interview_section(category)
@@ -1060,6 +1818,16 @@ async def _handle_resume_quick_action(
             "improvement_mode": "reviewed_selection",
         }
     elif action in {"generate", "improve", "review"}:
+        if (
+            import_flow is not None
+            and not bool(import_flow.get("can_generate"))
+            and (action == "generate" or workspace.current_draft is None)
+        ):
+            raise _api_error(
+                status.HTTP_409_CONFLICT,
+                "resume_import_questions_incomplete",
+                "Complete or skip the remaining resume gap questions before generating",
+            )
         if not evidence:
             raise _api_error(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1083,6 +1851,8 @@ async def _handle_resume_quick_action(
                     raise
                 if had_draft:
                     generation_warning = "ai_unavailable_existing_draft_preserved"
+                elif import_flow is not None:
+                    raise
                 else:
                     draft = build_evidence_fallback_draft(
                         language=workspace.language,
@@ -1092,6 +1862,8 @@ async def _handle_resume_quick_action(
             except ResumeWriterOutputError:
                 if had_draft:
                     generation_warning = "ai_unavailable_existing_draft_preserved"
+                elif import_flow is not None:
+                    raise
                 else:
                     draft = build_evidence_fallback_draft(
                         language=workspace.language,
@@ -1099,6 +1871,11 @@ async def _handle_resume_quick_action(
                     )
                     generation_warning = "ai_unavailable_evidence_fallback_created"
             if draft is not None:
+                _store_verified_supplemental_translations(
+                    workspace,
+                    draft=draft,
+                    evidence=evidence,
+                )
                 workspace.current_draft = draft.model_dump(mode="json")
                 workspace.draft_revision += 1
                 await _create_version(
@@ -1111,11 +1888,23 @@ async def _handle_resume_quick_action(
                     ),
                     diff={
                         "quick_action": action,
-                        "draft_mode": (
-                            "evidence_fallback" if generation_warning else "ai"
-                        ),
+                        "draft_mode": ("evidence_fallback" if generation_warning else "ai"),
                     },
                 )
+                current_flow = _import_flow(workspace)
+                if current_flow is not None:
+                    current_flow.update(
+                        {
+                            "phase": "draft_review",
+                            "can_generate": False,
+                            "active_gap_key": None,
+                            "gap_queue": [],
+                        }
+                    )
+                    workspace.provider_metadata = {
+                        **workspace.provider_metadata,
+                        "import_flow": current_flow,
+                    }
             workspace.provider_metadata = {
                 **workspace.provider_metadata,
                 "generation_warning": generation_warning,
@@ -1123,9 +1912,7 @@ async def _handle_resume_quick_action(
         workspace.pending_understanding = None
         workspace.pending_suggestion = None
         workspace.stage = (
-            ResumeWorkspaceStage.REVIEW
-            if action == "review"
-            else ResumeWorkspaceStage.WRITING
+            ResumeWorkspaceStage.REVIEW if action == "review" else ResumeWorkspaceStage.WRITING
         )
         if (
             generation_warning == "ai_unavailable_existing_draft_preserved"
@@ -1155,9 +1942,7 @@ async def _handle_resume_quick_action(
                 "from your confirmed evidence. You can retry later to improve the wording."
             )
         elif conversation_language is PreferredLanguage.AR:
-            assistant_content = (
-                "جهزت المسودة من الحقائق التي أكّدتها. راجعها وعدّلها قبل التنزيل."
-            )
+            assistant_content = "جهزت المسودة من الحقائق التي أكّدتها. راجعها وعدّلها قبل التنزيل."
         else:
             assistant_content = (
                 "I prepared the draft from your confirmed facts. "
@@ -1213,9 +1998,7 @@ async def start_resume_workspace(
     )
     if workspace:
         current_conversation_language = _conversation_language(workspace)
-        conversation_language = (
-            payload.conversation_language or current_conversation_language
-        )
+        conversation_language = payload.conversation_language or current_conversation_language
         if workspace.current_draft and workspace.language is not payload.language:
             raise _api_error(
                 status.HTTP_409_CONFLICT,
@@ -1238,8 +2021,7 @@ async def start_resume_workspace(
             facts = await _workspace_facts(session, workspace)
             evidence = build_resume_evidence(facts)
             if provider.available and (
-                payload.data_sharing_acknowledged
-                or _has_current_consent(workspace, provider)
+                payload.data_sharing_acknowledged or _has_current_consent(workspace, provider)
             ):
                 try:
                     question = await _generate_ordered_question(
@@ -1302,9 +2084,7 @@ async def start_resume_workspace(
             provider.available
             and payload.data_sharing_acknowledged
             and not workspace.pending_understanding
-            and (
-                workspace.provider_metadata.get("current_question") or {}
-            ).get("generation_source")
+            and (workspace.provider_metadata.get("current_question") or {}).get("generation_source")
             != "ai"
         ):
             user_message_count = await session.scalar(
@@ -1481,9 +2261,7 @@ async def reset_resume_workspace(
     # `_load_workspace` deliberately limits response relationships to recent rows. Explicit bulk
     # deletes ensure reset removes older rows too, including on SQLite where relying on a partially
     # loaded ORM collection is unsafe. Break the self-referential version chain before deletion.
-    await session.execute(
-        delete(ResumeMessage).where(ResumeMessage.workspace_id == workspace.id)
-    )
+    await session.execute(delete(ResumeMessage).where(ResumeMessage.workspace_id == workspace.id))
     await session.execute(
         update(ResumeDraftVersion)
         .where(ResumeDraftVersion.workspace_id == workspace.id)
@@ -1497,15 +2275,15 @@ async def reset_resume_workspace(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/draft/from-import", response_model=ResumeWorkspaceRead)
-async def create_resume_draft_from_import(
+@router.post("/import/prepare", response_model=ResumeWorkspaceRead)
+async def prepare_resume_import(
     profile_id: UUID,
     payload: ResumeImportDraftCreate,
     user: CurrentUser,
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db),
 ) -> ResumeWorkspaceRead:
-    """Create an immediate literal draft from confirmed facts belonging to one uploaded file."""
+    """Assess one fully reviewed import and start its guided additions-and-gaps flow."""
 
     profile = await _owned_profile(session, profile_id, user.id, for_update=True)
     workspace = await _load_workspace(
@@ -1521,29 +2299,32 @@ async def create_resume_draft_from_import(
         )
     provider = get_resume_writer_provider(settings)
     metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
+    flow = _import_flow(workspace)
     if (
-        str(metadata.get("last_import_draft_request_id") or "")
-        == str(payload.client_request_id)
-        and str(metadata.get("active_import_source_id") or "") == str(payload.source_id)
-        and (
-            workspace.current_draft is not None
-            or metadata.get("draft_mode") == "import_translation_required"
-        )
+        str(metadata.get("last_import_prepare_request_id") or "") == str(payload.client_request_id)
+        and isinstance(flow, dict)
+        and str(flow.get("source_id") or "") == str(payload.source_id)
     ):
         reloaded = await _load_workspace(session, profile_id)
         assert reloaded is not None
         return _workspace_read(reloaded, provider)
+    if flow is not None:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_phase_conflict",
+            "Finish or clear the active resume import before preparing another file",
+        )
     if workspace.current_draft is not None:
         raise _api_error(
             status.HTTP_409_CONFLICT,
             "resume_import_draft_exists",
-            "Clear the current resume before creating a new draft from another file",
+            "Clear the current resume before preparing another imported file",
         )
     if payload.expected_revision != workspace.revision:
         raise _api_error(
             status.HTTP_409_CONFLICT,
             "resume_workspace_revision_conflict",
-            "The resume workspace changed; reload it before creating the draft",
+            "The resume workspace changed; reload it before preparing the import",
         )
     if payload.expected_evidence_revision != profile.evidence_revision:
         raise _api_error(
@@ -1560,7 +2341,7 @@ async def create_resume_draft_from_import(
     )
     if not source:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume source not found")
-    facts = list(
+    source_facts = list(
         (
             await session.scalars(
                 select(CareerFact)
@@ -1568,110 +2349,114 @@ async def create_resume_draft_from_import(
                     CareerFact.profile_id == profile_id,
                     CareerFact.source_id == payload.source_id,
                     CareerFact.category.in_(PROFESSIONAL_CATEGORIES),
-                    CareerFact.verification_status == VerificationStatus.CONFIRMED,
                 )
                 .order_by(CareerFact.created_at, CareerFact.id)
             )
         ).all()
     )
-    evidence = build_resume_evidence(facts)
+    unresolved = [
+        fact for fact in source_facts if fact.verification_status is VerificationStatus.EXTRACTED
+    ]
+    if unresolved:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_review_incomplete",
+            (
+                f"Review every extracted fact before continuing; "
+                f"{len(unresolved)} fact(s) remain unresolved"
+            ),
+        )
+    confirmed = [
+        fact for fact in source_facts if fact.verification_status is VerificationStatus.CONFIRMED
+    ]
+    evidence = build_resume_evidence(confirmed)
     if not evidence:
         raise _api_error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "resume_import_confirmed_evidence_required",
-            "Confirm at least one useful fact from this file before creating the draft",
+            "Confirm at least one useful fact from this file before preparing the resume",
         )
-    translation_required = False
-    try:
-        draft = build_evidence_fallback_draft(
-            language=workspace.language,
-            evidence=evidence,
-        )
-    except ResumeWriterError:
-        draft = None
-        translation_required = True
-
-    if draft is not None:
-        workspace.current_draft = draft.model_dump(mode="json")
-        workspace.draft_revision += 1
+    source_metadata = source.source_metadata if isinstance(source.source_metadata, dict) else {}
+    assessment = build_resume_assessment(confirmed, source_metadata)
+    assessment_data = assessment.model_dump(mode="json")
+    gap_queue = [gap.model_dump(mode="json") for gap in assessment.gaps]
+    file_name = source.original_filename or source.label
+    import_flow = {
+        "phase": "additions_choice",
+        "can_generate": False,
+        "source_id": str(source.id),
+        "file_name": file_name,
+        "assessment": assessment_data,
+        "gap_queue": gap_queue,
+        "active_gap_key": None,
+        "completed_gap_keys": [],
+        "skipped_gap_keys": [],
+        "page_target": 1,
+    }
     workspace.revision += 1
     workspace.evidence_revision = profile.evidence_revision
     workspace.pending_understanding = None
     workspace.pending_suggestion = None
-    workspace.stage = (
-        ResumeWorkspaceStage.WRITING
-        if draft is not None
-        else ResumeWorkspaceStage.UNDERSTANDING
-    )
-    draft_mode = "import_translation_required" if translation_required else "import_evidence"
+    workspace.stage = ResumeWorkspaceStage.UNDERSTANDING
     workspace.provider_metadata = {
         **metadata,
-        "active_import_source_id": str(payload.source_id),
-        "generation_fact_ids": [str(fact.id) for fact in facts],
+        "active_import_source_id": str(source.id),
+        "generation_fact_ids": [str(fact.id) for fact in confirmed],
         "generation_evidence_fingerprint": _evidence_fingerprint(evidence),
-        "last_import_draft_request_id": str(payload.client_request_id),
-        "draft_mode": draft_mode,
-        "generation_warning": "import_translation_required" if translation_required else None,
+        "last_import_prepare_request_id": str(payload.client_request_id),
+        "draft_mode": "import_assessment",
+        "generation_warning": None,
         "pending_import_source_id": None,
         "pending_import_filename": None,
         "pending_import_analysis_status": None,
+        "current_question": None,
+        "pending_question": None,
+        "import_flow": import_flow,
     }
+    message = (
+        "اكتمل التقييم المبدئي. قبل أسئلة النواقص، هل تريد إضافة معلومات غير موجودة في الملف؟"
+        if _conversation_language(workspace) is PreferredLanguage.AR
+        else (
+            "The initial assessment is ready. Before the gap questions, would you like to add "
+            "information that is not in the file?"
+        )
+    )
     session.add(
         ResumeMessage(
             workspace_id=workspace.id,
             sequence=_next_sequence(workspace),
             role=ResumeMessageRole.ASSISTANT,
             kind=ResumeMessageKind.STATUS,
-            content=(
-                (
-                    "ربطت السيرة بالمعلومات التي اعتمدتها من هذا الملف. "
-                    "لأن لغة الملف تختلف عن لغة السيرة، "
-                    "اضغط «اكتب السيرة الآن» ليترجمها المساعد الذكي ويصوغها لك."
-                    if translation_required
-                    else (
-                        "جهزت مسودة كاملة وسريعة من المعلومات التي راجعتها في هذا الملف. "
-                        "يمكنك الآن تعديلها أو تحسين صياغتها بالذكاء الاصطناعي."
-                    )
-                )
-                if _conversation_language(workspace) is PreferredLanguage.AR
-                else (
-                    (
-                        "I linked this resume to the facts you approved from the file. "
-                        "Since the file language differs from the resume language, "
-                        "choose Write resume now to translate "
-                        "and draft it with AI."
-                    )
-                    if translation_required
-                    else (
-                        "I created a complete first draft from the reviewed facts in this file. "
-                        "You can edit it now or refine the wording with AI."
-                    )
-                )
-            ),
+            content=message,
             structured_payload={
-                "draft_mode": draft_mode,
-                "source_id": str(payload.source_id),
-                "fact_count": len(facts),
+                "import_flow_phase": "additions_choice",
+                "quick_replies": ["additions_yes", "additions_no"],
             },
             status=ResumeMessageStatus.SENT,
         )
     )
-    if draft is not None:
-        await _create_version(
-            session,
-            workspace,
-            reason=ResumeDraftVersionReason.INITIAL_GENERATION,
-            diff={
-                "draft_mode": draft_mode,
-                "source_id": str(payload.source_id),
-                "fact_count": len(facts),
-            },
-        )
     await _refresh_workspace(session, workspace)
     await session.commit()
     workspace = await _load_workspace(session, profile_id)
     assert workspace is not None
     return _workspace_read(workspace, provider)
+
+
+@router.post("/draft/from-import", response_model=ResumeWorkspaceRead)
+async def create_resume_draft_from_import(
+    profile_id: UUID,
+    payload: ResumeImportDraftCreate,
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db),
+) -> ResumeWorkspaceRead:
+    """Reject the retired shortcut so every imported resume follows the reviewed ATS flow."""
+
+    await _owned_profile(session, profile_id, user.id)
+    raise _api_error(
+        status.HTTP_410_GONE,
+        "resume_import_guided_flow_required",
+        "Use the resume assessment, additions, and gap interview before AI generation",
+    )
 
 
 @router.post("/messages", response_model=ResumeWorkspaceRead)
@@ -1711,13 +2496,20 @@ async def send_resume_message(
             "resume_workspace_revision_conflict",
             "The resume workspace changed; reload it before sending another answer",
         )
-    if not provider.available:
+    if workspace.pending_understanding is not None:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_understanding_pending",
+            "Confirm or correct the current understanding before another action",
+        )
+    provider_optional_action = payload.quick_action == "additions_yes"
+    if not provider.available and not provider_optional_action:
         raise _api_error(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "resume_writer_not_configured",
             "The AI resume writer is not configured on the server",
         )
-    if not _has_current_consent(workspace, provider):
+    if not _has_current_consent(workspace, provider) and not provider_optional_action:
         raise _api_error(
             status.HTTP_400_BAD_REQUEST,
             "resume_writer_consent_required",
@@ -1831,6 +2623,7 @@ async def send_resume_message(
     understanding_id = uuid4()
     pending = {
         "id": str(understanding_id),
+        "answer": answer,
         "understanding": understanding or answer,
         "understanding_detail": (
             understanding_payload
@@ -1911,6 +2704,7 @@ async def confirm_resume_understanding(
         )
     pending = _pending_understanding(workspace, understanding_id)
     text = payload.corrected_text or str(pending.get("understanding") or "")
+    confirmed_answer = payload.corrected_text or str(pending.get("answer") or text)
     records = list(pending.get("proposed_records") or [])
     if payload.corrected_text:
         pending["draft_patch"] = None
@@ -1927,6 +2721,53 @@ async def confirm_resume_understanding(
             }
         ]
     now = datetime.now(UTC)
+    existing_generation_facts = await _workspace_facts(session, workspace)
+    fact_gap_target = _active_fact_gap_target(workspace, existing_generation_facts)
+    enriched_fact: CareerFact | None = None
+    if fact_gap_target is not None and _is_gap_non_answer(confirmed_answer):
+        # A confirmed "I don't know" is interview progress, not professional evidence.
+        records = []
+    elif fact_gap_target is not None:
+        target, gap_key, requested_fields, current_gap_question = fact_gap_target
+        normalized_records = [record for record in records if isinstance(record, dict)]
+        target_records: list[dict[str, Any]] = []
+        remaining_records: list[Any] = []
+        for raw_record in records:
+            if not isinstance(raw_record, dict):
+                remaining_records.append(raw_record)
+                continue
+            if _record_category(
+                raw_record, target.category.value
+            ) is target.category and _record_targets_gap_fact(
+                raw_record, target, answer=confirmed_answer
+            ):
+                target_records.append(raw_record)
+            else:
+                remaining_records.append(raw_record)
+        field_values = (
+            _mapped_gap_field_values(
+                requested_fields,
+                target_records,
+                answer=confirmed_answer,
+            )
+            if target_records or not normalized_records
+            else {}
+        )
+        if field_values:
+            enriched_fact = target
+            _enrich_fact_from_confirmed_gap(
+                enriched_fact,
+                gap_key=gap_key,
+                field_values=field_values,
+                question=current_gap_question,
+                confirmed_text=confirmed_answer,
+                source_message_id=str(pending.get("source_message_id") or "") or None,
+                confirmed_at=now,
+            )
+        # Records mapped to the existing fact are consumed even if they did not safely resolve a
+        # field. Distinct records remain eligible to become their own confirmed facts.
+        if target_records:
+            records = remaining_records
     created_facts: list[CareerFact] = []
     fact_records: list[tuple[CareerFact, dict[str, Any]]] = []
     if records:
@@ -1956,12 +2797,28 @@ async def confirm_resume_understanding(
             session.add(fact)
             created_facts.append(fact)
             fact_records.append((fact, record))
+    if created_facts or enriched_fact is not None:
         profile.evidence_revision += 1
         workspace.evidence_revision = profile.evidence_revision
+    if enriched_fact is not None:
+        await _invalidate_enriched_fact_dependents(
+            session,
+            workspace=workspace,
+            fact_id=enriched_fact.id,
+            changed_at=now,
+        )
 
     await session.flush()
     source_handle_map: dict[str, list[str]] = {}
     created_handles = [_fact_handle(fact) for fact in created_facts]
+    affected_handles = list(
+        dict.fromkeys(
+            [
+                *created_handles,
+                *([_fact_handle(enriched_fact)] if enriched_fact is not None else []),
+            ]
+        )
+    )
     raw_generation_fact_ids = workspace.provider_metadata.get("generation_fact_ids")
     if isinstance(raw_generation_fact_ids, list) and created_facts:
         workspace.provider_metadata = {
@@ -1989,15 +2846,21 @@ async def confirm_resume_understanding(
         if isinstance(raw_handles, list):
             for raw_handle in raw_handles:
                 handle = str(raw_handle).strip()
-                if handle and created_handles:
-                    source_handle_map.setdefault(handle, []).extend(created_handles)
-    confirmed_evidence = build_resume_evidence(await _workspace_facts(session, workspace))
+                if handle and affected_handles:
+                    source_handle_map.setdefault(handle, []).extend(affected_handles)
+    confirmed_facts = await _workspace_facts(session, workspace)
+    confirmed_evidence = build_resume_evidence(confirmed_facts)
     remapped_patch = _remap_patch_evidence_handles(
         pending.get("draft_patch"),
         source_handle_map=source_handle_map,
-        created_handles=created_handles,
+        created_handles=affected_handles,
         available_handles={item.handle for item in confirmed_evidence},
     )
+    if created_facts or enriched_fact is not None:
+        workspace.provider_metadata = {
+            **workspace.provider_metadata,
+            "generation_evidence_fingerprint": _evidence_fingerprint(confirmed_evidence),
+        }
     if remapped_patch and not resume_patch_uses_requested_language(
         remapped_patch,
         workspace.language,
@@ -2008,19 +2871,24 @@ async def confirm_resume_understanding(
             "generation_warning": "draft_patch_language_mismatch",
         }
     draft: ResumeDraftContent | None = None
+    draft_generation_evidence: tuple[Any, ...] | None = None
     explicit_generation = pending.get("quick_action") in {"generate", "review"}
+    guided_import_flow = _import_flow(workspace)
     should_generate_full_draft = (
-        bool(pending.get("ready_to_generate")) or explicit_generation
-    ) and (
-        workspace.current_draft is None or pending.get("quick_action") in {"generate", "review"}
+        (bool(pending.get("ready_to_generate")) or explicit_generation)
+        and (
+            workspace.current_draft is None or pending.get("quick_action") in {"generate", "review"}
+        )
+        and (guided_import_flow is None or explicit_generation)
     )
     if should_generate_full_draft:
         try:
             generation_facts = await _workspace_facts(session, workspace)
+            draft_generation_evidence = build_resume_evidence(generation_facts)
             draft = await provider.generate_draft(
                 language=workspace.language,
                 target_role=None,
-                evidence=build_resume_evidence(generation_facts),
+                evidence=draft_generation_evidence,
                 answers=[],
             )
             workspace.provider_metadata = {
@@ -2041,6 +2909,7 @@ async def confirm_resume_understanding(
             workspace.current_draft is not None
             or _conversation_language(workspace) is workspace.language
         )
+        and (guided_import_flow is None or workspace.current_draft is not None)
     ):
         # When the interview and resume languages differ, the conversational understanding is
         # not a safe professional-summary fallback for a brand-new draft. Wait for the full
@@ -2053,6 +2922,12 @@ async def confirm_resume_understanding(
             language=workspace.language,
         )
     if draft:
+        if draft_generation_evidence is not None:
+            _store_verified_supplemental_translations(
+                workspace,
+                draft=draft,
+                evidence=draft_generation_evidence,
+            )
         workspace.current_draft = draft.model_dump(mode="json")
         workspace.draft_revision += 1
         workspace.pending_suggestion = None
@@ -2064,7 +2939,22 @@ async def confirm_resume_understanding(
         )
         workspace.stage = ResumeWorkspaceStage.WRITING
     next_question = pending.get("next_question")
-    if pending.get("corrected_by_user") and not next_question:
+    current_import_flow = _import_flow(workspace)
+    if current_import_flow is not None and current_import_flow.get("phase") in {
+        "additions_interview",
+        "gap_interview",
+    }:
+        _refresh_import_gap_queue(
+            workspace,
+            confirmed_facts,
+            complete_active_gap=current_import_flow.get("phase") == "gap_interview",
+        )
+        next_question = await _advance_import_gap(
+            workspace=workspace,
+            provider=provider,
+            evidence=confirmed_evidence,
+        )
+    elif pending.get("corrected_by_user") and not next_question:
         corrected_facts = await _workspace_facts(session, workspace)
         raw_category = str((pending.get("question") or {}).get("category") or "")
         corrected_category = (
@@ -2219,6 +3109,19 @@ async def patch_resume_draft(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
         )
+    import_flow = _import_flow(workspace)
+    if workspace.current_draft is None:
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_draft_required",
+            "Generate the resume draft before editing it",
+        )
+    if import_flow is not None and import_flow.get("phase") != "draft_review":
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_phase_conflict",
+            "Complete the guided import and generate the AI draft before editing",
+        )
     if payload.expected_draft_revision != workspace.draft_revision:
         raise _api_error(
             status.HTTP_409_CONFLICT,
@@ -2313,6 +3216,13 @@ async def rewrite_resume_draft(
     )
     if not workspace or not workspace.current_draft:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume draft not found")
+    import_flow = _import_flow(workspace)
+    if import_flow is not None and import_flow.get("phase") != "draft_review":
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_phase_conflict",
+            "Complete the guided import and generate the AI draft before rewriting",
+        )
     await _refresh_workspace(session, workspace)
     if payload.expected_draft_revision != workspace.draft_revision:
         raise _api_error(
@@ -2336,7 +3246,10 @@ async def rewrite_resume_draft(
             "resume_rewrite_not_supported",
             "The configured resume writer does not support section rewrites",
         )
-    evidence = build_resume_evidence(await _workspace_facts(session, workspace))
+    evidence = _workspace_evidence_with_verified_translations(
+        workspace,
+        build_resume_evidence(await _workspace_facts(session, workspace)),
+    )
     instruction = _rewrite_instruction(payload)
     try:
         candidate = await rewrite(
@@ -2594,16 +3507,26 @@ async def restore_resume_version(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume version not found"
         )
-    workspace.current_draft = version.content
     restored_metadata = dict(workspace.provider_metadata)
     for key in (
         "active_import_source_id",
         "generation_fact_ids",
         "generation_evidence_fingerprint",
+        VERIFIED_SUPPLEMENTAL_TRANSLATIONS_KEY,
     ):
         restored_metadata.pop(key, None)
         if key in version.diff:
             restored_metadata[key] = version.diff[key]
+    restored_facts = _facts_selected_by_metadata(
+        await _profile_facts(session, workspace.profile_id),
+        restored_metadata,
+    )
+    _workspace_evidence_with_verified_translations(
+        workspace,
+        build_resume_evidence(restored_facts),
+        metadata_override=restored_metadata,
+    )
+    workspace.current_draft = version.content
     workspace.provider_metadata = restored_metadata
     workspace.draft_revision += 1
     workspace.pending_suggestion = None
@@ -2769,6 +3692,13 @@ async def review_resume_workspace(
     )
     if not workspace or not workspace.current_draft:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume draft not found")
+    import_flow = _import_flow(workspace)
+    if import_flow is not None and import_flow.get("phase") != "draft_review":
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_phase_conflict",
+            "Complete the guided import and generate the AI draft before review",
+        )
     if payload.expected_draft_revision != workspace.draft_revision:
         raise _api_error(
             status.HTTP_409_CONFLICT,
@@ -2783,7 +3713,10 @@ async def review_resume_workspace(
         )
     await _refresh_workspace(session, workspace)
     draft = ResumeDraftContent.model_validate(workspace.current_draft)
-    evidence = build_resume_evidence(await _workspace_facts(session, workspace))
+    evidence = _workspace_evidence_with_verified_translations(
+        workspace,
+        build_resume_evidence(await _workspace_facts(session, workspace)),
+    )
     blockers = _review_blockers(draft, workspace, evidence)
     if blockers:
         raise _api_error(
@@ -2874,6 +3807,10 @@ async def preview_resume_pdf(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
         )
+    _workspace_evidence_with_verified_translations(
+        workspace,
+        build_resume_evidence(await _workspace_facts(session, workspace)),
+    )
     return await _pdf_response(profile=profile, workspace=workspace, attachment=False)
 
 
@@ -2934,6 +3871,19 @@ async def export_resume_workspace_pdf(
             status.HTTP_409_CONFLICT,
             "resume_review_stale",
             "Review the current resume version before exporting it",
+        )
+    draft = ResumeDraftContent.model_validate(workspace.current_draft)
+    evidence = _workspace_evidence_with_verified_translations(
+        workspace,
+        build_resume_evidence(await _workspace_facts(session, workspace)),
+    )
+    blockers = _review_blockers(draft, workspace, evidence)
+    if blockers:
+        raise _api_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "resume_review_blocked",
+            "Resolve unsupported or incomplete resume content before export: "
+            + ", ".join(blockers),
         )
     response = await _pdf_response(profile=profile, workspace=workspace, attachment=True)
     workspace.stage = ResumeWorkspaceStage.COMPLETE

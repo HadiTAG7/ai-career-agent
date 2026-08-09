@@ -196,6 +196,9 @@ export function factsToResumeSections(
 ): ApiResumeDraftSection[] {
   const grouped = new Map<ApiResumeSectionKey, ApiResumeDraftItem[]>();
   for (const fact of facts) {
+    // A rejected import remains in the profile for audit/history, but it must never
+    // reappear in the live resume projection after the user has excluded it.
+    if (fact.verification_status === "unconfirmed") continue;
     const sectionKey = resumeSectionForFact(fact);
     if (!sectionKey) continue;
     const items = grouped.get(sectionKey) ?? [];

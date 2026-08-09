@@ -62,6 +62,10 @@ export function apiErrorMessage(error: unknown, locale: "ar" | "en") {
     if (error.code === "resume_import_draft_requires_ai") return locale === "ar" ? "لغة الملف تختلف عن لغة السيرة. استخدم المساعد الذكي لترجمة المحتوى وبناء المسودة." : "The file language differs from the resume language. Use the AI assistant to translate and build the draft.";
     if (error.code === "resume_import_fact_mismatch") return locale === "ar" ? "بعض المعلومات المحددة لا تنتمي إلى هذا الملف. حدّثنا المراجعة؛ اختر معلومات الملف نفسه فقط." : "Some selected facts do not belong to this file. We refreshed the review; select facts from this file only.";
     if (error.code === "resume_import_fact_rejected") return locale === "ar" ? "إحدى المعلومات المحددة سبق استبعادها. راجع القائمة واختر المعلومات غير المستبعدة فقط." : "One selected fact was previously rejected. Review the list and select only active facts.";
+    if (error.code === "resume_import_review_incomplete") return locale === "ar" ? "راجع كل معلومات الملف وحدد الصحيح منها قبل الانتقال إلى التقييم والأسئلة." : "Review every extracted fact before moving to the assessment and questions.";
+    if (error.code === "resume_import_phase_conflict") return locale === "ar" ? "تغيّرت مرحلة بناء السيرة. حدّثنا الصفحة؛ راجع الخطوة الظاهرة ثم حاول مجددًا." : "The resume flow changed. We refreshed it; review the current step and try again.";
+    if (error.code === "resume_understanding_pending") return locale === "ar" ? "أكد ما فهمه المساعد أو عدّله قبل الانتقال للخطوة التالية." : "Confirm or correct the current understanding before continuing.";
+    if (error.code === "resume_draft_required") return locale === "ar" ? "أنشئ مسودة السيرة أولًا قبل محاولة تعديلها." : "Generate the resume draft before editing it.";
     if (error.code === "resume_workspace_consent_required") return locale === "ar" ? "وافق على استخدام الذكاء الاصطناعي في مساحة السيرة قبل المتابعة." : "Acknowledge AI use in the resume workspace before continuing.";
     if (error.code === "resume_workspace_not_configured") return locale === "ar" ? "مساحة السيرة الذكية غير مفعّلة على الخادم." : "The AI resume workspace is not enabled on the server.";
     if (error.code === "resume_workspace_unavailable") return locale === "ar" ? "تعذر تشغيل مساعد السيرة مؤقتًا. حفظنا ما كتبته ويمكنك إعادة المحاولة." : "The resume assistant is temporarily unavailable. Your input was kept so you can retry.";
@@ -981,6 +985,8 @@ export async function sendResumeWorkspaceMessage(
     clientTurnId: string;
     expectedRevision: number;
     quickAction?:
+      | "additions_yes"
+      | "additions_no"
       | "skip"
       | "continue"
       | "generate"
@@ -998,13 +1004,14 @@ export async function sendResumeWorkspaceMessage(
       expected_revision: input.expectedRevision,
       quick_action: input.quickAction || null,
     }),
-    // One turn can include both Mistral understanding and a full grounded draft. Production
-    // runs regularly exceed 30 seconds, while the server may still finish and persist the draft.
-    timeoutMs: 120_000,
+    // Import generation can include a translation, an independent semantic verification, and
+    // the grounded draft. Keep the browser deadline beyond the server's bounded worst case so a
+    // completed draft is not mistaken for a failed request.
+    timeoutMs: 190_000,
   });
 }
 
-export async function buildResumeDraftFromImport(
+export async function prepareResumeImportFlow(
   profileId: string,
   input: {
     sourceId: string;
@@ -1013,7 +1020,7 @@ export async function buildResumeDraftFromImport(
     expectedEvidenceRevision: number;
   },
 ) {
-  return apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId, "/draft/from-import"), {
+  return apiRequest<ApiResumeWorkspace>(resumeWorkspacePath(profileId, "/import/prepare"), {
     method: "POST",
     body: JSON.stringify({
       source_id: input.sourceId,
@@ -1180,6 +1187,7 @@ export async function confirmCareerFactsBatch(
     sourceId: string;
     clientRequestId: string;
     factIds: string[];
+    rejectedFactIds?: string[];
     expectedEvidenceRevision: number;
   },
 ) {
@@ -1191,6 +1199,7 @@ export async function confirmCareerFactsBatch(
         source_id: input.sourceId,
         client_request_id: input.clientRequestId,
         fact_ids: input.factIds,
+        rejected_fact_ids: input.rejectedFactIds ?? [],
         expected_evidence_revision: input.expectedEvidenceRevision,
       }),
     },

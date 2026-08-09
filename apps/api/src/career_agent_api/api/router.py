@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from hashlib import sha256
 from json import dumps
-from typing import Any
+from typing import Any, cast
 from unicodedata import normalize
 from uuid import UUID, uuid4
 
@@ -115,7 +115,7 @@ router.include_router(career_path_router)
 router.include_router(resume_router)
 router.include_router(resume_workspace_router)
 
-RESUME_EXTRACTOR_VERSION = "resume-records-v6"
+RESUME_EXTRACTOR_VERSION = "resume-records-v7"
 
 POST_SUBMISSION_STATUSES = {
     ApplicationStatus.SUBMITTED,
@@ -827,12 +827,53 @@ async def list_evidence_sources(
     )
 
 
-@router.post(
-    "/profiles/{profile_id}/imports",
-    response_model=ImportResultRead,
-    status_code=status.HTTP_201_CREATED,
-)
-async def import_professional_file(
+_NO_RESUME_WORKSPACE_IMPORT_GUARD = object()
+
+
+async def _guard_resume_workspace_import_snapshot(
+    session: AsyncSession,
+    profile_id: UUID,
+    expected_revision: int | None,
+) -> ResumeWorkspace | None:
+    """Lock and re-check the guided workspace immediately before import publication.
+
+    Resume analysis happens outside a database lock. A second tab may begin a guided flow while
+    the provider is working, so the initial browser/API guard is only advisory. This locked check
+    prevents a late upload from replacing the active source or its assessment state.
+    """
+
+    workspace = await session.scalar(
+        select(ResumeWorkspace)
+        .where(ResumeWorkspace.profile_id == profile_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    snapshot_changed = (
+        workspace is not None
+        if expected_revision is None
+        else workspace is None or workspace.revision != expected_revision
+    )
+    metadata = (
+        workspace.provider_metadata
+        if workspace is not None and isinstance(workspace.provider_metadata, dict)
+        else {}
+    )
+    if (
+        snapshot_changed
+        or (workspace is not None and workspace.current_draft is not None)
+        or (workspace is not None and workspace.pending_understanding is not None)
+        or isinstance(metadata.get("import_flow"), dict)
+    ):
+        raise _resume_ai_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_phase_conflict",
+            "The resume workspace changed while the file was being analyzed; retry after "
+            "finishing or clearing the active flow",
+        )
+    return workspace
+
+
+async def _import_professional_file(
     profile_id: UUID,
     user: CurrentUser,
     file: UploadFile = File(...),
@@ -840,6 +881,7 @@ async def import_professional_file(
     data_sharing_acknowledged: bool = Form(False),
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db),
+    workspace_guard_revision: int | None | object = _NO_RESUME_WORKSPACE_IMPORT_GUARD,
 ) -> ImportResultRead:
     profile = await _owned_profile(session, profile_id, user.id)
     evidence_revision = profile.evidence_revision
@@ -929,6 +971,12 @@ async def import_professional_file(
             user.id,
             evidence_revision,
         )
+        if workspace_guard_revision is not _NO_RESUME_WORKSPACE_IMPORT_GUARD:
+            await _guard_resume_workspace_import_snapshot(
+                session,
+                profile_id,
+                cast(int | None, workspace_guard_revision),
+            )
     else:
         await _guard_profile_mutation(session, profile_id, user.id)
 
@@ -1134,6 +1182,31 @@ async def import_professional_file(
 
 
 @router.post(
+    "/profiles/{profile_id}/imports",
+    response_model=ImportResultRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_professional_file(
+    profile_id: UUID,
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    use_ai: bool = Form(False),
+    data_sharing_acknowledged: bool = Form(False),
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_db),
+) -> ImportResultRead:
+    return await _import_professional_file(
+        profile_id=profile_id,
+        user=user,
+        file=file,
+        use_ai=use_ai,
+        data_sharing_acknowledged=data_sharing_acknowledged,
+        settings=settings,
+        session=session,
+    )
+
+
+@router.post(
     "/profiles/{profile_id}/resume-workspace/import",
     response_model=ImportResultRead,
     status_code=status.HTTP_201_CREATED,
@@ -1148,7 +1221,37 @@ async def import_resume_workspace_file(
 ) -> ImportResultRead:
     """Use the canonical import pipeline from inside the conversational workspace."""
 
-    result = await import_professional_file(
+    # Fail before reading or sending another file when the user is already completing an import.
+    # The browser also locks the attachment control, but this server invariant protects older
+    # clients and concurrent tabs from replacing the active ATS assessment/interview state.
+    await _owned_profile(session, profile_id, user.id)
+    existing_workspace = await session.scalar(
+        select(ResumeWorkspace).where(ResumeWorkspace.profile_id == profile_id)
+    )
+    workspace_guard_revision = (
+        existing_workspace.revision if existing_workspace is not None else None
+    )
+    if existing_workspace is not None:
+        metadata = (
+            existing_workspace.provider_metadata
+            if isinstance(existing_workspace.provider_metadata, dict)
+            else {}
+        )
+        active_flow = metadata.get("import_flow")
+        if existing_workspace.current_draft is not None:
+            raise _resume_ai_error(
+                status.HTTP_409_CONFLICT,
+                "resume_import_draft_exists",
+                "Clear the current resume before importing another file",
+            )
+        if isinstance(active_flow, dict) or existing_workspace.pending_understanding is not None:
+            raise _resume_ai_error(
+                status.HTTP_409_CONFLICT,
+                "resume_import_phase_conflict",
+                "Finish or clear the active resume import before uploading another file",
+            )
+
+    result = await _import_professional_file(
         profile_id=profile_id,
         user=user,
         file=file,
@@ -1156,9 +1259,13 @@ async def import_resume_workspace_file(
         data_sharing_acknowledged=data_sharing_acknowledged,
         settings=settings,
         session=session,
+        workspace_guard_revision=workspace_guard_revision,
     )
-    workspace = await session.scalar(
-        select(ResumeWorkspace).where(ResumeWorkspace.profile_id == profile_id).with_for_update()
+    await _owned_profile(session, profile_id, user.id, for_update=True)
+    workspace = await _guard_resume_workspace_import_snapshot(
+        session,
+        profile_id,
+        workspace_guard_revision,
     )
     if workspace:
         workspace.provider_metadata = {
@@ -1456,19 +1563,33 @@ async def confirm_facts_batch(
     if not source:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
     source_metadata = source.source_metadata if isinstance(source.source_metadata, dict) else {}
-    requested_fact_ids = sorted(str(fact_id) for fact_id in payload.fact_ids)
-    if (
+    accepted_ids = set(payload.fact_ids)
+    rejected_ids = set(payload.rejected_fact_ids)
+    reviewed_ids = accepted_ids | rejected_ids
+    requested_fact_ids = sorted(str(fact_id) for fact_id in accepted_ids)
+    requested_rejected_fact_ids = sorted(str(fact_id) for fact_id in rejected_ids)
+    repeated_request = (
         str(source_metadata.get("last_confirm_batch_request_id") or "")
         == str(payload.client_request_id)
-        and source_metadata.get("last_confirm_batch_fact_ids") == requested_fact_ids
+    )
+    if repeated_request and (
+        source_metadata.get("last_confirm_batch_fact_ids") != requested_fact_ids
+        or source_metadata.get("last_confirm_batch_rejected_fact_ids", [])
+        != requested_rejected_fact_ids
     ):
+        raise _resume_ai_error(
+            status.HTTP_409_CONFLICT,
+            "resume_import_review_idempotency_conflict",
+            "This import review request ID was already used with a different selection",
+        )
+    if repeated_request:
         repeated_facts = list(
             (
                 await session.scalars(
                     select(CareerFact).where(
                         CareerFact.profile_id == profile_id,
                         CareerFact.source_id == payload.source_id,
-                        CareerFact.id.in_(payload.fact_ids),
+                        CareerFact.id.in_(reviewed_ids),
                     )
                 )
             ).all()
@@ -1476,9 +1597,12 @@ async def confirm_facts_batch(
         stored_revision = source_metadata.get("last_confirm_batch_evidence_revision")
         if (
             stored_revision != profile.evidence_revision
-            or {fact.id for fact in repeated_facts} != set(payload.fact_ids)
+            or {fact.id for fact in repeated_facts} != reviewed_ids
             or any(
-                fact.verification_status is not VerificationStatus.CONFIRMED
+                fact.id in accepted_ids
+                and fact.verification_status is not VerificationStatus.CONFIRMED
+                or fact.id in rejected_ids
+                and fact.verification_status is not VerificationStatus.UNCONFIRMED
                 for fact in repeated_facts
             )
         ):
@@ -1504,26 +1628,39 @@ async def confirm_facts_batch(
                 .where(
                     CareerFact.profile_id == profile_id,
                     CareerFact.source_id == payload.source_id,
-                    CareerFact.id.in_(payload.fact_ids),
+                    CareerFact.id.in_(reviewed_ids),
                 )
                 .with_for_update()
             )
         ).all()
     )
-    if {fact.id for fact in facts} != set(payload.fact_ids):
+    if {fact.id for fact in facts} != reviewed_ids:
         raise _resume_ai_error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "resume_import_fact_mismatch",
-            "Every selected fact must belong to the uploaded resume",
+            "Every reviewed fact must belong to the uploaded resume",
         )
-    if any(fact.verification_status is VerificationStatus.UNCONFIRMED for fact in facts):
+    if any(
+        fact.id in accepted_ids
+        and fact.verification_status is VerificationStatus.UNCONFIRMED
+        for fact in facts
+    ):
         raise _resume_ai_error(
             status.HTTP_409_CONFLICT,
             "resume_import_fact_rejected",
             "A previously rejected fact cannot be confirmed from the import review",
         )
     changed = [
-        fact for fact in facts if fact.verification_status is VerificationStatus.EXTRACTED
+        fact
+        for fact in facts
+        if (
+            fact.id in accepted_ids
+            and fact.verification_status is not VerificationStatus.CONFIRMED
+        )
+        or (
+            fact.id in rejected_ids
+            and fact.verification_status is not VerificationStatus.UNCONFIRMED
+        )
     ]
     if changed:
         revision_update = await session.execute(
@@ -1542,10 +1679,15 @@ async def confirm_facts_batch(
                 "resume_evidence_revision_conflict",
                 "Professional evidence changed; reload the import review",
             )
-        confirmed_at = datetime.now(UTC)
+        reviewed_at = datetime.now(UTC)
         for fact in changed:
-            fact.verification_status = VerificationStatus.CONFIRMED
-            fact.confirmed_at = confirmed_at
+            if fact.id in accepted_ids:
+                fact.verification_status = VerificationStatus.CONFIRMED
+                fact.confirmed_at = reviewed_at
+            else:
+                fact.verification_status = VerificationStatus.UNCONFIRMED
+                fact.confirmed_at = None
+                await _invalidate_fact_documents(session, fact.id)
         await session.execute(
             update(MatchAnalysis)
             .where(
@@ -1553,14 +1695,15 @@ async def confirm_facts_batch(
                 MatchAnalysis.invalidated_at.is_(None),
             )
             .values(
-                invalidated_at=confirmed_at,
-                invalidation_reason="Imported resume facts confirmed",
+                invalidated_at=reviewed_at,
+                invalidation_reason="Imported resume facts reviewed",
             )
         )
     source.source_metadata = {
         **source_metadata,
         "last_confirm_batch_request_id": str(payload.client_request_id),
         "last_confirm_batch_fact_ids": requested_fact_ids,
+        "last_confirm_batch_rejected_fact_ids": requested_rejected_fact_ids,
         "last_confirm_batch_evidence_revision": (
             payload.expected_evidence_revision + (1 if changed else 0)
         ),
