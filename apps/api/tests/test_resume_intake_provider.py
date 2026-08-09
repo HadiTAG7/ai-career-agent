@@ -1478,6 +1478,14 @@ async def test_two_column_pdf_keeps_complete_resume_records_without_layout_fragm
     assert education[0].structured_value["gpa_score"] == "3.4"
     assert education[0].structured_value["gpa_scale"] == "4"
     assert education[0].structured_value["gpa_display_recommended"] is True
+    assert education[0].structured_value["coursework"] == [
+        "Auditing",
+        "Financial Accounting",
+        "Risk Management",
+        "Cost Control",
+        "Internal Control Systems",
+        "Financial Modelling",
+    ]
 
     experiences = [fact for fact in result if fact.category == FactCategory.EXPERIENCE]
     assert [fact.label for fact in experiences] == [
@@ -1492,6 +1500,12 @@ async def test_two_column_pdf_keeps_complete_resume_records_without_layout_fragm
         "Meridian Petrochemical",
         "MarketLearn",
         None,
+    ]
+    assert [fact.structured_value.get("source_section") for fact in experiences] == [
+        "Professional Experience",
+        "Professional Experience",
+        "Professional Experience",
+        "Investment & Trading Experience",
     ]
     assert [fact.structured_value["date_range"] for fact in experiences] == [
         "2025 – Present",
@@ -1681,6 +1695,7 @@ async def test_intake_writes_an_evidence_addressable_structured_resume_record(
         "responsibilities": ["Built weekly reports"],
         "outcomes": ["Reduced review time"],
         "tools": ["Python", "Power BI"],
+        "coursework": [],
     }
 
 

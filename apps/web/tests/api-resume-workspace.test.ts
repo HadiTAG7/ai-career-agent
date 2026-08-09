@@ -32,6 +32,7 @@ const educationRecord: ApiResumeRecord = {
   responsibilities: [],
   outcomes: [],
   tools: [],
+  coursework: [],
 };
 
 function jsonResponse(body: unknown) {

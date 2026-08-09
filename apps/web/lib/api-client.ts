@@ -245,7 +245,9 @@ export type ApiResumeFactCategory =
   | "preference"
   | "eligibility";
 
-export type ApiResumeSectionKey = Exclude<ApiResumeFactCategory, "identity" | "preference" | "eligibility">;
+export type ApiResumeSectionKey =
+  | Exclude<ApiResumeFactCategory, "identity" | "preference" | "eligibility">
+  | "trading_experience";
 
 export type ApiResumeQuestion = {
   id: string;
@@ -308,6 +310,7 @@ export type ApiResumeRecord = {
   schema_version: "resume_record.v1";
   record_type: ApiResumeFactCategory;
   source_handles: string[];
+  source_section?: string | null;
   title: string;
   organization?: string | null;
   date_range?: string | null;
@@ -323,6 +326,7 @@ export type ApiResumeRecord = {
   responsibilities: string[];
   outcomes: string[];
   tools: string[];
+  coursework: string[];
 };
 
 export type ApiResumeUnderstanding = {

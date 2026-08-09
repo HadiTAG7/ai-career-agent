@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from hashlib import sha256
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -204,6 +204,18 @@ _GENERIC_TITLE_WORDS = {
 _SECTION_TITLE_WORDS: dict[str, set[str]] = {
     "education": {"academic", "education", "تعليم", "دراسة", "مؤهل"},
     "experience": {"employment", "experience", "work", "خبرة", "عمل"},
+    "trading_experience": {
+        "experience",
+        "investment",
+        "investments",
+        "markets",
+        "trading",
+        "استثمار",
+        "الاستثمار",
+        "تداول",
+        "التداول",
+        "خبرة",
+    },
     "project": {"project", "projects", "مشروع", "مشاريع"},
     "skill": {"competencies", "skills", "technical", "تقنيات", "مهارات"},
     "certification": {"certificate", "certification", "certifications", "اعتماد", "شهادات"},
@@ -213,6 +225,7 @@ _SECTION_TITLE_WORDS: dict[str, set[str]] = {
 _SECTION_SUPPORT_CATEGORIES: dict[str, set[str]] = {
     "education": {"education", "achievement"},
     "experience": {"experience", "achievement"},
+    "trading_experience": {"experience", "achievement"},
     "project": {"project", "achievement"},
     "skill": {"skill"},
     "certification": {"certification", "achievement"},
@@ -236,20 +249,45 @@ ResumeWriterCategory = Literal[
     "achievement",
 ]
 
-# This is the same order used by the resume document. The server owns navigation so the
-# model can write a natural question without being allowed to jump between arbitrary sections.
-RESUME_SECTION_ORDER: tuple[ResumeWriterCategory, ...] = (
-    "experience",
+ResumeDraftSectionKey = Literal[
     "education",
-    "project",
-    "skill",
+    "experience",
+    "trading_experience",
     "certification",
+    "skill",
     "language",
+    "project",
+    "achievement",
+]
+
+# The server owns interview navigation so the model can write a natural question without being
+# allowed to jump between arbitrary sections. Trading is covered within the experience interview.
+RESUME_SECTION_ORDER: tuple[ResumeWriterCategory, ...] = (
+    "education",
+    "experience",
+    "certification",
+    "skill",
+    "language",
+    "project",
+    "achievement",
+)
+
+# Trading remains an experience fact category for matching and interview navigation, but it is
+# rendered separately when the source explicitly identifies an investment/trading section.
+RESUME_DRAFT_SECTION_ORDER: tuple[ResumeDraftSectionKey, ...] = (
+    "education",
+    "experience",
+    "trading_experience",
+    "certification",
+    "skill",
+    "language",
+    "project",
     "achievement",
 )
 ResumeRewriteSectionKey = Literal[
     "education",
     "experience",
+    "trading_experience",
     "certification",
     "skill",
     "project",
@@ -310,8 +348,9 @@ Grounding and safety rules:
    explicitly supported by evidence.
 8. Omit a GPA unless it is at least 80% of its stated scale or the cited evidence explicitly
    states honors. If its scale is unknown, omit it.
-9. Use two to four concise sentences for the professional summary and one to four bullets per
-   experience or project. Do not create empty sections.
+9. Use two to four concise sentences for the professional summary. Preserve every distinct
+   supported responsibility or outcome; experience and project items may use up to twenty bullets.
+   Do not create empty sections.
 10. Use the requested language and readable section titles. Keep product names and proper nouns in
     their original spelling where practical.
 11. Return an editable draft. The user will review it before export.
@@ -327,6 +366,14 @@ Grounding and safety rules:
     different handles in separate sentences or bullets.
 16. Preserve negation. Evidence such as "did not manage" or "no experience with" must never become
     an affirmative resume claim.
+17. Preserve every distinct supported record, responsibility, outcome, date, organization,
+    institution, certification, skill, and language level. Do not shorten the draft by dropping
+    supported information.
+18. Return sections in this order when evidence exists: education, experience,
+    trading_experience, certification, skill, language, project, achievement.
+19. Use trading_experience only when the cited source explicitly belongs to an Investment &
+    Trading Experience or Trading Experience section. Keep teaching, employment, internships, and
+    other roles under experience even when their responsibilities mention markets or trading.
 """.strip()
 
 ADAPTIVE_TURN_SYSTEM_INSTRUCTIONS = """
@@ -523,23 +570,23 @@ class _GeneratedDraftItem(BaseModel):
     organization: str | None = Field(max_length=500)
     date_range: str | None = Field(max_length=160)
     location: str | None = Field(max_length=200)
-    bullets: list[str] = Field(max_length=8)
+    bullets: list[str] = Field(max_length=20)
     evidence_handles: list[str] = Field(min_length=1, max_length=12)
 
 
 class _GeneratedDraftSection(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    key: ResumeWriterCategory
+    key: ResumeDraftSectionKey
     title: str = Field(min_length=1, max_length=160)
     items: list[_GeneratedDraftItem] = Field(min_length=1, max_length=30)
 
     @model_validator(mode="after")
     def narrative_items_need_bullets(self) -> _GeneratedDraftSection:
-        if self.key in {"experience", "project"} and any(
+        if self.key in {"experience", "trading_experience", "project"} and any(
             not item.bullets for item in self.items
         ):
-            raise ValueError("experience and project items require at least one bullet")
+            raise ValueError("narrative resume items require at least one bullet")
         return self
 
 
@@ -549,13 +596,20 @@ class _GeneratedDraft(BaseModel):
     headline: str = Field(min_length=1, max_length=300)
     professional_summary: str = Field(min_length=20, max_length=2_500)
     summary_evidence_handles: list[str] = Field(min_length=1, max_length=15)
-    sections: list[_GeneratedDraftSection] = Field(min_length=1, max_length=7)
+    sections: list[_GeneratedDraftSection] = Field(min_length=1, max_length=8)
 
 
 def _heading_key(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     normalized = normalized.translate(str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي"}))
     return " ".join(normalized.strip(" .:：—–-|_#").split())
+
+
+def _presentation_key(value: str) -> str:
+    """Compare already-presented metadata while ignoring cosmetic separators."""
+
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(character for character in normalized if character.isalnum())
 
 
 _GENERIC_FACT_HEADINGS = {
@@ -581,6 +635,29 @@ _GENERIC_FACT_HEADINGS = {
         "الإنجازات",
     )
 }
+_EXPLICIT_TRADING_SECTION_HEADINGS = frozenset(
+    _heading_key(value)
+    for value in (
+        "Investment & Trading Experience",
+        "Investment and Trading Experience",
+        "Trading Experience",
+        "خبرة الاستثمار والتداول",
+        "خبرة التداول",
+    )
+)
+_EXPLICIT_PROFESSIONAL_EXPERIENCE_HEADINGS = frozenset(
+    _heading_key(value)
+    for value in (
+        "Experience",
+        "Professional Experience",
+        "Work Experience",
+        "Employment History",
+        "الخبرة",
+        "الخبرة الاحترافية",
+        "الخبرة المهنية",
+        "الخبرة العملية",
+    )
+)
 _SENSITIVE_STRUCTURED_KEYS = {
     "address",
     "bank",
@@ -1246,6 +1323,7 @@ _NEGATION_WORDS = frozenset(
     }
 )
 _CLAIM_UNIT_PATTERN = re.compile(r"(?<=[.!?؟;؛])\s+|[\r\n•|]+")
+_INITIALISM_PATTERN = re.compile(r"\b(?:[A-Za-z]\.){2,}")
 _SUPPORT_CONTRAST_PATTERN = re.compile(
     r"\b(?:although|but|except|however|yet)\b|(?:^|\s)(?:إلا|الا|لكن|ولكن)(?:\s|$)",
     re.IGNORECASE,
@@ -1260,7 +1338,16 @@ def _contains_negation(value: str) -> bool:
 
 
 def _claim_units(value: str) -> list[str]:
-    return [part.strip(" -–—,؛;") for part in _CLAIM_UNIT_PATTERN.split(value) if part.strip()]
+    period_placeholder = "\uf000"
+    protected = _INITIALISM_PATTERN.sub(
+        lambda match: match.group(0).replace(".", period_placeholder),
+        value,
+    )
+    return [
+        part.replace(period_placeholder, ".").strip(" -–—,؛;")
+        for part in _CLAIM_UNIT_PATTERN.split(protected)
+        if part.strip()
+    ]
 
 
 def _support_fragments(value: str) -> list[str]:
@@ -1587,7 +1674,10 @@ def _sanitize_generated_draft(
             item["bullets"] = [
                 bullet for bullet in item["bullets"] if grounded(bullet, handles)
             ]
-            if section["key"] in {"experience", "project"} and not item["bullets"]:
+            if (
+                section["key"] in {"experience", "trading_experience", "project"}
+                and not item["bullets"]
+            ):
                 continue
             grounded_items.append(item)
         if grounded_items:
@@ -1646,9 +1736,9 @@ def _validated_draft(
         _validate_section_title(section.key, section.title)
         items: list[ResumeDraftItem] = []
         for item in section.items:
-            if section.key in {"experience", "project"} and not item.bullets:
+            if section.key in {"experience", "trading_experience", "project"} and not item.bullets:
                 raise ResumeWriterError(
-                    "Resume writer returned experience or project without grounded bullets"
+                    "Resume writer returned a narrative item without grounded bullets"
                 )
             if item.id in item_ids:
                 raise ResumeWriterError("Resume writer returned duplicate item IDs")
@@ -1776,6 +1866,578 @@ def _validate_requested_draft_language(
     raise ResumeWriterError("Resume writer did not use the requested English language")
 
 
+_CANONICAL_DRAFT_SECTION_TITLES: dict[
+    ResumeDraftSectionKey, dict[PreferredLanguage, str]
+] = {
+    "education": {
+        PreferredLanguage.AR: "التعليم",
+        PreferredLanguage.EN: "Education",
+    },
+    "experience": {
+        PreferredLanguage.AR: "الخبرة الاحترافية",
+        PreferredLanguage.EN: "Professional Experience",
+    },
+    "trading_experience": {
+        PreferredLanguage.AR: "خبرة الاستثمار والتداول",
+        PreferredLanguage.EN: "Investment & Trading Experience",
+    },
+    "certification": {
+        PreferredLanguage.AR: "الشهادات",
+        PreferredLanguage.EN: "Certifications",
+    },
+    "skill": {
+        PreferredLanguage.AR: "المهارات",
+        PreferredLanguage.EN: "Skills",
+    },
+    "language": {
+        PreferredLanguage.AR: "اللغات",
+        PreferredLanguage.EN: "Languages",
+    },
+    "project": {
+        PreferredLanguage.AR: "المشاريع",
+        PreferredLanguage.EN: "Projects",
+    },
+    "achievement": {
+        PreferredLanguage.AR: "الإنجازات",
+        PreferredLanguage.EN: "Achievements",
+    },
+}
+
+
+def _explicit_experience_section(
+    evidence: ResumeEvidence,
+) -> Literal["experience", "trading_experience"] | None:
+    candidates: list[str] = []
+    source_section = evidence.structured_value.get("source_section")
+    if isinstance(source_section, str) and source_section.strip():
+        candidates.append(source_section)
+    if evidence.source_excerpt:
+        first_line = evidence.source_excerpt.splitlines()[0].strip()
+        if first_line:
+            candidates.append(first_line)
+    for candidate in candidates:
+        heading = _heading_key(candidate)
+        if heading in _EXPLICIT_TRADING_SECTION_HEADINGS:
+            return "trading_experience"
+        if heading in _EXPLICIT_PROFESSIONAL_EXPERIENCE_HEADINGS:
+            return "experience"
+    return None
+
+
+def _evidence_section_key(evidence: ResumeEvidence) -> ResumeDraftSectionKey:
+    if evidence.category == "experience":
+        return _explicit_experience_section(evidence) or "experience"
+    return cast(ResumeDraftSectionKey, evidence.category)
+
+
+def _structured_string(evidence: ResumeEvidence, *keys: str) -> str | None:
+    for key in keys:
+        value = evidence.structured_value.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _structured_list(evidence: ResumeEvidence, key: str) -> list[str]:
+    value = evidence.structured_value.get(key)
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            str(item).strip()[:1_000]
+            for item in value
+            if str(item).strip()
+        )
+    )
+
+
+def _coursework_from_evidence(evidence: ResumeEvidence) -> list[str]:
+    coursework = _structured_list(evidence, "coursework")
+    if coursework or not evidence.source_excerpt:
+        return coursework
+    coursework_labels = {
+        "relevant courses",
+        "relevant course",
+        "relevant coursework",
+        "coursework",
+        "courses",
+        "المقررات ذات الصلة",
+        "المقررات الدراسية",
+        "المقررات",
+        "المواد ذات الصلة",
+    }
+    for raw_line in evidence.source_excerpt.splitlines():
+        for separator in (":", "："):
+            if separator not in raw_line:
+                continue
+            raw_name, raw_value = raw_line.split(separator, 1)
+            if _heading_key(raw_name) not in coursework_labels or not raw_value.strip():
+                continue
+            return list(
+                dict.fromkeys(
+                    item.strip()
+                    for item in re.split(r"\s*[,،]\s*", raw_value)
+                    if item.strip()
+                )
+            )[:30]
+    return []
+
+
+def _source_item_bullets(evidence: ResumeEvidence) -> list[str]:
+    bullets = [
+        *_structured_list(evidence, "responsibilities"),
+        *_structured_list(evidence, "outcomes"),
+    ]
+    honors = _structured_string(evidence, "honors")
+    if honors:
+        bullets.append(honors)
+    if (
+        evidence.category == "education"
+        and evidence.structured_value.get("gpa_display_recommended") is True
+    ):
+        score = _structured_string(evidence, "gpa_score")
+        scale = _structured_string(evidence, "gpa_scale")
+        if score and scale:
+            bullets.append(f"GPA: {score}/{scale}")
+    coursework = _coursework_from_evidence(evidence)
+    if evidence.category == "education" and coursework:
+        coursework_text = ", ".join(coursework)
+        label = (
+            "المقررات ذات الصلة"
+            if re.search(r"[\u0600-\u06ff]", coursework_text)
+            else "Relevant Coursework"
+        )
+        bullets.append(f"{label}: {coursework_text}")
+    if not bullets and evidence.category in {"experience", "project"} and evidence.detail:
+        bullets.append(evidence.detail.strip()[:1_000])
+    return list(dict.fromkeys(bullet for bullet in bullets if bullet))
+
+
+def _bullet_covers_source(source: str, bullets: list[str]) -> bool:
+    source_normalized = " ".join(_meaningful_words(source))
+    source_words = set(source_normalized.split())
+    if not source_words:
+        return False
+    source_numbers = _numbers(source)
+    for bullet in bullets:
+        bullet_normalized = " ".join(_meaningful_words(bullet))
+        if source_normalized in bullet_normalized or bullet_normalized in source_normalized:
+            return True
+        bullet_words = set(bullet_normalized.split())
+        if (
+            source_numbers <= _numbers(bullet)
+            and len(source_words & bullet_words) / len(source_words) >= 0.65
+        ):
+            return True
+    return False
+
+
+def _less_specific_bullet_index(source: str, bullets: list[str]) -> int | None:
+    source_words = set(_meaningful_words(source))
+    source_numbers = _numbers(source)
+    if not source_words:
+        return None
+    for index, bullet in enumerate(bullets):
+        bullet_words = set(_meaningful_words(bullet))
+        if not bullet_words or _contains_negation(source) != _contains_negation(bullet):
+            continue
+        overlap = len(source_words & bullet_words) / min(len(source_words), len(bullet_words))
+        if (
+            overlap >= 0.7
+            and _numbers(bullet) <= source_numbers
+            and not source_numbers <= _numbers(bullet)
+        ):
+            return index
+    return None
+
+
+def _remove_redundant_metadata_bullets(
+    section_key: ResumeDraftSectionKey,
+    *,
+    title: str,
+    organization: str | None,
+    date_range: str | None,
+    location: str | None,
+    bullets: list[str],
+) -> list[str]:
+    if section_key not in {"certification", "language", "skill"}:
+        return bullets
+    metadata = [title, organization or "", date_range or "", location or ""]
+    metadata_keys = {_presentation_key(value) for value in metadata if value}
+    title_key = _presentation_key(title)
+    result: list[str] = []
+    for bullet in bullets:
+        bullet_key = _presentation_key(bullet)
+        if not bullet_key:
+            continue
+        if bullet_key in metadata_keys:
+            continue
+        if section_key in {"certification", "language"} and bullet_key in title_key:
+            continue
+        result.append(bullet)
+    return result
+
+
+def _complete_professional_summary(
+    draft: ResumeDraftContent,
+    evidence: tuple[ResumeEvidence, ...],
+    language: PreferredLanguage,
+) -> tuple[str, list[str]]:
+    """Fill a thin model summary with a few literal, grounded experience highlights."""
+
+    summary = draft.professional_summary.strip()
+    handles = list(dict.fromkeys(draft.summary_evidence_handles))
+    if len(_claim_units(summary)) >= 3:
+        return summary, handles
+
+    professional = [
+        item
+        for item in evidence
+        if item.category == "experience" and _evidence_section_key(item) == "experience"
+    ]
+    trading = [
+        item
+        for item in evidence
+        if item.category == "experience"
+        and _evidence_section_key(item) == "trading_experience"
+    ]
+    remaining = [
+        item
+        for item in evidence
+        if item.category in {"experience", "project", "achievement"}
+        and item not in professional
+        and item not in trading
+    ]
+    ordered_evidence = [
+        *professional[:1],
+        *trading[:1],
+        *professional[1:],
+        *trading[1:],
+        *remaining,
+    ]
+    for support in ordered_evidence:
+        if len(_claim_units(summary)) >= 3:
+            break
+        source_bullet = next(
+            (
+                bullet
+                for bullet in _source_item_bullets(support)
+                if not _bullet_covers_source(bullet, [summary])
+                and _uses_requested_language(bullet, language, allow_short=True)
+            ),
+            None,
+        )
+        if not source_bullet:
+            continue
+        sentence = source_bullet.strip()
+        if sentence[-1:] not in {".", "!", "?", "؟"}:
+            sentence += "."
+        proposed = f"{summary} {sentence}".strip()
+        if len(proposed) > 2_500:
+            continue
+        summary = proposed
+        handles.append(support.handle)
+    return summary, list(dict.fromkeys(handles))[:15]
+
+
+def _complete_headline(
+    headline: str,
+    evidence: tuple[ResumeEvidence, ...],
+    language: PreferredLanguage,
+    target_role: str | None = None,
+) -> str:
+    generic_words = {
+        "achievement",
+        "achievements",
+        "career",
+        "certification",
+        "certifications",
+        "education",
+        "experience",
+        "language",
+        "languages",
+        "professional",
+        "profile",
+        "project",
+        "projects",
+        "resume",
+        "skill",
+        "skills",
+        "work",
+    }
+    professional = next(
+        (
+            item
+            for item in evidence
+            if item.category == "experience"
+            and _evidence_section_key(item) == "experience"
+            and _uses_requested_language(item.label, language, allow_short=True)
+        ),
+        None,
+    )
+    trading = next(
+        (
+            item
+            for item in evidence
+            if item.category == "experience"
+            and _evidence_section_key(item) == "trading_experience"
+            and _uses_requested_language(item.label, language, allow_short=True)
+        ),
+        None,
+    )
+    candidates = list(
+        dict.fromkeys(
+            item.label.strip()
+            for item in (professional, trading)
+            if item is not None and item.label.strip()
+        )
+    )
+    completed = " | ".join(candidates)
+    if (
+        target_role is None
+        and professional is not None
+        and trading is not None
+        and completed
+        and len(completed) <= 300
+    ):
+        return completed
+    headline_words = set(_meaningful_words(headline))
+    matches_non_experience_record = any(
+        item.category != "experience"
+        and _heading_key(item.label) == _heading_key(headline)
+        for item in evidence
+    )
+    if (
+        not headline_words
+        or not headline_words <= generic_words
+        and not matches_non_experience_record
+    ):
+        return headline
+    return completed if completed and len(completed) <= 300 else headline
+
+
+def _item_section_key(
+    declared_key: ResumeDraftSectionKey,
+    item: ResumeDraftItem,
+    evidence_by_handle: dict[str, ResumeEvidence],
+) -> ResumeDraftSectionKey:
+    if declared_key not in {"experience", "trading_experience"}:
+        return declared_key
+    explicit_sections = {
+        section
+        for handle in item.evidence_handles
+        if (support := evidence_by_handle.get(handle)) is not None
+        and support.category == "experience"
+        and (section := _explicit_experience_section(support)) is not None
+    }
+    if explicit_sections == {"experience", "trading_experience"}:
+        raise ResumeWriterError(
+            "Resume writer combined professional and trading experience records"
+        )
+    if "experience" in explicit_sections:
+        return "experience"
+    if "trading_experience" in explicit_sections:
+        return "trading_experience"
+    return declared_key
+
+
+def _evidence_item_fields(
+    evidence: ResumeEvidence,
+) -> tuple[str | None, str | None, str | None]:
+    if evidence.category == "education":
+        organization = _structured_string(evidence, "institution")
+    elif evidence.category == "certification":
+        organization = _structured_string(evidence, "issuer")
+    elif evidence.category == "language":
+        organization = _structured_string(evidence, "proficiency")
+    else:
+        organization = _structured_string(evidence, "organization")
+    return (
+        organization,
+        _structured_string(evidence, "date_range"),
+        _structured_string(evidence, "location"),
+    )
+
+
+def _complete_draft_from_evidence(
+    draft: ResumeDraftContent,
+    evidence: tuple[ResumeEvidence, ...],
+    language: PreferredLanguage,
+    target_role: str | None = None,
+) -> ResumeDraftContent:
+    """Keep the writer's prose while deterministically retaining confirmed source records."""
+
+    evidence_by_handle = {item.handle: item for item in evidence}
+    evidence_position = {
+        item.handle: index for index, item in enumerate(evidence)
+    }
+    buckets: dict[ResumeDraftSectionKey, list[ResumeDraftItem]] = {
+        key: [] for key in RESUME_DRAFT_SECTION_ORDER
+    }
+    covered_handles: set[str] = set()
+
+    for section in draft.sections:
+        declared_key = cast(ResumeDraftSectionKey, section.key)
+        for item in section.items:
+            supporting_evidence = [
+                evidence_by_handle[handle]
+                for handle in item.evidence_handles
+                if handle in evidence_by_handle
+            ]
+            normalized_key = _item_section_key(
+                declared_key,
+                item,
+                evidence_by_handle,
+            )
+            if (
+                normalized_key in {"experience", "trading_experience", "project"}
+                and len(supporting_evidence) > 1
+            ):
+                # One narrative item cannot safely represent multiple confirmed records. Keep
+                # every handle uncovered so the deterministic pass below emits each record.
+                continue
+            organization = item.organization
+            date_range = item.date_range
+            location = item.location
+            bullets = list(item.bullets)
+            foreign_language_gaps = 0
+            for support in supporting_evidence:
+                support_organization, support_date, support_location = _evidence_item_fields(
+                    support
+                )
+                organization = organization or support_organization
+                date_range = date_range or support_date
+                location = location or support_location
+                if support.category == "language" and support_organization:
+                    bullets = [
+                        bullet
+                        for bullet in bullets
+                        if _heading_key(bullet) != _heading_key(support_organization)
+                    ]
+                for source_bullet in _source_item_bullets(support):
+                    if _bullet_covers_source(source_bullet, bullets):
+                        continue
+                    if _uses_requested_language(
+                        source_bullet,
+                        language,
+                        allow_short=True,
+                    ):
+                        replacement_index = _less_specific_bullet_index(
+                            source_bullet,
+                            bullets,
+                        )
+                        if replacement_index is None:
+                            bullets.append(source_bullet)
+                        else:
+                            bullets[replacement_index] = source_bullet
+                    else:
+                        foreign_language_gaps += 1
+            bullets = _remove_redundant_metadata_bullets(
+                normalized_key,
+                title=item.title,
+                organization=organization,
+                date_range=date_range,
+                location=location,
+                bullets=bullets,
+            )
+            if foreign_language_gaps and len(bullets) < sum(
+                len(_source_item_bullets(support)) for support in supporting_evidence
+            ):
+                raise ResumeWriterError(
+                    "Resume writer omitted supported responsibilities from the requested language"
+                )
+            buckets[normalized_key].append(
+                item.model_copy(
+                    update={
+                        "organization": organization,
+                        "date_range": date_range,
+                        "location": location,
+                        "bullets": list(dict.fromkeys(bullets))[:20],
+                    }
+                )
+            )
+            covered_handles.update(item.evidence_handles)
+
+    used_ids = {
+        item.id
+        for section_items in buckets.values()
+        for item in section_items
+    }
+    for support in evidence:
+        if support.handle in covered_handles:
+            continue
+        section_key = _evidence_section_key(support)
+        bullets = _source_item_bullets(support)
+        if section_key in {"experience", "trading_experience", "project"}:
+            if not bullets:
+                continue
+            if any(
+                not _uses_requested_language(bullet, language, allow_short=True)
+                for bullet in bullets
+            ):
+                raise ResumeWriterError(
+                    "Resume writer omitted a supported narrative record from the requested language"
+                )
+        organization, date_range, location = _evidence_item_fields(support)
+        base_id = f"{section_key}_{support.handle[-12:]}".casefold()
+        item_id = re.sub(r"[^a-z0-9_]", "_", base_id).strip("_")[:80] or "resume_item"
+        suffix = 2
+        unique_id = item_id
+        while unique_id in used_ids:
+            unique_id = f"{item_id[:74]}_{suffix}"
+            suffix += 1
+        used_ids.add(unique_id)
+        buckets[section_key].append(
+            ResumeDraftItem(
+                id=unique_id,
+                title=support.label,
+                organization=organization,
+                date_range=date_range,
+                location=location,
+                bullets=bullets[:20],
+                evidence_handles=[support.handle],
+            )
+        )
+
+    def item_position(item: ResumeDraftItem) -> int:
+        return min(
+            (
+                evidence_position[handle]
+                for handle in item.evidence_handles
+                if handle in evidence_position
+            ),
+            default=len(evidence_position),
+        )
+
+    sections = [
+        ResumeDraftSection(
+            key=key,
+            title=_CANONICAL_DRAFT_SECTION_TITLES[key][language],
+            items=sorted(buckets[key], key=item_position),
+        )
+        for key in RESUME_DRAFT_SECTION_ORDER
+        if buckets[key]
+    ]
+    professional_summary, summary_evidence_handles = _complete_professional_summary(
+        draft,
+        evidence,
+        language,
+    )
+    return draft.model_copy(
+        update={
+            "headline": _complete_headline(
+                draft.headline,
+                evidence,
+                language,
+                target_role,
+            ),
+            "professional_summary": professional_summary,
+            "summary_evidence_handles": summary_evidence_handles,
+            "sections": sections,
+        }
+    )
+
+
 def resume_patch_uses_requested_language(
     patch: object,
     language: PreferredLanguage,
@@ -1843,6 +2505,7 @@ def _validate_record(
                 *record.responsibilities,
                 *record.outcomes,
                 *record.tools,
+                *record.coursework,
             )
             if part
         ),
@@ -1871,8 +2534,22 @@ def _validate_record(
         except ValueError:
             score = scale = 0
         expected_gpa_recommendation = bool(scale > 0 and score / scale >= 0.8)
+    grounded_source_section: str | None = None
+    if record.source_section:
+        requested_heading = _heading_key(record.source_section)
+        for handle in record.source_handles:
+            source_excerpt = evidence_by_handle[handle].source_excerpt
+            if not source_excerpt:
+                continue
+            source_heading = source_excerpt.splitlines()[0].strip(" :：—–-")
+            if _heading_key(source_heading) == requested_heading:
+                grounded_source_section = source_heading
+                break
     return record.model_copy(
-        update={"gpa_display_recommended": expected_gpa_recommendation}
+        update={
+            "gpa_display_recommended": expected_gpa_recommendation,
+            "source_section": grounded_source_section,
+        }
     )
 
 
@@ -2715,6 +3392,12 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
                     raise ResumeWriterError("Resume writer returned no usable draft")
                 sanitized = _sanitize_generated_draft(parsed, all_evidence, target_role)
                 draft = _validated_draft(sanitized, all_evidence, target_role)
+                draft = _complete_draft_from_evidence(
+                    draft,
+                    all_evidence,
+                    language,
+                    target_role,
+                )
                 _validate_requested_draft_language(draft, language)
                 return draft
             except ResumeWriterError as exc:

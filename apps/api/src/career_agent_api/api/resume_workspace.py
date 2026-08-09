@@ -91,6 +91,7 @@ PROFESSIONAL_CATEGORIES = {
 SECTION_SUPPORT_CATEGORIES: dict[str, set[str]] = {
     "education": {"education", "achievement"},
     "experience": {"experience", "achievement"},
+    "trading_experience": {"experience", "achievement"},
     "project": {"project", "achievement"},
     "skill": {"skill"},
     "certification": {"certification", "achievement"},
@@ -243,13 +244,15 @@ def _coverage(
 ) -> tuple[dict[str, bool], int]:
     confirmed = [fact for fact in facts if fact.verification_status is VerificationStatus.CONFIRMED]
     categories = {fact.category.value for fact in confirmed}
+    draft_section_keys = {section.key for section in draft.sections} if draft else set()
     coverage = {
-        "experience": "experience" in categories,
         "education": "education" in categories,
-        "project": "project" in categories,
-        "skill": "skill" in categories,
+        "experience": "experience" in categories,
+        "trading_experience": "trading_experience" in draft_section_keys,
         "certification": "certification" in categories,
+        "skill": "skill" in categories,
         "language": "language" in categories,
+        "project": "project" in categories,
         "achievement": "achievement" in categories,
     }
     score = 0
@@ -271,7 +274,15 @@ def _first_question(
         for fact in facts
         if fact.verification_status is VerificationStatus.CONFIRMED
     }
-    if "experience" not in categories:
+    next_category = next(
+        (
+            category
+            for category in RESUME_SECTION_ORDER
+            if category not in categories
+        ),
+        RESUME_SECTION_ORDER[-1],
+    )
+    if next_category == "experience":
         if language is PreferredLanguage.AR:
             question = (
                 "احكِ لي عن تجربة عمل أو مشروع واحد تفخر به: ماذا فعلت، وبأي أداة، وما النتيجة؟"
@@ -287,7 +298,7 @@ def _first_question(
             why = "This gives the resume one concrete professional story."
         category = "experience"
         fields = ["context", "action", "tools", "outcome"]
-    elif "education" not in categories:
+    elif next_category == "education":
         if language is PreferredLanguage.AR:
             question = "ما تخصصك، وفي أي جامعة درست، ومتى تخرجت؟ اذكر المعدل ومقياسه إن رغبت."
             placeholder = "التخصص، الجامعة، سنة التخرج، والمعدل من 4 أو 5."
@@ -301,7 +312,7 @@ def _first_question(
             why = "This completes education and only shows a GPA when it strengthens the resume."
         category = "education"
         fields = ["degree", "field", "institution", "graduation_date", "gpa"]
-    elif "project" not in categories:
+    elif next_category == "project":
         if language is PreferredLanguage.AR:
             question = (
                 "حدثني عن مشروع أكاديمي أو شخصي مناسب للسيرة: ما هدفه، وما دورك، "
@@ -320,7 +331,7 @@ def _first_question(
             )
         category = "project"
         fields = ["goal", "contribution", "tools", "outcome"]
-    elif "skill" not in categories:
+    elif next_category == "skill":
         if language is PreferredLanguage.AR:
             question = (
                 "ما الأدوات أو المهارات التي استخدمتها فعليًا في الدراسة أو العمل؟ "
@@ -337,7 +348,7 @@ def _first_question(
             why = "Skills backed by examples are stronger than a keyword list."
         category = "skill"
         fields = ["skills", "evidence"]
-    elif "certification" not in categories:
+    elif next_category == "certification":
         if language is PreferredLanguage.AR:
             question = "هل لديك شهادة مهنية؟ اذكر اسمها، الجهة المانحة، وسنة الحصول عليها."
             placeholder = "اسم الشهادة، الجهة المانحة، والسنة؛ أو تخطَّ إن لم توجد."
@@ -350,7 +361,7 @@ def _first_question(
             why = "Only accurate, resume-ready certifications should be included."
         category = "certification"
         fields = ["name", "issuer", "year"]
-    elif "language" not in categories:
+    elif next_category == "language":
         if language is PreferredLanguage.AR:
             question = "ما اللغات التي تستخدمها، وما مستواك الفعلي في كل لغة؟"
             placeholder = "اللغة ومستواك: أساسي، متوسط، متقدم، أو طليق."
@@ -710,7 +721,7 @@ def _draft_from_patch(
         for item in candidate.get("bullet_candidates", [])
         if str(item).strip()
     ]
-    if section_key in {"experience", "project"} and not bullets:
+    if section_key in {"experience", "trading_experience", "project"} and not bullets:
         bullets = [fallback_summary.strip()[:1_000]] if fallback_summary.strip() else []
     handles = [str(item) for item in candidate.get("evidence_handles", []) if str(item)]
     if not handles:
@@ -2322,7 +2333,7 @@ def _review_blockers(
                     bullet,
                     item.evidence_handles,
                 )
-            if section.key in {"experience", "project"} and not item.bullets:
+            if section.key in {"experience", "trading_experience", "project"} and not item.bullets:
                 blockers.append(f"item_without_bullets:{item.id}")
     return list(dict.fromkeys(blockers))
 

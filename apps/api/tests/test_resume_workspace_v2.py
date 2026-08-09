@@ -215,13 +215,13 @@ async def test_workspace_opens_with_an_ai_generated_question_in_resume_order(
 
     assert response.status_code == 201, response.text
     workspace = response.json()
-    assert stub_provider.question_calls[0]["required_category"] == "experience"
+    assert stub_provider.question_calls[0]["required_category"] == "education"
     assert stub_provider.question_calls[0]["max_questions"] == 1
     assert workspace["provider_metadata"]["current_question"]["generation_source"] == "ai"
-    assert workspace["provider_metadata"]["current_question"]["category"] == "experience"
+    assert workspace["provider_metadata"]["current_question"]["category"] == "education"
     assert workspace["provider_metadata"]["section_order"] == list(RESUME_SECTION_ORDER)
     assert workspace["messages"][0]["content"] == (
-        "ما نوع الخبرة العملية التي تريد إبرازها، وما أهم نتيجة حققتها فيها؟"
+        "بناءً على خبرتك، ما تخصصك وفي أي جامعة درست ومتى تخرجت؟"
     )
 
 
@@ -753,7 +753,7 @@ async def test_start_without_conversation_language_keeps_legacy_single_language_
     assert started_response.status_code == 201, started_response.text
     started = started_response.json()
     assert started["conversation_language"] == "en"
-    assert started["messages"][0]["content"].startswith("Tell")
+    assert started["messages"][0]["content"].startswith("Based on your background")
 
     # Simulate a row created before conversation_language was persisted in provider metadata.
     async with session_factory() as session:
@@ -807,8 +807,10 @@ async def test_conversation_language_can_change_before_answers_but_not_after(
     assert changed["conversation_language"] == "en"
     assert changed["revision"] == started["revision"] + 1
     assert len(changed["messages"]) == 1
-    assert changed["messages"][0]["content"].startswith("Tell")
-    assert changed["provider_metadata"]["current_question"]["question"].startswith("Tell")
+    assert changed["messages"][0]["content"].startswith("Based on your background")
+    assert changed["provider_metadata"]["current_question"]["question"].startswith(
+        "Based on your background"
+    )
 
     answered_response = await client.post(
         f"{base}/messages",
@@ -1300,10 +1302,10 @@ async def test_guidance_quick_actions_never_create_facts_or_understandings(
     assert response.status_code == 200, response.text
     assert response.json()["pending_understanding"] is None
     if action in {"skip", "continue"}:
-        assert stub_provider.question_calls[-1]["required_category"] == "education"
+        assert stub_provider.question_calls[-1]["required_category"] == "experience"
         assert (
             response.json()["provider_metadata"]["current_question"]["category"]
-            == "education"
+            == "experience"
         )
     facts_after = (
         await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)

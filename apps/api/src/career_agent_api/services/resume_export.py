@@ -117,7 +117,8 @@ def render_resume_pdf(
     )
 
     for section in draft.sections:
-        _ensure_space(pdf, 20)
+        # Keep the divider, section title, and at least the first item heading together.
+        _ensure_space(pdf, 35)
         pdf.ln(3)
         pdf.set_draw_color(*BORDER)
         pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())

@@ -240,8 +240,9 @@ class ResumeInterviewAnswerCreate(BaseModel):
 
 
 ResumeSectionKey = Literal[
-    "experience",
     "education",
+    "experience",
+    "trading_experience",
     "project",
     "skill",
     "certification",
@@ -258,7 +259,7 @@ class ResumeDraftItem(BaseModel):
     organization: str | None = Field(default=None, max_length=500)
     date_range: str | None = Field(default=None, max_length=160)
     location: str | None = Field(default=None, max_length=200)
-    bullets: list[str] = Field(default_factory=list, max_length=8)
+    bullets: list[str] = Field(default_factory=list, max_length=20)
     evidence_handles: list[str] = Field(min_length=1, max_length=12)
 
     @field_validator("bullets")
@@ -281,7 +282,7 @@ class ResumeDraftContent(BaseModel):
     headline: str = Field(min_length=1, max_length=300)
     professional_summary: str = Field(min_length=20, max_length=2_500)
     summary_evidence_handles: list[str] = Field(min_length=1, max_length=15)
-    sections: list[ResumeDraftSection] = Field(min_length=1, max_length=7)
+    sections: list[ResumeDraftSection] = Field(min_length=1, max_length=8)
 
     @field_validator("sections")
     @classmethod
@@ -402,7 +403,7 @@ class ResumeRewriteCreate(BaseModel):
     target_kind: ResumeRewriteTargetKind
     section_key: ResumeSectionKey | None = None
     item_id: str | None = Field(default=None, min_length=2, max_length=80, pattern=r"^[a-z0-9_]+$")
-    bullet_index: int | None = Field(default=None, ge=0, le=7)
+    bullet_index: int | None = Field(default=None, ge=0, le=19)
     mode: ResumeRewriteMode
     instruction: str | None = Field(default=None, max_length=1_000)
     expected_draft_revision: int = Field(ge=0)

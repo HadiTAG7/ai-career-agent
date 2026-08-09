@@ -226,6 +226,7 @@ class ResumeRecord(BaseModel):
     schema_version: Literal["resume_record.v1"] = "resume_record.v1"
     record_type: ResumeFactCategory
     source_handles: list[str] = Field(min_length=1, max_length=12)
+    source_section: str | None = Field(default=None, max_length=160)
     title: str = Field(min_length=1, max_length=500)
     organization: str | None = Field(default=None, max_length=500)
     date_range: str | None = Field(default=None, max_length=160)
@@ -241,6 +242,7 @@ class ResumeRecord(BaseModel):
     responsibilities: list[str] = Field(default_factory=list, max_length=20)
     outcomes: list[str] = Field(default_factory=list, max_length=20)
     tools: list[str] = Field(default_factory=list, max_length=30)
+    coursework: list[str] = Field(default_factory=list, max_length=30)
 
 
 class ResumeIntakeProviderError(RuntimeError):
@@ -756,6 +758,15 @@ _STRUCTURED_FIELD_ALIASES: dict[str, str] = {
     "proficiency": "proficiency",
     "level": "proficiency",
     "المستوى": "proficiency",
+    "relevant courses": "coursework",
+    "relevant course": "coursework",
+    "relevant coursework": "coursework",
+    "coursework": "coursework",
+    "courses": "coursework",
+    "المقررات ذات الصلة": "coursework",
+    "المقررات الدراسية": "coursework",
+    "المقررات": "coursework",
+    "المواد ذات الصلة": "coursework",
 }
 
 
@@ -1702,7 +1713,11 @@ def _record_from_candidate(
         "responsibilities": [],
         "outcomes": [],
         "tools": [],
+        "coursework": [],
     }
+    source_lines = source_excerpt.splitlines()
+    if source_lines and _is_structural_heading(source_lines[0]):
+        values["source_section"] = source_lines[0].strip(" :：—–-")
     fragments = [
         fragment.strip(" •*.\t")
         for fragment in _FIELD_SEPARATOR_PATTERN.split(detail or "")
@@ -1724,7 +1739,7 @@ def _record_from_candidate(
             continue
         if field_name in {"responsibilities", "outcomes"}:
             values[field_name].append(field_value)
-        elif field_name == "tools":
+        elif field_name in {"tools", "coursework"}:
             values[field_name].extend(_split_list_value(field_value))
         elif field_name == "gpa":
             score, scale = _parse_gpa(field_value)
@@ -1771,6 +1786,45 @@ def _record_from_candidate(
         unkeyed.remove(location_fragment)
 
     if category == FactCategory.EDUCATION:
+        if not values["coursework"]:
+            coursework_parts: list[str] = []
+            collecting_coursework = False
+            for raw_line in source_lines:
+                line = raw_line.strip(" •*.\t")
+                if not line:
+                    continue
+                if collecting_coursework:
+                    if _is_structural_heading(line):
+                        break
+                    keyed_continuation = False
+                    for separator in (":", "："):
+                        if separator not in line:
+                            continue
+                        raw_name, _ = line.split(separator, 1)
+                        if _normalize_guided_label(raw_name) in _STRUCTURED_FIELD_ALIASES:
+                            keyed_continuation = True
+                            break
+                    if keyed_continuation:
+                        break
+                    coursework_parts.append(line)
+                    continue
+                for separator in (":", "："):
+                    if separator not in line:
+                        continue
+                    raw_name, raw_value = line.split(separator, 1)
+                    if (
+                        _STRUCTURED_FIELD_ALIASES.get(_normalize_guided_label(raw_name))
+                        != "coursework"
+                    ):
+                        continue
+                    collecting_coursework = True
+                    if raw_value.strip():
+                        coursework_parts.append(raw_value.strip())
+                    break
+            if coursework_parts:
+                values["coursework"].extend(
+                    _split_list_value(" ".join(coursework_parts))
+                )
         if _DEGREE_CUE_PATTERN.search(label):
             values.setdefault("degree", label)
         elif _EDUCATION_INSTITUTION_CUE_PATTERN.search(label):

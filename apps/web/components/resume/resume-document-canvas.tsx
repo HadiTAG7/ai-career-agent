@@ -14,10 +14,9 @@ import type {
   ApiCareerFact,
   ApiCareerProfile,
   ApiResumeDraftContent,
-  ApiResumeDraftSection,
-  ApiResumeSectionKey,
   ResumeRewriteMode,
 } from "@/lib/api-client";
+import { buildFallbackResumeDraft } from "@/lib/resume-presentation";
 import { cn } from "@/lib/utils";
 
 export type ResumeCanvasSelection = {
@@ -42,65 +41,6 @@ type ResumeDocumentCanvasProps = {
   onDraftChange: (draft: ApiResumeDraftContent) => void;
   onRewrite: (selection: ResumeCanvasSelection, mode: ResumeRewriteMode, instruction?: string) => void;
 };
-
-const sectionOrder: ApiResumeSectionKey[] = [
-  "experience",
-  "education",
-  "project",
-  "skill",
-  "certification",
-  "language",
-  "achievement",
-];
-
-const sectionLabels: Record<ApiResumeSectionKey, { ar: string; en: string }> = {
-  experience: { ar: "الخبرة المهنية", en: "Professional experience" },
-  education: { ar: "التعليم", en: "Education" },
-  project: { ar: "المشاريع", en: "Projects" },
-  skill: { ar: "المهارات", en: "Skills" },
-  certification: { ar: "الشهادات", en: "Certifications" },
-  language: { ar: "اللغات", en: "Languages" },
-  achievement: { ar: "الإنجازات", en: "Achievements" },
-};
-
-function fallbackDraft(
-  locale: "ar" | "en",
-  profile: ApiCareerProfile,
-  facts: ApiCareerFact[],
-): ApiResumeDraftContent {
-  const sections: ApiResumeDraftSection[] = [];
-  for (const key of sectionOrder) {
-    const matches = facts.filter((fact) => fact.category === key);
-    if (!matches.length) continue;
-    sections.push({
-      key,
-      title: sectionLabels[key][locale],
-      items: matches.map((fact) => ({
-        id: fact.id,
-        title: fact.label,
-        organization: typeof fact.structured_value.organization === "string"
-          ? fact.structured_value.organization
-          : null,
-        date_range: typeof fact.structured_value.date_range === "string"
-          ? fact.structured_value.date_range
-          : null,
-        location: typeof fact.structured_value.location === "string"
-          ? fact.structured_value.location
-          : null,
-        bullets: fact.detail ? [fact.detail] : [],
-        evidence_handles: [`fact:${fact.id}`],
-      })),
-    });
-  }
-  return {
-    headline: profile.headline ?? (locale === "ar" ? "عنوانك المهني" : "Your professional headline"),
-    professional_summary: locale === "ar"
-      ? "سيتكوّن ملخصك المهني هنا أثناء حديثنا. كل إجابة تؤكدها تضيف معنى أقوى إلى سيرتك."
-      : "Your professional summary will take shape here as we talk. Every confirmed answer makes it stronger.",
-    summary_evidence_handles: [],
-    sections,
-  };
-}
 
 function selectionMatches(
   current: ResumeCanvasSelection | null,
@@ -162,7 +102,7 @@ export function ResumeDocumentCanvas({
 }: ResumeDocumentCanvasProps) {
   const [zoom, setZoom] = useState(100);
   const displayedDraft = useMemo(
-    () => draft ?? fallbackDraft(locale, profile, facts),
+    () => draft ?? buildFallbackResumeDraft(locale, profile, facts),
     [draft, facts, locale, profile],
   );
   const canEdit = editable && Boolean(draft);

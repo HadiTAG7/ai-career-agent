@@ -91,6 +91,7 @@ const MAX_FILE_BYTES = 10_000_000;
 const coverageCopy: Record<string, { ar: string; en: string }> = {
   identity: { ar: "الهوية", en: "Identity" },
   experience: { ar: "الخبرة", en: "Experience" },
+  trading_experience: { ar: "خبرة التداول", en: "Trading experience" },
   education: { ar: "التعليم", en: "Education" },
   skill: { ar: "المهارات", en: "Skills" },
   project: { ar: "المشاريع", en: "Projects" },

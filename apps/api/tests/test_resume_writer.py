@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel, SecretStr, ValidationError
+from pypdf import PdfReader
 
 import career_agent_api.services.resume_writer as resume_writer_module
 from career_agent_api.core.config import Settings
 from career_agent_api.models.enums import FactCategory, PreferredLanguage, VerificationStatus
-from career_agent_api.schemas.api import ResumeQuestionRead
+from career_agent_api.schemas.api import ResumeExportContact, ResumeQuestionRead
+from career_agent_api.services.resume_export import render_resume_pdf
 from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
     MistralResumeWriterProvider,
@@ -24,6 +27,7 @@ from career_agent_api.services.resume_writer import (
     _sanitize_generated_draft,
     _StructuredResumeWriterProvider,
     _validate_gpa_policy,
+    _validate_record,
     _validate_requested_draft_language,
     _validated_draft,
     build_resume_evidence,
@@ -354,6 +358,541 @@ def test_resume_evidence_requires_confirmation_and_uses_structured_source() -> N
     assert result[0].source_excerpt == "Data Analyst at Acme; built weekly reports"
     assert "private_email" not in result[0].structured_value
     assert "candidate@example.test" not in result[0].text
+
+
+def test_adaptive_record_cannot_invent_a_source_section() -> None:
+    record = resume_writer_module.ResumeRecord(
+        record_type="experience",
+        source_handles=["fact_1"],
+        source_section="Investment & Trading Experience",
+        title="Inventory dashboard using Python and Power BI",
+        responsibilities=["Built weekly inventory reports"],
+    )
+
+    validated = _validate_record(record, evidence(category="experience"))
+
+    assert validated.source_section is None
+
+
+def test_adaptive_record_cannot_invent_coursework() -> None:
+    support = ResumeEvidence(
+        handle="education_fact",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Harbor University",
+        verification_status="confirmed",
+        source_excerpt="Bachelor of Science in Finance — Harbor University",
+    )
+    record = resume_writer_module.ResumeRecord(
+        record_type="education",
+        source_handles=[support.handle],
+        title="Bachelor of Science in Finance",
+        institution="Harbor University",
+        coursework=["Nuclear Reactor Design"],
+    )
+
+    with pytest.raises(ResumeWriterError):
+        _validate_record(record, (support,))
+
+
+def test_completion_separates_multiple_experience_handles_instead_of_hiding_a_record() -> None:
+    supports = (
+        ResumeEvidence(
+            handle="analyst_fact",
+            category="experience",
+            label="Finance Analyst",
+            detail="Prepared monthly reports",
+            verification_status="confirmed",
+            structured_value={
+                "source_section": "Professional Experience",
+                "organization": "Northstar",
+                "responsibilities": ["Prepared monthly reports"],
+            },
+            source_excerpt="Professional Experience\nFinance Analyst — Northstar",
+        ),
+        ResumeEvidence(
+            handle="trainee_fact",
+            category="experience",
+            label="Finance Trainee",
+            detail="Reconciled ledger accounts",
+            verification_status="confirmed",
+            structured_value={
+                "source_section": "Professional Experience",
+                "organization": "Meridian",
+                "responsibilities": ["Reconciled ledger accounts"],
+            },
+            source_excerpt="Professional Experience\nFinance Trainee — Meridian",
+        ),
+    )
+    combined = resume_writer_module.ResumeDraftContent.model_validate(
+        {
+            "headline": "Finance Analyst",
+            "professional_summary": "Prepared monthly reports for Northstar.",
+            "summary_evidence_handles": ["analyst_fact"],
+            "sections": [
+                {
+                    "key": "experience",
+                    "title": "Professional Experience",
+                    "items": [
+                        {
+                            "id": "combined_experience",
+                            "title": "Finance Analyst",
+                            "organization": "Northstar",
+                            "date_range": None,
+                            "location": None,
+                            "bullets": ["Prepared monthly reports"],
+                            "evidence_handles": ["analyst_fact", "trainee_fact"],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    completed = resume_writer_module._complete_draft_from_evidence(
+        combined,
+        supports,
+        PreferredLanguage.EN,
+    )
+
+    experience_items = next(
+        section.items for section in completed.sections if section.key == "experience"
+    )
+    assert [item.title for item in experience_items] == [
+        "Finance Analyst",
+        "Finance Trainee",
+    ]
+    assert [item.evidence_handles for item in experience_items] == [
+        ["analyst_fact"],
+        ["trainee_fact"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fact_order_and_complete_responsibilities_survive_draft_and_pdf_preview() -> None:
+    education_coursework = [
+        "Applied Econometrics",
+        "Financial Accounting",
+        "Risk Management",
+    ]
+    professional_responsibilities = [
+        "Prepared 12 monthly forecasts",
+        "Reconciled 48 ledger accounts",
+        "Reduced reporting cycle from 8 days to 5 days",
+    ]
+    trading_responsibilities = [
+        "Reviewed 2,400 simulated trades",
+        "Tested 6 strategies across 4 market regimes",
+        "Kept maximum drawdown within 9%",
+    ]
+
+    def confirmed_fact(
+        category: FactCategory,
+        title: str,
+        *,
+        source_handle: str,
+        source_excerpt: str,
+        **structured_fields: object,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=uuid4(),
+            category=category,
+            label=title,
+            detail=None,
+            structured_value={
+                "schema_version": "resume_record.v1",
+                "record_type": category.value,
+                "source_handles": [source_handle],
+                "title": title,
+                **structured_fields,
+            },
+            source_excerpt=source_excerpt,
+            verification_status=VerificationStatus.CONFIRMED,
+        )
+
+    facts = [
+        confirmed_fact(
+            FactCategory.EDUCATION,
+            "Bachelor of Science in Applied Economics",
+            source_handle="source_education",
+            source_excerpt=(
+                "Education\n"
+                "Bachelor of Science in Applied Economics, Harbor University, completed 2023\n"
+                "Relevant Courses: " + ", ".join(education_coursework)
+            ),
+            degree="Bachelor of Science in Applied Economics",
+            institution="Harbor University",
+            date_range="2023",
+        ),
+        confirmed_fact(
+            FactCategory.EXPERIENCE,
+            "Operations Analyst",
+            source_handle="source_professional_experience",
+            source_excerpt=(
+                "Operations Analyst at Nimbus Labs from 2023 to Present. "
+                + "; ".join(professional_responsibilities)
+            ),
+            organization="Nimbus Labs",
+            date_range="2023 to Present",
+            responsibilities=professional_responsibilities,
+        ),
+        confirmed_fact(
+            FactCategory.EXPERIENCE,
+            "Independent Trading Researcher",
+            source_handle="source_trading_experience",
+            source_excerpt=(
+                "Investment & Trading Experience\n"
+                "Independent Trading Researcher from 2020 to Present. "
+                + "; ".join(trading_responsibilities)
+            ),
+            date_range="2020 to Present",
+            responsibilities=trading_responsibilities,
+        ),
+        confirmed_fact(
+            FactCategory.CERTIFICATION,
+            "Aurora Financial Analysis Certificate",
+            source_handle="source_certification",
+            source_excerpt=(
+                "Aurora Financial Analysis Certificate, Northstar Academy, awarded 2022"
+            ),
+            issuer="Northstar Academy",
+            date_range="2022",
+        ),
+        confirmed_fact(
+            FactCategory.SKILL,
+            "Python",
+            source_handle="source_skill",
+            source_excerpt="Python",
+        ),
+        confirmed_fact(
+            FactCategory.LANGUAGE,
+            "English",
+            source_handle="source_language",
+            source_excerpt="English - Fluent",
+            proficiency="Fluent",
+        ),
+    ]
+    resume_evidence = build_resume_evidence(facts)
+    evidence_by_label = {item.label: item for item in resume_evidence}
+    professional_handle = evidence_by_label["Operations Analyst"].handle
+    trading_handle = evidence_by_label["Independent Trading Researcher"].handle
+    education_handle = evidence_by_label[
+        "Bachelor of Science in Applied Economics"
+    ].handle
+    certification_handle = evidence_by_label[
+        "Aurora Financial Analysis Certificate"
+    ].handle
+    skill_handle = evidence_by_label["Python"].handle
+    language_handle = evidence_by_label["English"].handle
+
+    assert [item.category for item in resume_evidence] == [
+        "education",
+        "experience",
+        "experience",
+        "certification",
+        "skill",
+        "language",
+    ]
+    assert evidence_by_label["Operations Analyst"].structured_value[
+        "responsibilities"
+    ] == professional_responsibilities
+    assert evidence_by_label["Independent Trading Researcher"].structured_value[
+        "responsibilities"
+    ] == trading_responsibilities
+
+    def generated_response(*, complete: bool) -> dict[str, object]:
+        professional_bullets = (
+            professional_responsibilities
+            if complete
+            else ["Prepared monthly forecasts"]
+        )
+        trading_bullets = (
+            trading_responsibilities if complete else ["Reviewed simulated trades"]
+        )
+        return {
+            "headline": "Education Experience",
+            "professional_summary": "Prepared 12 monthly forecasts.",
+            "summary_evidence_handles": [professional_handle, trading_handle],
+            # Deliberately reverse the sections. The server owns the final draft/preview order and
+            # must keep explicit investment/trading evidence out of Professional Experience.
+            "sections": [
+                {
+                    "key": "language",
+                    "title": "Languages",
+                    "items": [
+                        {
+                            "id": "language_english",
+                            "title": "English",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": ["Fluent"],
+                            "evidence_handles": [language_handle],
+                        }
+                    ],
+                },
+                {
+                    "key": "skill",
+                    "title": "Skills",
+                    "items": [
+                        {
+                            "id": "skill_python",
+                            "title": "Python",
+                            "organization": None,
+                            "date_range": None,
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [skill_handle],
+                        }
+                    ],
+                },
+                {
+                    "key": "certification",
+                    "title": "Certifications",
+                    "items": [
+                        {
+                            "id": "certification_aurora",
+                            "title": "Aurora Financial Analysis Certificate",
+                            "organization": "Northstar Academy",
+                            "date_range": "2022",
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [certification_handle],
+                        }
+                    ],
+                },
+                {
+                    "key": "trading_experience",
+                    "title": "Investment & Trading Experience",
+                    "items": [
+                        {
+                            "id": "trading_researcher",
+                            "title": "Independent Trading Researcher",
+                            "organization": None,
+                            "date_range": "2020 to Present",
+                            "location": None,
+                            "bullets": trading_bullets,
+                            "evidence_handles": [trading_handle],
+                        }
+                    ],
+                },
+                {
+                    "key": "experience",
+                    "title": "Professional Experience",
+                    "items": [
+                        {
+                            "id": "operations_analyst",
+                            "title": "Operations Analyst",
+                            "organization": "Nimbus Labs",
+                            "date_range": "2023 to Present",
+                            "location": None,
+                            "bullets": professional_bullets,
+                            "evidence_handles": [professional_handle],
+                        },
+                    ],
+                },
+                {
+                    "key": "education",
+                    "title": "Education",
+                    "items": [
+                        {
+                            "id": "education_applied_economics",
+                            "title": "Bachelor of Science in Applied Economics",
+                            "organization": "Harbor University",
+                            "date_range": "2023",
+                            "location": None,
+                            "bullets": [],
+                            "evidence_handles": [education_handle],
+                        }
+                    ],
+                },
+            ],
+        }
+
+    provider = CapturingResumeWriter(
+        [
+            generated_response(complete=False),
+            generated_response(complete=True),
+        ]
+    )
+    draft = await provider.generate_draft(
+        language=PreferredLanguage.EN,
+        target_role=None,
+        evidence=resume_evidence,
+        answers=[],
+    )
+
+    expected_section_order = [
+        "education",
+        "experience",
+        "trading_experience",
+        "certification",
+        "skill",
+        "language",
+    ]
+    failures: list[str] = []
+    actual_section_order = [section.key for section in draft.sections]
+    if actual_section_order != expected_section_order:
+        failures.append(
+            f"draft section order was {actual_section_order}, expected {expected_section_order}"
+        )
+
+    if "Reconciled 48 ledger accounts" not in draft.professional_summary:
+        failures.append("professional summary remained a single abbreviated sentence")
+    if "Reviewed 2,400 simulated trades" not in draft.professional_summary:
+        failures.append("professional summary omitted the separate trading background")
+    if draft.headline != "Operations Analyst | Independent Trading Researcher":
+        failures.append(f"draft kept a generic headline: {draft.headline!r}")
+
+    education_section = next(
+        section for section in draft.sections if section.key == "education"
+    )
+    expected_coursework = "Relevant Coursework: " + ", ".join(education_coursework)
+    if expected_coursework not in education_section.items[0].bullets:
+        failures.append("draft omitted relevant coursework from the education record")
+
+    professional_section = next(
+        section for section in draft.sections if section.key == "experience"
+    )
+    trading_section = next(
+        section for section in draft.sections if section.key == "trading_experience"
+    )
+    actual_professional_items = [item.title for item in professional_section.items]
+    if actual_professional_items != ["Operations Analyst"]:
+        failures.append(
+            "Professional Experience contained "
+            f"{actual_professional_items}, expected only ['Operations Analyst']"
+        )
+    actual_trading_items = [item.title for item in trading_section.items]
+    if actual_trading_items != ["Independent Trading Researcher"]:
+        failures.append(
+            "Investment & Trading Experience contained "
+            f"{actual_trading_items}, expected only ['Independent Trading Researcher']"
+        )
+    experience_by_title = {
+        item.title: item
+        for section in (professional_section, trading_section)
+        for item in section.items
+    }
+    expected_responsibilities = {
+        "Operations Analyst": professional_responsibilities,
+        "Independent Trading Researcher": trading_responsibilities,
+    }
+    for title, expected_bullets in expected_responsibilities.items():
+        actual_bullets = [
+            bullet.rstrip(".") for bullet in experience_by_title[title].bullets
+        ]
+        if actual_bullets != expected_bullets:
+            failures.append(
+                f"draft bullets for {title!r} were {actual_bullets}, "
+                f"expected {expected_bullets}"
+            )
+
+    draft_text = " ".join(
+        (
+            draft.headline,
+            draft.professional_summary,
+            *(
+                text
+                for section in draft.sections
+                for item in section.items
+                for text in (
+                    item.title,
+                    item.organization or "",
+                    item.date_range or "",
+                    *item.bullets,
+                )
+            ),
+        )
+    )
+    expected_numbers = ("12", "48", "8", "5", "2,400", "6", "4", "9%")
+    missing_draft_numbers = [number for number in expected_numbers if number not in draft_text]
+    if missing_draft_numbers:
+        failures.append(f"draft omitted numbers {missing_draft_numbers}")
+
+    preview = render_resume_pdf(
+        profile_name="Synthetic Candidate",
+        city=None,
+        language=PreferredLanguage.EN,
+        draft=draft,
+        contact=ResumeExportContact(),
+    )
+    preview_text = " ".join(
+        (page.extract_text() or "")
+        for page in PdfReader(BytesIO(preview)).pages
+    )
+    preview_text = " ".join(preview_text.split())
+    education_position = preview_text.find("Education")
+    experience_position = preview_text.find("Professional Experience")
+    professional_position = preview_text.find(
+        "Operations Analyst", max(0, experience_position)
+    )
+    trading_section_position = preview_text.find("Investment & Trading Experience")
+    trading_position = preview_text.find(
+        "Independent Trading Researcher", max(0, trading_section_position)
+    )
+    certification_position = preview_text.find("Certifications")
+    skill_position = preview_text.find("Skills")
+    language_position = preview_text.find("Languages")
+    preview_positions = [
+        education_position,
+        experience_position,
+        professional_position,
+        trading_section_position,
+        trading_position,
+        certification_position,
+        skill_position,
+        language_position,
+    ]
+    if -1 in preview_positions or preview_positions != sorted(preview_positions):
+        failures.append(
+            "PDF preview order was not Education, Professional Experience, Investment & "
+            f"Trading Experience, Certifications, Skills, Languages: {preview_positions}"
+        )
+    for responsibility in (*professional_responsibilities, *trading_responsibilities):
+        if responsibility not in preview_text:
+            failures.append(f"PDF preview omitted responsibility {responsibility!r}")
+    for course in education_coursework:
+        if course not in preview_text:
+            failures.append(f"PDF preview omitted relevant course {course!r}")
+    missing_preview_numbers = [
+        number for number in expected_numbers if number not in preview_text
+    ]
+    if missing_preview_numbers:
+        failures.append(f"PDF preview omitted numbers {missing_preview_numbers}")
+
+    assert not failures, "\n".join(failures)
+
+
+def test_metadata_duplicates_are_removed_from_compact_resume_sections() -> None:
+    assert resume_writer_module._remove_redundant_metadata_bullets(
+        "language",
+        title="Arabic",
+        organization="Native/Bilingual",
+        date_range=None,
+        location=None,
+        bullets=["Native / Bilingual"],
+    ) == []
+    assert resume_writer_module._remove_redundant_metadata_bullets(
+        "certification",
+        title="ERP Implementation Experience (Internship-based)",
+        organization="Internship-based",
+        date_range=None,
+        location=None,
+        bullets=["Internship-based"],
+    ) == []
+
+
+def test_claim_units_do_not_split_an_initialism_mid_sentence() -> None:
+    summary = (
+        "Active trader in U.S. and regional equity markets since 2018. "
+        "Trained students in risk management."
+    )
+
+    assert resume_writer_module._claim_units(summary) == [
+        "Active trader in U.S. and regional equity markets since 2018.",
+        "Trained students in risk management.",
+    ]
 
 
 def test_claim_grounding_allows_professional_prose_but_pins_entities_numbers_and_dates() -> None:
@@ -815,7 +1354,7 @@ async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_
     assert provider.calls[0]["payload"]["active_section"] == "project"
     assert provider.calls[0]["payload"]["allowed_next_question_categories"] == [
         "project",
-        "skill",
+        "achievement",
     ]
     instructions = provider.calls[0]["system_instructions"]
     assert "conversation_language" in instructions
@@ -881,8 +1420,7 @@ async def test_adaptive_turn_safely_handles_an_arabic_answer_that_changes_topic(
     assert result.proposed_records[0].record_type == "education"
     assert result.proposed_records[0].title == answer
     assert result.next_question is not None
-    assert result.next_question.category is FactCategory.EDUCATION
-    assert "الدرجة" in result.next_question.question
+    assert result.next_question.category is FactCategory.EXPERIENCE
     assert result.draft_patch is None
 
 
@@ -945,7 +1483,7 @@ async def test_adaptive_turn_does_not_store_a_negative_answer_as_resume_content(
     assert result.proposed_records == []
     assert result.draft_patch is None
     assert result.next_question is not None
-    assert result.next_question.category is FactCategory.EDUCATION
+    assert result.next_question.category is FactCategory.CERTIFICATION
 
 
 @pytest.mark.asyncio
@@ -1311,7 +1849,7 @@ async def test_adaptive_turn_rejects_cross_category_achievement_for_current_answ
     assert result.proposed_records[0].record_type == "education"
     assert result.draft_patch is None
     assert result.next_question is not None
-    assert result.next_question.category is FactCategory.EDUCATION
+    assert result.next_question.category is FactCategory.EXPERIENCE
     assert result.ready_to_generate is False
 
 
@@ -1375,8 +1913,8 @@ async def test_adaptive_turn_prefers_project_actions_over_a_tool_keyword() -> No
     assert result.proposed_records[0].title == answer
     assert result.draft_patch is None
     assert result.next_question is not None
-    assert result.next_question.category is FactCategory.SKILL
-    assert result.next_question.id == "skill_usage"
+    assert result.next_question.category is FactCategory.PROJECT
+    assert result.next_question.id.startswith("project_follow_up_")
 
 
 @pytest.mark.asyncio
