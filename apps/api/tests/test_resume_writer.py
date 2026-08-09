@@ -20,6 +20,7 @@ from career_agent_api.services.resume_writer import (
     MistralResumeWriterProvider,
     ResumeEvidence,
     ResumeWriterError,
+    ResumeWriterTransportError,
     _adaptive_answer_category,
     _GeneratedDraft,
     _redact_resume_text,
@@ -2009,6 +2010,28 @@ async def test_generate_draft_retries_invalid_structured_output_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_draft_does_not_retry_transport_failure() -> None:
+    provider = CapturingResumeWriter(
+        [
+            ResumeWriterTransportError("provider request failed", transient=True),
+            generated_draft().model_dump(mode="python"),
+        ]
+    )
+
+    with pytest.raises(ResumeWriterTransportError) as captured:
+        await provider.generate_draft(
+            language=PreferredLanguage.EN,
+            target_role="Data Analyst",
+            evidence=evidence(),
+            answers=[],
+        )
+
+    assert captured.value.transient is True
+    assert len(provider.calls) == 1
+    assert len(provider.responses) == 1
+
+
+@pytest.mark.asyncio
 async def test_adaptive_turn_returns_understanding_record_question_and_patch_in_one_call() -> None:
     response = {
         "understanding": {
@@ -2783,6 +2806,57 @@ def test_provider_uses_dedicated_interview_and_writer_models_with_one_key() -> N
 
     assert provider.model == "writer-model"
     assert provider.interview_model == "interview-model"
+
+
+@pytest.mark.asyncio
+async def test_mistral_wall_clock_timeout_bounds_nonadaptive_draft_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TinyResponse(BaseModel):
+        value: str
+
+    class SlowCompletions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create(self, **_kwargs: Any) -> SimpleNamespace:
+            self.calls += 1
+            await asyncio.sleep(1)
+            raise AssertionError("wall-clock timeout did not cancel the provider request")
+
+    class SlowClient:
+        def __init__(self) -> None:
+            self.completions = SlowCompletions()
+            self.chat = SimpleNamespace(completions=self.completions)
+            self.options: list[dict[str, Any]] = []
+
+        def with_options(self, **kwargs: Any) -> SlowClient:
+            self.options.append(kwargs)
+            return self
+
+    provider = MistralResumeWriterProvider(
+        api_key="test-key",
+        model="writer-model",
+        interview_model="interview-model",
+        timeout_seconds=0.01,
+        max_tokens=4_000,
+    )
+    client = SlowClient()
+    monkeypatch.setattr(provider, "_get_client", lambda: client)
+
+    with pytest.raises(ResumeWriterTransportError) as captured:
+        await provider._structured_response(
+            schema=TinyResponse,
+            schema_name="professional_resume_draft",
+            system_instructions="Return JSON",
+            payload={"draft": 1},
+            max_tokens=4_000,
+            model_name="writer-model",
+        )
+
+    assert captured.value.transient is True
+    assert client.options == [{"timeout": 0.01, "max_retries": 0}]
+    assert client.completions.calls == 1
 
 
 @pytest.mark.asyncio

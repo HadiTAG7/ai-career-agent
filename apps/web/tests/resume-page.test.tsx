@@ -320,6 +320,44 @@ describe("resume workspace v2", () => {
     expect(within(preview).queryByRole("heading", { name: "نبذة مهنية" })).not.toBeInTheDocument();
   });
 
+  it.each([
+    [
+      "ai_unavailable_existing_draft_preserved",
+      "تعذر الوصول إلى كاتب الذكاء الاصطناعي مؤقتًا؛ مسودتك الحالية محفوظة دون تغيير.",
+    ],
+    [
+      "ai_unavailable_evidence_fallback_created",
+      "هذه مسودة موثقة من معلوماتك المؤكدة لأن كاتب الذكاء الاصطناعي غير متاح مؤقتًا.",
+    ],
+  ])("shows the generation fallback warning banner for %s", async (warning, message) => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+      provider_metadata: { generation_warning: warning },
+    }));
+
+    await renderResumePage();
+
+    expect(await screen.findByText(message)).toHaveAttribute("role", "status");
+  });
+
+  it("does not mislabel an unknown generation warning as an evidence-only fallback", async () => {
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+      provider_metadata: { generation_warning: "draft_patch_language_mismatch" },
+    }));
+
+    await renderResumePage();
+
+    expect(await screen.findByDisplayValue(draft.professional_summary)).toBeVisible();
+    expect(screen.queryByText(
+      "هذه مسودة موثقة من معلوماتك المؤكدة لأن كاتب الذكاء الاصطناعي غير متاح مؤقتًا.",
+    )).not.toBeInTheDocument();
+  });
+
   it("falls back to the resume language for legacy workspaces without a conversation language", async () => {
     apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
       conversation_language: undefined,
@@ -681,6 +719,43 @@ describe("resume workspace v2", () => {
     ));
   });
 
+  it("locks resume editing while a generate quick action is busy", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    let resolveGeneration!: (workspace: ApiResumeWorkspace) => void;
+    const generationRequest = new Promise<ApiResumeWorkspace>((resolve) => {
+      resolveGeneration = resolve;
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.sendResumeWorkspaceMessage.mockReturnValue(generationRequest);
+    await renderResumePage();
+
+    const summary = await screen.findByRole("textbox", { name: "الملخص المهني" });
+    const bullet = screen.getByRole("textbox", { name: /نقطة 1/ });
+    expect(summary).toBeEnabled();
+    expect(bullet).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "اكتب السيرة الآن" }));
+    await waitFor(() => expect(apiMocks.sendResumeWorkspaceMessage).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({ quickAction: "generate" }),
+    ));
+    const editingWasLocked = (
+      (summary as HTMLTextAreaElement).disabled
+      && (bullet as HTMLTextAreaElement).disabled
+    );
+
+    await act(async () => {
+      resolveGeneration({ ...writingWorkspace, revision: 1 });
+      await generationRequest;
+    });
+
+    expect(editingWasLocked).toBe(true);
+  });
+
   it("sends helper choices and skip as commands rather than ordinary answers", async () => {
     const user = userEvent.setup();
     apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({ conversation_language: "ar", language: "en" }));
@@ -780,6 +855,54 @@ describe("resume workspace v2", () => {
       "accept",
       1,
     ));
+  });
+
+  it("does not start a generate quick action while a draft autosave is pending", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+      updated_at: "2026-08-08T10:00:00Z",
+    });
+    const editedSummary = "ملخص مهني جديد يجب حفظه قبل بدء إعادة التوليد.";
+    let resolveSave!: (workspace: ApiResumeWorkspace) => void;
+    const saveRequest = new Promise<ApiResumeWorkspace>((resolve) => {
+      resolveSave = resolve;
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.patchResumeWorkspaceDraft.mockReturnValue(saveRequest);
+    apiMocks.sendResumeWorkspaceMessage.mockResolvedValue({
+      ...writingWorkspace,
+      revision: 1,
+    });
+    await renderResumePage();
+
+    const summary = await screen.findByRole("textbox", { name: "الملخص المهني" });
+    await user.clear(summary);
+    await user.type(summary, editedSummary);
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 750));
+    });
+    await waitFor(() => expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenCalledOnce());
+
+    const generate = screen.getByRole("button", { name: "اكتب السيرة الآن" });
+    const generateWasDisabled = (generate as HTMLButtonElement).disabled;
+    await user.click(generate);
+    const messagesSentBeforeSave = apiMocks.sendResumeWorkspaceMessage.mock.calls.length;
+
+    await act(async () => {
+      resolveSave({
+        ...writingWorkspace,
+        current_draft: { ...draft, professional_summary: editedSummary },
+        draft_revision: 2,
+        updated_at: "2026-08-08T10:01:00Z",
+      });
+      await saveRequest;
+    });
+
+    expect(generateWasDisabled).toBe(true);
+    expect(messagesSentBeforeSave).toBe(0);
   });
 
   it("serializes draft autosaves and never lets an older response replace newer text", async () => {

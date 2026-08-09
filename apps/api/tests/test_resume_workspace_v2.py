@@ -25,8 +25,8 @@ from career_agent_api.schemas.api import ResumeDraftContent, ResumeQuestionRead
 from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
     ResumeEvidence,
-    ResumeWriterError,
     ResumeWriterProvider,
+    ResumeWriterTransportError,
 )
 
 
@@ -1187,7 +1187,7 @@ async def test_workspace_maps_mistral_transport_failures_to_retryable_503(
     assert started.status_code == 201, started.text
 
     async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
-        raise ResumeWriterError(provider_failure)
+        raise ResumeWriterTransportError(provider_failure, transient=True)
 
     monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
     failed = await client.post(
@@ -1209,6 +1209,290 @@ async def test_workspace_maps_mistral_transport_failures_to_retryable_503(
     )
     assert UUID(detail["request_id"])
     assert provider_failure not in failed.text
+
+
+async def test_failed_regeneration_preserves_current_draft_and_workspace_can_retry(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    original_draft = deepcopy(workspace["current_draft"])
+    original_revision = workspace["revision"]
+    original_draft_revision = workspace["draft_revision"]
+    working_generation = stub_provider.generate_draft
+
+    async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        raise ResumeWriterTransportError("request timed out", transient=True)
+
+    monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
+    failed = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Retry generating my resume.",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": original_revision,
+        },
+    )
+
+    assert failed.status_code == 200, failed.text
+    fallback = failed.json()
+    assert fallback["current_draft"] == original_draft
+    assert fallback["revision"] == original_revision + 1
+    assert fallback["draft_revision"] == original_draft_revision
+    assert fallback["stage"] == "writing"
+    assert fallback["provider_metadata"]["generation_warning"] == (
+        "ai_unavailable_existing_draft_preserved"
+    )
+    reloaded = await client.get(base, headers=headers)
+    assert reloaded.status_code == 200, reloaded.text
+    persisted = reloaded.json()
+    assert persisted["current_draft"] == original_draft
+    assert persisted["revision"] == fallback["revision"]
+    assert persisted["draft_revision"] == original_draft_revision
+    assert persisted["stage"] == "writing"
+
+    monkeypatch.setattr(stub_provider, "generate_draft", working_generation)
+    retried = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Retry generating my resume.",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": persisted["revision"],
+        },
+    )
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["current_draft"]
+    assert retried.json()["draft_revision"] == original_draft_revision + 1
+
+
+async def test_initial_generate_uses_same_language_evidence_fallback_on_provider_timeout(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    responsibility = "Prepared monthly cost reports using Excel."
+    fact = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "category": "experience",
+            "label": "Cost Analyst",
+            "detail": f"Cost Analyst at Harbor Company. {responsibility}",
+            "structured_value": {
+                "title": "Cost Analyst",
+                "organization": "Harbor Company",
+                "date_range": "2024 - Present",
+                "responsibilities": [responsibility],
+            },
+            "source_excerpt": (
+                "Cost Analyst | Harbor Company | 2024 - Present\n" + responsibility
+            ),
+        },
+    )
+    assert fact.status_code == 201, fact.text
+    confirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{fact.json()['id']}/confirm",
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "en", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+
+    async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        raise ResumeWriterTransportError("request timed out", transient=True)
+
+    monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
+    generated = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Generate my resume.",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+
+    assert generated.status_code == 200, generated.text
+    workspace = generated.json()
+    draft = workspace["current_draft"]
+    assert workspace["provider_metadata"]["generation_warning"] == (
+        "ai_unavailable_evidence_fallback_created"
+    )
+    assert draft["headline"] == "Cost Analyst"
+    assert draft["professional_summary"] == responsibility
+    assert len(draft["summary_evidence_handles"]) == 1
+    assert [section["key"] for section in draft["sections"]] == ["experience"]
+    item = draft["sections"][0]["items"][0]
+    assert item["title"] == "Cost Analyst"
+    assert item["organization"] == "Harbor Company"
+    assert item["date_range"] == "2024 - Present"
+    assert item["bullets"] == [responsibility]
+    assert item["evidence_handles"] == draft["summary_evidence_handles"]
+
+    reviewed = await client.post(
+        f"{base}/review",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["status"] == "export_ready"
+    assert reviewed.json()["export_allowed"] is True
+
+
+async def test_initial_transport_failure_rejects_mixed_language_evidence_fallback(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    responsibility = "Prepared monthly cost reports using Excel."
+    fact = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "category": "experience",
+            "label": "Cost Analyst",
+            "detail": responsibility,
+            "structured_value": {
+                "title": "Cost Analyst",
+                "organization": "شركة الميناء",
+                "date_range": "2024 - Present",
+                "responsibilities": [responsibility],
+            },
+            "source_excerpt": responsibility,
+        },
+    )
+    assert fact.status_code == 201, fact.text
+    confirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{fact.json()['id']}/confirm",
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "en", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+
+    async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        raise ResumeWriterTransportError("request timed out", transient=True)
+
+    monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
+    generated = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Generate my resume.",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+
+    assert generated.status_code == 503, generated.text
+    assert generated.json()["detail"]["code"] == "resume_writer_unavailable"
+    reloaded = await client.get(base, headers=headers)
+    assert reloaded.status_code == 200, reloaded.text
+    assert reloaded.json()["current_draft"] is None
+    assert reloaded.json()["draft_revision"] == 0
+
+
+async def test_transport_fallback_preserves_exact_displayable_gpa_and_passes_review(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, source = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    fact = await client.post(
+        f"/v1/profiles/{profile['id']}/facts",
+        headers=headers,
+        json={
+            "source_id": source["id"],
+            "category": "education",
+            "label": "Bachelor of Science in Finance",
+            "detail": (
+                "Completed a Bachelor of Science in Finance at Harbor University in 2023."
+            ),
+            "structured_value": {
+                "degree": "Bachelor of Science in Finance",
+                "institution": "Harbor University",
+                "date_range": "2023",
+                "gpa_score": "3.6",
+                "gpa_scale": "4",
+                "gpa_display_recommended": True,
+            },
+            "source_excerpt": "Bachelor of Science in Finance, GPA: 3.6/4",
+        },
+    )
+    assert fact.status_code == 201, fact.text
+    confirmed = await client.post(
+        f"/v1/profiles/{profile['id']}/facts/{fact.json()['id']}/confirm",
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "en", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+
+    async def fail_generation(**_kwargs: object) -> ResumeDraftContent:
+        raise ResumeWriterTransportError("request timed out", transient=True)
+
+    monkeypatch.setattr(stub_provider, "generate_draft", fail_generation)
+    generated = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "Generate my resume.",
+            "quick_action": "generate",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+
+    assert generated.status_code == 200, generated.text
+    workspace = generated.json()
+    education = next(
+        section for section in workspace["current_draft"]["sections"]
+        if section["key"] == "education"
+    )
+    assert education["items"][0]["bullets"] == ["GPA: 3.6/4"]
+    reviewed = await client.post(
+        f"{base}/review",
+        headers=headers,
+        json={
+            "expected_draft_revision": workspace["draft_revision"],
+            "review_acknowledged": True,
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["export_allowed"] is True
 
 
 async def test_correcting_understanding_invalidates_all_dependent_ai_output_and_source(
@@ -1441,6 +1725,87 @@ def test_review_accepts_combined_coursework_bullet_from_structured_education_fac
     )
 
     assert not [blocker for blocker in blockers if blocker.startswith("unsupported_claim:")]
+
+
+def test_review_accepts_legacy_coursework_found_only_in_source_excerpt() -> None:
+    coursework = [
+        "Auditing",
+        "Financial Accounting",
+        "Risk Management",
+        "Cost Control",
+        "Internal Control Systems",
+        "Financial Modelling",
+    ]
+    education = ResumeEvidence(
+        handle="legacy_education_fact",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Bachelor of Science in Finance at Harbor University, completed 2023",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "Bachelor of Science in Finance",
+            "institution": "Harbor University",
+            "date_range": "2023",
+        },
+        source_excerpt=(
+            "Education\nBachelor of Science in Finance\nHarbor University\n"
+            f"Relevant Courses: {', '.join(coursework)}"
+        ),
+    )
+    blockers = _coursework_review_blockers(
+        section_key="education",
+        evidence=(education,),
+        bullet=f"Relevant Coursework: {', '.join(coursework)}",
+        item_id="legacy_finance_degree",
+        title="Bachelor of Science in Finance",
+        organization="Harbor University",
+        date_range="2023",
+    )
+
+    assert not [blocker for blocker in blockers if blocker.startswith("unsupported_claim:")]
+
+
+@pytest.mark.parametrize(
+    ("gpa_bullet", "display_recommended"),
+    [
+        ("GPA: 3.7/4", True),
+        ("GPA: 3.6/5", True),
+        ("GPA: 3.60/4", True),
+        ("GPA: 3.6/4 with honors", True),
+        ("GPA: 3.6/4", False),
+    ],
+)
+def test_review_rejects_gpa_that_is_not_exactly_displayable_education_evidence(
+    gpa_bullet: str,
+    display_recommended: bool,
+) -> None:
+    education = ResumeEvidence(
+        handle="education_gpa_fact",
+        category="education",
+        label="Bachelor of Science in Finance",
+        detail="Bachelor of Science in Finance at Harbor University, completed 2023",
+        verification_status="confirmed",
+        structured_value={
+            "degree": "Bachelor of Science in Finance",
+            "institution": "Harbor University",
+            "date_range": "2023",
+            "gpa_score": "3.6",
+            "gpa_scale": "4",
+            "gpa_display_recommended": display_recommended,
+        },
+        source_excerpt="Bachelor of Science in Finance, GPA: 3.6/4",
+    )
+    blockers = _coursework_review_blockers(
+        section_key="education",
+        evidence=(education,),
+        bullet=gpa_bullet,
+        item_id="finance_degree",
+        title="Bachelor of Science in Finance",
+        organization="Harbor University",
+        date_range="2023",
+    )
+
+    assert "unsupported_claim:bullet:finance_degree:0" in blockers
 
 
 def test_review_rejects_coursework_bullet_with_an_invented_course() -> None:

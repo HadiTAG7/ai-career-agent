@@ -60,8 +60,11 @@ from career_agent_api.services.resume_writer import (
     ResumeWriterCategory,
     ResumeWriterError,
     ResumeWriterProvider,
+    ResumeWriterTransportError,
+    build_evidence_fallback_draft,
     build_resume_evidence,
     get_resume_writer_provider,
+    resume_evidence_coursework,
     resume_patch_uses_requested_language,
     validate_claim_grounding,
 )
@@ -997,26 +1000,50 @@ async def _handle_resume_quick_action(
                 "Confirm at least one professional fact before generating a resume",
             )
         should_generate = action != "review" or workspace.current_draft is None
+        generation_warning: str | None = None
         if should_generate:
             had_draft = workspace.current_draft is not None
-            draft = await provider.generate_draft(
-                language=workspace.language,
-                target_role=None,
-                evidence=evidence,
-                answers=[],
-            )
-            workspace.current_draft = draft.model_dump(mode="json")
-            workspace.draft_revision += 1
-            await _create_version(
-                session,
-                workspace,
-                reason=(
-                    ResumeDraftVersionReason.AI_REWRITE
-                    if had_draft
-                    else ResumeDraftVersionReason.INITIAL_GENERATION
-                ),
-                diff={"quick_action": action},
-            )
+            draft: ResumeDraftContent | None = None
+            try:
+                draft = await provider.generate_draft(
+                    language=workspace.language,
+                    target_role=None,
+                    evidence=evidence,
+                    answers=[],
+                )
+            except ResumeWriterTransportError as exc:
+                if not exc.transient:
+                    raise
+                if had_draft:
+                    generation_warning = "ai_unavailable_existing_draft_preserved"
+                else:
+                    draft = build_evidence_fallback_draft(
+                        language=workspace.language,
+                        evidence=evidence,
+                    )
+                    generation_warning = "ai_unavailable_evidence_fallback_created"
+            if draft is not None:
+                workspace.current_draft = draft.model_dump(mode="json")
+                workspace.draft_revision += 1
+                await _create_version(
+                    session,
+                    workspace,
+                    reason=(
+                        ResumeDraftVersionReason.AI_REWRITE
+                        if had_draft
+                        else ResumeDraftVersionReason.INITIAL_GENERATION
+                    ),
+                    diff={
+                        "quick_action": action,
+                        "draft_mode": (
+                            "evidence_fallback" if generation_warning else "ai"
+                        ),
+                    },
+                )
+            workspace.provider_metadata = {
+                **workspace.provider_metadata,
+                "generation_warning": generation_warning,
+            }
         workspace.pending_understanding = None
         workspace.pending_suggestion = None
         workspace.stage = (
@@ -1024,7 +1051,34 @@ async def _handle_resume_quick_action(
             if action == "review"
             else ResumeWorkspaceStage.WRITING
         )
-        if conversation_language is PreferredLanguage.AR:
+        if (
+            generation_warning == "ai_unavailable_existing_draft_preserved"
+            and conversation_language is PreferredLanguage.AR
+        ):
+            assistant_content = (
+                "تعذر الوصول إلى كاتب الذكاء الاصطناعي مؤقتًا، "
+                "فأبقيت مسودتك الحالية محفوظة دون تغيير."
+            )
+        elif generation_warning == "ai_unavailable_existing_draft_preserved":
+            assistant_content = (
+                "The AI writer is temporarily unavailable, so I kept your current "
+                "draft saved without changes."
+            )
+        elif (
+            generation_warning == "ai_unavailable_evidence_fallback_created"
+            and conversation_language is PreferredLanguage.AR
+        ):
+            assistant_content = (
+                "تعذر الوصول إلى كاتب الذكاء الاصطناعي مؤقتًا، فأنشأت مسودة "
+                "موثقة مباشرة من معلوماتك المؤكدة. يمكنك إعادة المحاولة لاحقًا "
+                "لتحسين الصياغة."
+            )
+        elif generation_warning == "ai_unavailable_evidence_fallback_created":
+            assistant_content = (
+                "The AI writer is temporarily unavailable, so I created a literal draft "
+                "from your confirmed evidence. You can retry later to improve the wording."
+            )
+        elif conversation_language is PreferredLanguage.AR:
             assistant_content = (
                 "جهزت المسودة من الحقائق التي أكّدتها. راجعها وعدّلها قبل التنزيل."
             )
@@ -1033,6 +1087,10 @@ async def _handle_resume_quick_action(
                 "I prepared the draft from your confirmed facts. "
                 "Review and edit it before download."
             )
+        structured_payload = {
+            **structured_payload,
+            "generation_warning": generation_warning,
+        }
         await _refresh_workspace(session, workspace)
     else:  # Schema validation should make this unreachable.
         raise _api_error(
@@ -2281,20 +2339,41 @@ def _review_blockers(
         text: str,
         handles: list[str],
         *,
-        education_coursework: bool = False,
+        education_metadata: bool = False,
     ) -> None:
         unknown = [handle for handle in handles if handle not in evidence_by_handle]
         if unknown:
             blockers.append(f"unknown_evidence:{label}")
             return
         claim_text = text
-        if education_coursework and handles:
+        if education_metadata and handles:
             supports = [evidence_by_handle[handle] for handle in handles]
             all_supports_are_education = all(
                 support.category == "education" for support in supports
             )
             if all_supports_are_education:
                 stripped = text.strip()
+                if stripped.startswith("GPA:"):
+                    normalized_gpa = " ".join(stripped.split())
+                    supported_gpa_values = {
+                        " ".join(f"GPA: {score}/{scale}".split())
+                        for support in supports
+                        if support.structured_value.get("gpa_display_recommended") is True
+                        and isinstance(
+                            score := support.structured_value.get("gpa_score"),
+                            str | int | float,
+                        )
+                        and not isinstance(score, bool)
+                        and isinstance(
+                            scale := support.structured_value.get("gpa_scale"),
+                            str | int | float,
+                        )
+                        and not isinstance(scale, bool)
+                    }
+                    if normalized_gpa not in supported_gpa_values:
+                        blockers.append(f"unsupported_claim:{label}")
+                        return
+                    claim_text = stripped.removeprefix("GPA:").strip()
                 for prefix in ("Relevant Coursework:", "المقررات ذات الصلة:"):
                     if stripped.startswith(prefix):
                         coursework = stripped.removeprefix(prefix).strip()
@@ -2302,19 +2381,7 @@ def _review_blockers(
                         supported_coursework_lists = {
                             " ".join(", ".join(values).split())
                             for support in supports
-                            if isinstance(
-                                raw_coursework := support.structured_value.get(
-                                    "coursework"
-                                ),
-                                list,
-                            )
-                            and (
-                                values := [
-                                    value.strip()
-                                    for value in raw_coursework
-                                    if isinstance(value, str) and value.strip()
-                                ]
-                            )
+                            if (values := resume_evidence_coursework(support))
                         }
                         if (
                             not normalized_coursework
@@ -2375,7 +2442,7 @@ def _review_blockers(
                     f"bullet:{item.id}:{bullet_index}",
                     bullet,
                     item.evidence_handles,
-                    education_coursework=section.key == "education",
+                    education_metadata=section.key == "education",
                 )
             if section.key in {"experience", "trading_experience", "project"} and not item.bullets:
                 blockers.append(f"item_without_bullets:{item.id}")

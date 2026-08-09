@@ -447,6 +447,14 @@ class ResumeWriterError(RuntimeError):
     """Safe provider-independent error surfaced at the API boundary."""
 
 
+class ResumeWriterTransportError(ResumeWriterError):
+    """A provider request failed before a usable structured response arrived."""
+
+    def __init__(self, message: str, *, transient: bool) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
 @dataclass(frozen=True, slots=True)
 class ResumeEvidence:
     handle: str
@@ -1969,7 +1977,7 @@ def _structured_list(evidence: ResumeEvidence, key: str) -> list[str]:
     )
 
 
-def _coursework_from_evidence(evidence: ResumeEvidence) -> list[str]:
+def resume_evidence_coursework(evidence: ResumeEvidence) -> list[str]:
     coursework = _structured_list(evidence, "coursework")
     if coursework or not evidence.source_excerpt:
         return coursework
@@ -2017,7 +2025,7 @@ def _source_item_bullets(evidence: ResumeEvidence) -> list[str]:
         scale = _structured_string(evidence, "gpa_scale")
         if score and scale:
             bullets.append(f"GPA: {score}/{scale}")
-    coursework = _coursework_from_evidence(evidence)
+    coursework = resume_evidence_coursework(evidence)
     if evidence.category == "education" and coursework:
         coursework_text = ", ".join(coursework)
         label = (
@@ -2637,6 +2645,99 @@ def _complete_draft_from_evidence(
         }
     )
     return ResumeDraftContent.model_validate(completed.model_dump(mode="python"))
+
+
+def build_evidence_fallback_draft(
+    *,
+    language: PreferredLanguage,
+    evidence: tuple[ResumeEvidence, ...],
+    target_role: str | None = None,
+) -> ResumeDraftContent:
+    """Build a literal same-language draft when the remote writer is unavailable."""
+
+    ordered_evidence = _evidence_in_source_order(evidence)
+    for support in ordered_evidence:
+        section_key = _evidence_section_key(support)
+        bullets = _source_item_bullets(support)
+        if section_key in {"experience", "trading_experience", "project"} and not bullets:
+            continue
+        summary: str | None = None
+        for candidate in (*bullets, support.detail, support.label):
+            if not candidate:
+                continue
+            candidate = candidate.strip()
+            if len(candidate) < 20 or not _uses_requested_language(
+                candidate,
+                language,
+                allow_short=True,
+            ):
+                continue
+            try:
+                validate_claim_grounding(candidate, [support.handle], evidence)
+            except ResumeWriterError:
+                continue
+            summary = candidate
+            break
+        if summary is None:
+            continue
+        organization, date_range, location = _evidence_item_fields(support)
+        item_id = re.sub(
+            r"[^a-z0-9_]",
+            "_",
+            f"{section_key}_{support.handle[-12:]}".casefold(),
+        ).strip("_")[:80] or "resume_item"
+        seed = ResumeDraftContent(
+            headline=support.label,
+            professional_summary=summary,
+            summary_evidence_handles=[support.handle],
+            sections=[
+                ResumeDraftSection(
+                    key=section_key,
+                    title=_CANONICAL_DRAFT_SECTION_TITLES[section_key][language],
+                    items=[
+                        ResumeDraftItem(
+                            id=item_id,
+                            title=support.label,
+                            organization=organization,
+                            date_range=date_range,
+                            location=location,
+                            bullets=bullets[:20],
+                            evidence_handles=[support.handle],
+                        )
+                    ],
+                )
+            ],
+        )
+        completed = _complete_draft_from_evidence(
+            seed,
+            evidence,
+            language,
+            target_role,
+        )
+        fallback_fields = (
+            value
+            for section in completed.sections
+            for item in section.items
+            for value in (
+                item.title,
+                item.organization,
+                item.location,
+                *item.bullets,
+            )
+            if value
+        )
+        if any(
+            not _uses_requested_language(value, language, allow_short=True)
+            for value in fallback_fields
+        ):
+            raise ResumeWriterError(
+                "Confirmed evidence requires AI translation for the requested language"
+            )
+        _validate_requested_draft_language(completed, language)
+        return completed
+    raise ResumeWriterError(
+        "Confirmed evidence cannot produce a safe draft in the requested language"
+    )
 
 
 def resume_patch_uses_requested_language(
@@ -3601,6 +3702,8 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
                 )
                 _validate_requested_draft_language(draft, language)
                 return draft
+            except ResumeWriterTransportError:
+                raise
             except ResumeWriterError as exc:
                 validation_error = exc
                 if attempt == 1:
@@ -3800,11 +3903,28 @@ class _StructuredResumeWriterProvider(ResumeWriterProvider):
                     evidence=selected_evidence,
                     allowed_handles=unique_handles,
                 )
+            except ResumeWriterTransportError:
+                raise
             except ResumeWriterError as exc:
                 validation_error = exc
                 if attempt == 1:
                     raise
         raise ResumeWriterError("Resume writer returned no usable rewrite")
+
+
+def _provider_wall_clock_timeout(schema_name: str, configured_timeout: float) -> float:
+    if schema_name == "adaptive_resume_interview_turn":
+        return min(configured_timeout, 15.0)
+    if schema_name == "resume_section_rewrite_candidate":
+        return min(configured_timeout, 30.0)
+    return min(configured_timeout, 45.0)
+
+
+def _provider_failure_is_transient(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if not isinstance(status_code, int):
+        return True
+    return status_code in {408, 409, 425, 429} or status_code >= 500
 
 
 class MistralResumeWriterProvider(_StructuredResumeWriterProvider):
@@ -3831,21 +3951,13 @@ class MistralResumeWriterProvider(_StructuredResumeWriterProvider):
         max_tokens: int,
         model_name: str,
     ) -> BaseModel:
-        response = None
         started_at = perf_counter()
-        # Draft validation may retry once. Keep each provider call bounded so both attempts
-        # finish before the web client's 120-second request deadline.
+        request_timeout = _provider_wall_clock_timeout(
+            schema_name,
+            self._timeout_seconds,
+        )
         client = self._get_client()
-        if schema_name == "adaptive_resume_interview_turn":
-            client = client.with_options(
-                timeout=min(self._timeout_seconds, 15.0),
-                max_retries=0,
-            )
-        else:
-            client = client.with_options(
-                timeout=min(self._timeout_seconds, 45.0),
-                max_retries=0,
-            )
+        client = client.with_options(timeout=request_timeout, max_retries=0)
         try:
             request = client.chat.completions.create(
                 model=model_name,
@@ -3872,10 +3984,7 @@ class MistralResumeWriterProvider(_StructuredResumeWriterProvider):
                     },
                 },
             )
-            if schema_name == "adaptive_resume_interview_turn":
-                async with asyncio.timeout(min(self._timeout_seconds, 15.0)):
-                    response = await request
-            else:
+            async with asyncio.timeout(request_timeout):
                 response = await request
         except Exception as exc:
             logger.warning(
@@ -3888,9 +3997,10 @@ class MistralResumeWriterProvider(_StructuredResumeWriterProvider):
                 getattr(exc, "status_code", None),
                 getattr(exc, "request_id", None),
             )
-            response = None
-        if response is None:
-            raise ResumeWriterError("Resume writer provider request failed")
+            raise ResumeWriterTransportError(
+                "Resume writer provider request failed",
+                transient=_provider_failure_is_transient(exc),
+            ) from None
         logger.info(
             "Mistral resume writer request completed: schema=%s model=%s duration_ms=%d",
             schema_name,
@@ -3940,18 +4050,12 @@ class OpenAIResumeWriterProvider(_StructuredResumeWriterProvider):
         max_tokens: int,
         model_name: str,
     ) -> BaseModel:
-        response = None
+        request_timeout = _provider_wall_clock_timeout(
+            schema_name,
+            self._timeout_seconds,
+        )
         client = self._get_client()
-        if schema_name == "adaptive_resume_interview_turn":
-            client = client.with_options(
-                timeout=min(self._timeout_seconds, 15.0),
-                max_retries=0,
-            )
-        else:
-            client = client.with_options(
-                timeout=min(self._timeout_seconds, 45.0),
-                max_retries=0,
-            )
+        client = client.with_options(timeout=request_timeout, max_retries=0)
         try:
             request = client.responses.parse(
                 model=model_name,
@@ -3961,16 +4065,16 @@ class OpenAIResumeWriterProvider(_StructuredResumeWriterProvider):
                 max_output_tokens=max_tokens,
                 store=False,
             )
-            if schema_name == "adaptive_resume_interview_turn":
-                async with asyncio.timeout(min(self._timeout_seconds, 15.0)):
-                    response = await request
-            else:
+            async with asyncio.timeout(request_timeout):
                 response = await request
-        except Exception:
-            response = None
-        parsed = getattr(response, "output_parsed", None) if response is not None else None
+        except Exception as exc:
+            raise ResumeWriterTransportError(
+                "Resume writer provider request failed",
+                transient=_provider_failure_is_transient(exc),
+            ) from None
+        parsed = getattr(response, "output_parsed", None)
         if not isinstance(parsed, schema):
-            raise ResumeWriterError("Resume writer provider request failed")
+            raise ResumeWriterError("Resume writer returned no usable response")
         return parsed
 
 

@@ -632,11 +632,13 @@ function CoverageStrip({ workspace, locale }: { workspace: ApiResumeWorkspace; l
 function ContactPopover({
   locale,
   contact,
+  disabled,
   onChange,
   onClose,
 }: {
   locale: "ar" | "en";
   contact: ApiResumeWorkspace["contact"];
+  disabled: boolean;
   onChange: (contact: ApiResumeWorkspace["contact"]) => void;
   onClose: () => void;
 }) {
@@ -647,9 +649,9 @@ function ContactPopover({
         <button type="button" className="grid h-9 w-9 place-items-center border border-border hover:border-primary hover:text-primary-text" aria-label={locale === "ar" ? "إغلاق" : "Close"} onClick={onClose}><X className="h-4 w-4" /></button>
       </div>
       <div className="mt-4 grid gap-3">
-        <input className="field-control" type="email" aria-label={locale === "ar" ? "البريد الإلكتروني" : "Email"} placeholder={locale === "ar" ? "البريد الإلكتروني" : "Email"} value={contact.email ?? ""} onChange={(event) => onChange({ ...contact, email: event.target.value })} />
-        <input className="field-control" type="tel" aria-label={locale === "ar" ? "رقم الهاتف" : "Phone"} placeholder={locale === "ar" ? "رقم الهاتف" : "Phone"} value={contact.phone ?? ""} onChange={(event) => onChange({ ...contact, phone: event.target.value })} />
-        <input className="field-control" type="url" aria-label="LinkedIn" placeholder="LinkedIn" value={contact.linkedin ?? ""} onChange={(event) => onChange({ ...contact, linkedin: event.target.value })} />
+        <input className="field-control" type="email" aria-label={locale === "ar" ? "البريد الإلكتروني" : "Email"} placeholder={locale === "ar" ? "البريد الإلكتروني" : "Email"} value={contact.email ?? ""} disabled={disabled} onChange={(event) => onChange({ ...contact, email: event.target.value })} />
+        <input className="field-control" type="tel" aria-label={locale === "ar" ? "رقم الهاتف" : "Phone"} placeholder={locale === "ar" ? "رقم الهاتف" : "Phone"} value={contact.phone ?? ""} disabled={disabled} onChange={(event) => onChange({ ...contact, phone: event.target.value })} />
+        <input className="field-control" type="url" aria-label="LinkedIn" placeholder="LinkedIn" value={contact.linkedin ?? ""} disabled={disabled} onChange={(event) => onChange({ ...contact, linkedin: event.target.value })} />
       </div>
     </section>
   );
@@ -779,6 +781,7 @@ function ConversationPanel({
   optimisticMessage,
   error,
   busy,
+  interactionLocked,
   importing,
   correcting,
   correction,
@@ -809,6 +812,7 @@ function ConversationPanel({
   optimisticMessage: ApiResumeMessage | null;
   error: unknown;
   busy: boolean;
+  interactionLocked: boolean;
   importing: boolean;
   correcting: boolean;
   correction: string;
@@ -834,6 +838,7 @@ function ConversationPanel({
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationEndRef = useRef<HTMLDivElement>(null);
+  const controlsLocked = busy || interactionLocked;
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView?.({ block: "nearest" });
@@ -843,9 +848,9 @@ function ConversationPanel({
     <section className="relative flex min-h-0 flex-col overflow-hidden border-y border-border xl:border-y-0" aria-label={locale === "ar" ? "محادثة بناء السيرة" : "Resume-building conversation"}>
       <header className="flex min-h-[62px] items-center justify-between gap-3 border-b border-border px-5">
         <div><div className="flex items-center gap-2 text-primary-text"><Pencil className="h-4 w-4" /><h2 className="font-bold">{locale === "ar" ? "ملاحظات المحرر" : "Editor notes"}</h2></div><p className="text-[11px] text-muted">{workspace.provider_ready ? (locale === "ar" ? "الذكاء الاصطناعي جاهز" : "AI is ready") : (locale === "ar" ? "الذكاء الاصطناعي غير جاهز" : "AI unavailable")}</p></div>
-        <button type="button" className={cn("inline-flex min-h-10 items-center gap-2 border px-3 text-xs font-semibold", showContact ? "border-primary text-primary-text" : "border-border text-foreground hover:border-primary hover:text-primary-text")} aria-expanded={showContact} onClick={() => onShowContact(!showContact)}><Mail className="h-4 w-4" />{locale === "ar" ? "التواصل" : "Contact"}</button>
+        <button type="button" className={cn("inline-flex min-h-10 items-center gap-2 border px-3 text-xs font-semibold", showContact ? "border-primary text-primary-text" : "border-border text-foreground hover:border-primary hover:text-primary-text")} aria-expanded={showContact} disabled={controlsLocked} onClick={() => onShowContact(!showContact)}><Mail className="h-4 w-4" />{locale === "ar" ? "التواصل" : "Contact"}</button>
       </header>
-      {showContact ? <ContactPopover locale={locale} contact={workspace.contact} onChange={onContactChange} onClose={() => onShowContact(false)} /> : null}
+      {showContact ? <ContactPopover locale={locale} contact={workspace.contact} disabled={busy} onChange={onContactChange} onClose={() => onShowContact(false)} /> : null}
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5" aria-live="polite">
         {!workspace.messages.length ? (
@@ -869,7 +874,7 @@ function ConversationPanel({
         <UnderstandingCard
           workspace={workspace}
           locale={locale}
-          busy={busy}
+          busy={controlsLocked}
           correcting={correcting}
           correction={correction}
           onCorrectionChange={onCorrectionChange}
@@ -885,18 +890,18 @@ function ConversationPanel({
 
       <footer className="space-y-3 border-t border-border p-3 sm:p-4">
         <div className="grid grid-cols-2 divide-x divide-x-reverse divide-border border-y border-border sm:grid-cols-4">
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-primary-text hover:bg-primary hover:text-primary-foreground" disabled={busy || Boolean(workspace.pending_understanding)} onClick={() => onQuickAction(conversationLanguage === "ar" ? "اكتب سيرتي كاملة الآن اعتمادًا على المعلومات التي أكّدتها، من دون اختراع أي معلومة." : "Write my complete resume now using only the information I confirmed, without inventing anything.", "generate")}><PencilLine className="h-4 w-4" />{locale === "ar" ? "اكتب السيرة الآن" : "Write resume now"}</button>
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-foreground hover:text-primary-text" disabled={busy} onClick={() => onQuickAction(conversationLanguage === "ar" ? "أعطني مثالًا" : "Give me an example", "show_example")}><Lightbulb className="h-4 w-4" />{locale === "ar" ? "أعطني مثالًا" : "Give an example"}</button>
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={busy} onClick={() => onQuickAction(conversationLanguage === "ar" ? "ما عندي رقم دقيق" : "I do not have an exact metric", "no_exact_metric")}><Info className="h-4 w-4" />{locale === "ar" ? "ما عندي رقم دقيق" : "No exact metric"}</button>
-          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={busy} onClick={() => onQuickAction(conversationLanguage === "ar" ? "تخطَّ هذا السؤال" : "Skip this question", "skip")}><ChevronDown className="h-4 w-4" />{locale === "ar" ? "تخطَّ هذا السؤال" : "Skip this question"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-primary-text hover:bg-primary hover:text-primary-foreground" disabled={controlsLocked || Boolean(workspace.pending_understanding)} onClick={() => onQuickAction(conversationLanguage === "ar" ? "اكتب سيرتي كاملة الآن اعتمادًا على المعلومات التي أكّدتها، من دون اختراع أي معلومة." : "Write my complete resume now using only the information I confirmed, without inventing anything.", "generate")}><PencilLine className="h-4 w-4" />{locale === "ar" ? "اكتب السيرة الآن" : "Write resume now"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-foreground hover:text-primary-text" disabled={controlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "أعطني مثالًا" : "Give me an example", "show_example")}><Lightbulb className="h-4 w-4" />{locale === "ar" ? "أعطني مثالًا" : "Give an example"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={controlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "ما عندي رقم دقيق" : "I do not have an exact metric", "no_exact_metric")}><Info className="h-4 w-4" />{locale === "ar" ? "ما عندي رقم دقيق" : "No exact metric"}</button>
+          <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 border-t border-border px-2 text-[11px] font-semibold text-foreground hover:text-primary-text sm:border-t-0" disabled={controlsLocked} onClick={() => onQuickAction(conversationLanguage === "ar" ? "تخطَّ هذا السؤال" : "Skip this question", "skip")}><ChevronDown className="h-4 w-4" />{locale === "ar" ? "تخطَّ هذا السؤال" : "Skip this question"}</button>
         </div>
         <CoverageStrip workspace={workspace} locale={locale} />
         <form className="grid grid-cols-[1fr_auto] border border-border" onSubmit={onSend}>
           <label className="sr-only" htmlFor="resume-workspace-message">{locale === "ar" ? "اكتب رسالتك" : "Write your message"}</label>
-          <textarea id="resume-workspace-message" className="min-h-[58px] resize-none bg-transparent px-3 py-3 text-sm text-foreground placeholder:text-muted" dir="auto" placeholder={locale === "ar" ? "اكتب رسالتك هنا…" : "Write your message…"} value={message} disabled={busy || importing || Boolean(workspace.pending_understanding)} onChange={(event) => onMessageChange(event.target.value)} />
-          <button type="submit" className="grid h-[58px] w-[58px] place-items-center self-start border-s border-border text-primary-text transition hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-45" disabled={!message.trim() || busy || importing || Boolean(workspace.pending_understanding)} aria-label={locale === "ar" ? "إرسال الرسالة" : "Send message"}>{busy ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 rtl:-scale-x-100" />}</button>
-          <input ref={fileInputRef} className="sr-only" id="resume-workspace-file" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" disabled={busy || importing} onChange={onFile} />
-          <button type="button" className="col-span-2 inline-flex min-h-10 w-fit items-center gap-2 text-xs font-semibold text-muted hover:text-primary-text disabled:opacity-50" disabled={busy || importing} onClick={() => fileInputRef.current?.click()}>
+          <textarea id="resume-workspace-message" className="min-h-[58px] resize-none bg-transparent px-3 py-3 text-sm text-foreground placeholder:text-muted" dir="auto" placeholder={locale === "ar" ? "اكتب رسالتك هنا…" : "Write your message…"} value={message} disabled={controlsLocked || importing || Boolean(workspace.pending_understanding)} onChange={(event) => onMessageChange(event.target.value)} />
+          <button type="submit" className="grid h-[58px] w-[58px] place-items-center self-start border-s border-border text-primary-text transition hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-45" disabled={!message.trim() || controlsLocked || importing || Boolean(workspace.pending_understanding)} aria-label={locale === "ar" ? "إرسال الرسالة" : "Send message"}>{busy ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 rtl:-scale-x-100" />}</button>
+          <input ref={fileInputRef} className="sr-only" id="resume-workspace-file" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" disabled={controlsLocked || importing} onChange={onFile} />
+          <button type="button" className="col-span-2 inline-flex min-h-10 w-fit items-center gap-2 text-xs font-semibold text-muted hover:text-primary-text disabled:opacity-50" disabled={controlsLocked || importing} onClick={() => fileInputRef.current?.click()}>
             {importing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
             {importing ? (locale === "ar" ? "جارٍ تحليل الملف…" : "Analyzing file…") : (locale === "ar" ? "إرفاق سيرة موجودة" : "Attach an existing resume")}
           </button>
@@ -1060,6 +1065,11 @@ export function ResumeWorkspaceV2({
   }, []);
 
   const stageIndex = workspaceStageIndex(workspace);
+  const generationWarningValue = workspace?.provider_metadata?.generation_warning;
+  const generationWarning = generationWarningValue === "ai_unavailable_existing_draft_preserved"
+    || generationWarningValue === "ai_unavailable_evidence_fallback_created"
+    ? generationWarningValue
+    : null;
   const isReview = Boolean(workspace && (
     workspace.stage === "review"
     || workspace.stage === "complete"
@@ -1158,7 +1168,12 @@ export function ResumeWorkspaceV2({
   async function performMessage(content: string, quickAction?: ResumeQuickAction) {
     const current = workspaceRef.current;
     const normalizedContent = content.trim();
-    if (!current || (!normalizedContent && !quickAction)) return;
+    if (
+      !current
+      || (!normalizedContent && !quickAction)
+      || saveState !== "saved"
+      || persistenceIsPending()
+    ) return;
     const operationEpoch = operationEpochRef.current;
     const clientTurnId = freshTurnId();
     const restoreMessageOnError = !quickAction && Boolean(normalizedContent);
@@ -1796,6 +1811,19 @@ export function ResumeWorkspaceV2({
           <div className={cn("mx-auto mt-3 max-w-xl", hasDraft && "hidden xl:block")}><StageRail current={stageIndex} locale={locale} /></div>
         </header>
 
+        {generationWarning ? (
+          <p className="mb-3 flex items-center gap-2 border border-primary/35 bg-primary/10 px-4 py-3 text-sm font-medium text-foreground" role="status">
+            <AlertCircle className="h-4 w-4 shrink-0 text-primary-text" aria-hidden="true" />
+            {generationWarning === "ai_unavailable_existing_draft_preserved"
+              ? (locale === "ar"
+                ? "تعذر الوصول إلى كاتب الذكاء الاصطناعي مؤقتًا؛ مسودتك الحالية محفوظة دون تغيير."
+                : "The AI writer is temporarily unavailable; your current draft is saved unchanged.")
+              : (locale === "ar"
+                ? "هذه مسودة موثقة من معلوماتك المؤكدة لأن كاتب الذكاء الاصطناعي غير متاح مؤقتًا."
+                : "This is an evidence-only draft because the AI writer is temporarily unavailable.")}
+          </p>
+        ) : null}
+
         <div className="mb-3 grid shrink-0 grid-cols-2 border-b border-border xl:hidden" role="tablist" aria-label={locale === "ar" ? "عرض مساحة السيرة" : "Resume workspace view"}>
           <button
             type="button"
@@ -1837,7 +1865,7 @@ export function ResumeWorkspaceV2({
               draft={workspace?.current_draft ?? null}
               contact={workspace?.contact ?? {}}
               editable={Boolean(workspace?.current_draft)}
-              editingLocked={rewriting || resetting}
+              editingLocked={busy || rewriting || resetting}
               selection={selection}
               rewriting={rewriteLocked}
               onSelect={setSelection}
@@ -1877,7 +1905,7 @@ export function ResumeWorkspaceV2({
                 locale={locale}
                 workspace={workspace}
                 selection={selection}
-                busy={busy || resetting}
+                busy={busy || resetting || saveState !== "saved" || persistenceIsPending()}
                 rewriting={rewriteLocked}
                 onRewrite={(target, mode, instruction) => void handleRewrite(target, mode, instruction)}
                 onDecision={(decision) => void handleSuggestionDecision(decision)}
@@ -1891,6 +1919,7 @@ export function ResumeWorkspaceV2({
                 optimisticMessage={optimisticMessage}
                 error={error}
                 busy={busy || resetting}
+                interactionLocked={saveState !== "saved" || persistenceIsPending()}
                 importing={importing}
                 correcting={correcting}
                 correction={correction}
