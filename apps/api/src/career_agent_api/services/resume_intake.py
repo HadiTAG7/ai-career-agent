@@ -193,6 +193,8 @@ Security and evidence rules:
       outcomes, tools, GPA, honors, issuer, or proficiency from that same segment.
 18. If a section has only a heading, a date, a grouping label, or an institution without an explicit
     qualification, omit it. Do not manufacture the missing role, skill, degree, or field.
+19. Profile, professional summary, career summary, about, and objective sections are narrative
+    context only. Never emit their sentences as employment experience or another completed fact.
 """.strip()
 
 
@@ -488,6 +490,9 @@ _RESUME_SECTION_HEADINGS: dict[str, FactCategory] = {
     "professional experience": FactCategory.EXPERIENCE,
     "work experience": FactCategory.EXPERIENCE,
     "employment history": FactCategory.EXPERIENCE,
+    "investment & trading experience": FactCategory.EXPERIENCE,
+    "investment and trading experience": FactCategory.EXPERIENCE,
+    "trading experience": FactCategory.EXPERIENCE,
     "الخبرة": FactCategory.EXPERIENCE,
     "الخبرات": FactCategory.EXPERIENCE,
     "الخبرة العملية": FactCategory.EXPERIENCE,
@@ -504,6 +509,10 @@ _RESUME_SECTION_HEADINGS: dict[str, FactCategory] = {
     "المشاريع والتطوع": FactCategory.PROJECT,
     "skills": FactCategory.SKILL,
     "technical skills": FactCategory.SKILL,
+    "data & technical": FactCategory.SKILL,
+    "data and technical": FactCategory.SKILL,
+    "data & technical skills": FactCategory.SKILL,
+    "data and technical skills": FactCategory.SKILL,
     "financial skills": FactCategory.SKILL,
     "professional skills": FactCategory.SKILL,
     "core skills": FactCategory.SKILL,
@@ -535,6 +544,26 @@ _RESUME_SECTION_HEADINGS: dict[str, FactCategory] = {
     "الإنجازات": FactCategory.ACHIEVEMENT,
     "الجوائز والإنجازات": FactCategory.ACHIEVEMENT,
 }
+_RESUME_CONTEXT_HEADINGS = frozenset(
+    {
+        "profile",
+        "professional profile",
+        "summary",
+        "professional summary",
+        "career summary",
+        "about",
+        "about me",
+        "objective",
+        "career objective",
+        "الملخص",
+        "الملخص المهني",
+        "النبذة",
+        "نبذة",
+        "نبذة مهنية",
+        "الهدف المهني",
+    }
+)
+_SPACED_LATIN_WORD_PATTERN = re.compile(r"(?<!\w)(?:[A-Za-z]\s+){2,}[A-Za-z](?!\w)")
 _TRAILING_FRAGMENT_PATTERN = re.compile(
     r"(?:[,;:/|—–-]|\b(?:and|or|with|using|for|to|as|including|و|أو|مع|باستخدام|إلى|على))\s*$",
     re.IGNORECASE,
@@ -542,9 +571,10 @@ _TRAILING_FRAGMENT_PATTERN = re.compile(
 _FIELD_SEPARATOR_PATTERN = re.compile(r"\s*(?:[;؛|]|\r?\n)\s*")
 _LIST_SEPARATOR_PATTERN = re.compile(r"\s*(?:,|،|/|\band\b|\bwith\b)\s*", re.IGNORECASE)
 _RESPONSIBILITY_LEAD_PATTERN = re.compile(
-    r"^(?:i\s+)?(?:analysis|analy[sz]ed|built|created|delivered|design|designed|"
-    r"developed|development|implementation|implemented|maintained|maintenance|managed|"
-    r"management|preparation|prepared|produced|reporting|support|supported|used|worked|"
+    r"^(?:i\s+)?(?:analysis|analy[sz]ed|applied|assisted|built|collaborated|conducted|"
+    r"created|delivered|design|designed|developed|development|implementation|implemented|"
+    r"led|maintained|maintenance|managed|management|participated|performed|preparation|"
+    r"prepared|produced|reporting|support|supported|trained|used|worked|"
     r"إدارة|ادارة|إعداد|اعداد|استخدمت|أنشأت|انشاء|إنشاء|انشأت|بناء|بنيت|تحليل|تنسيق|"
     r"تصميم|تطوير|حللت|دعمت|دعم|صممت|صيانة|طورت|تنفيذ|متابعة|مراجعة|نفذت)\b",
     re.IGNORECASE,
@@ -576,14 +606,53 @@ _DATE_ONLY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _DATE_POINT_ONLY_PATTERN = re.compile(rf"^\s*{_DATE_POINT_SOURCE}\s*$", re.IGNORECASE)
+_LEADING_DATE_RANGE_PATTERN = re.compile(
+    rf"^\s*(?P<date>{_DATE_POINT_SOURCE}(?:\s*(?:-|–|—|to|until|through|إلى|حتى)"
+    rf"\s*{_DATE_POINT_SOURCE})?)\s+(?P<rest>\S.*)$",
+    re.IGNORECASE,
+)
 _ROLE_TITLE_CUE_PATTERN = re.compile(
     r"\b(?:accountant|administrator|advisor|adviser|analyst|architect|assistant|associate|"
     r"auditor|banker|consultant|controller|coordinator|designer|developer|director|engineer|"
-    r"executive|founder|head|intern|lead|manager|officer|operator|owner|planner|president|"
+    r"executive|founder|head|instructor|intern|lead|manager|officer|operator|owner|planner|"
+    r"president|"
     r"recruiter|representative|researcher|scientist|specialist|supervisor|technician|trader|"
     r"trainee)\b"
     r"|(?:محاسب|مسؤول|محلل|معماري|مساعد|مستشار|منسق|مصمم|مطور|مدير|مهندس|"
     r"تنفيذي|متدرب|قائد|باحث|أخصائي|مشرف|فني|متداول|مؤسس|رئيس|مدقق|مراجع)",
+    re.IGNORECASE,
+)
+_PROFESSIONAL_ROLE_SUFFIX_PATTERN = re.compile(r"\bprofessional\s*$", re.IGNORECASE)
+_STRONG_INLINE_ORGANIZATION_PATTERN = re.compile(
+    r"\b(?:academy|association|bank|brands?|college|company|corp(?:oration)?|foundation|"
+    r"group|holdings|hospital|inc|institute|institution|llc|ltd|ministry|organization|"
+    r"organisation|plc|university)\b",
+    re.IGNORECASE,
+)
+_INLINE_ROLE_DOMAIN_TERMS = frozenset(
+    {
+        "analytics",
+        "backend",
+        "data",
+        "engineering",
+        "equity",
+        "finance",
+        "financial",
+        "frontend",
+        "operations",
+        "platform",
+        "product",
+        "reporting",
+        "research",
+        "strategy",
+        "trading",
+        "treasury",
+    }
+)
+_KNOWN_LOCATION_PATTERN = re.compile(
+    r"\b(?:riyadh|jeddah|dammam|dhahran|jubail|khobar|mecca|makkah|medina|madinah|"
+    r"dubai|abu\s+dhabi|doha|manama|muscat|kuwait(?:\s+city)?|saudi\s+arabia|"
+    r"united\s+arab\s+emirates|uae|bahrain|qatar|oman|kuwait|jordan|lebanon|egypt)\b",
     re.IGNORECASE,
 )
 _ROLE_ACTION_LEAD_PATTERN = re.compile(
@@ -620,7 +689,9 @@ _STRUCTURED_FIELD_ALIASES: dict[str, str] = {
     "dates": "date_range",
     "duration": "date_range",
     "year": "date_range",
+    "graduation date": "date_range",
     "graduation year": "date_range",
+    "completion date": "date_range",
     "completion year": "date_range",
     "الفترة": "date_range",
     "التاريخ": "date_range",
@@ -810,10 +881,20 @@ def _is_guided_non_answer(value: str) -> bool:
     return not normalized or normalized in _GUIDED_NON_ANSWERS
 
 
+def _collapse_spaced_latin_words(value: str) -> str:
+    """Repair PDF glyph extraction such as ``F l u e n t`` without joining initials."""
+
+    return _SPACED_LATIN_WORD_PATTERN.sub(
+        lambda match: "".join(match.group(0).split()),
+        value,
+    )
+
+
 def _clean_resume_line(value: str) -> str:
     clean_line = " ".join(value.replace("\x00", " ").split())
     if not clean_line:
         return ""
+    clean_line = _collapse_spaced_latin_words(clean_line)
     clean_line = _redact_resume_text(clean_line).strip()
     if not clean_line or _is_empty_contact_line(clean_line):
         return ""
@@ -827,6 +908,19 @@ def _normalized_heading(value: str) -> str:
 
 def _heading_category(value: str) -> FactCategory | None:
     return _RESUME_SECTION_HEADINGS.get(_normalized_heading(value))
+
+
+def _is_context_heading(value: str) -> bool:
+    return _normalized_heading(value) in _RESUME_CONTEXT_HEADINGS
+
+
+def _is_structural_heading(value: str) -> bool:
+    return _heading_category(value) is not None or _is_context_heading(value)
+
+
+def _is_context_segment(value: str) -> bool:
+    first_line = next((line for line in value.splitlines() if line.strip()), "")
+    return _is_context_heading(first_line)
 
 
 def _is_heading_only(value: str) -> bool:
@@ -920,8 +1014,9 @@ def _contains_contact_signal(value: str) -> bool:
 
 
 def _discover_applicant_names(lines: list[str]) -> tuple[str, ...]:
-    meaningful = [" ".join(line.replace("\x00", " ").split()) for line in lines]
-    meaningful = [line for line in meaningful if line]
+    raw_meaningful = [" ".join(line.replace("\x00", " ").split()) for line in lines]
+    raw_meaningful = [line for line in raw_meaningful if line]
+    meaningful = [_collapse_spaced_latin_words(line) for line in raw_meaningful]
     discovered: set[str] = set()
 
     for line in meaningful:
@@ -933,26 +1028,35 @@ def _discover_applicant_names(lines: list[str]) -> tuple[str, ...]:
             discovered.add(candidate)
 
     header = meaningful[:12]
+    raw_header = raw_meaningful[:12]
     for index, line in enumerate(header):
         if _is_heading_only(line):
             break
         if _DOCUMENT_TITLE_PATTERN.match(line):
             continue
         candidate = _person_name_fragment(line)
-        lookahead = header[index + 1 : index + 5]
+        nearby = header[max(0, index - 3) : index + 5]
         has_header_context = (
             _contains_contact_signal(line)
-            or any(_contains_contact_signal(item) for item in lookahead)
-            or any(_is_heading_only(item) for item in lookahead)
-            or any(_PERSON_ROLE_CUE_PATTERN.search(item) for item in lookahead)
+            or any(_contains_contact_signal(item) for item in nearby)
+            or any(_is_heading_only(item) for item in nearby)
+            or any(_PERSON_ROLE_CUE_PATTERN.search(item) for item in nearby)
+        )
+        was_spaced_latin = (
+            index < len(raw_header)
+            and raw_header[index] != line
+            and _SPACED_LATIN_WORD_PATTERN.fullmatch(raw_header[index]) is not None
+            and re.fullmatch(r"[A-Za-zÀ-ÖØ-öø-ÿ.'’-]{4,}", candidate) is not None
         )
         if (
-            index <= 2
+            index <= 4
             and has_header_context
-            and _looks_like_person_name(candidate, allow_uncased=True)
+            and (
+                _looks_like_person_name(candidate, allow_uncased=True)
+                or was_spaced_latin
+            )
         ):
             discovered.add(candidate)
-            break
     return tuple(sorted(discovered, key=len, reverse=True))
 
 
@@ -991,11 +1095,12 @@ def _privacy_safe_line_groups(groups: list[list[str]]) -> list[list[str]]:
             normalized_line = " ".join(raw_line.replace("\x00", " ").split())
             if not normalized_line:
                 continue
+            normalized_line = _collapse_spaced_latin_words(normalized_line)
             if _is_reference_heading(normalized_line):
                 in_reference_section = True
                 continue
             if in_reference_section:
-                if _is_heading_only(normalized_line):
+                if _is_structural_heading(normalized_line):
                     in_reference_section = False
                 else:
                     continue
@@ -1022,8 +1127,16 @@ def _looks_like_date_only(value: str) -> bool:
     return bool(_DATE_ONLY_PATTERN.fullmatch(normalized.strip()))
 
 
+def _split_leading_date_range(value: str) -> tuple[str | None, str]:
+    match = _LEADING_DATE_RANGE_PATTERN.match(value.strip())
+    if not match:
+        return None, value.strip()
+    return match.group("date").strip(), match.group("rest").strip()
+
+
 def _looks_like_role_title(value: str) -> bool:
     clean = value.strip(" •*-\t")
+    _, clean = _split_leading_date_range(clean)
     if (
         not clean
         or len(clean) > 140
@@ -1034,7 +1147,51 @@ def _looks_like_role_title(value: str) -> bool:
         or clean.endswith((".", ";", "؛"))
     ):
         return False
-    return bool(_ROLE_TITLE_CUE_PATTERN.search(clean))
+    return bool(
+        _ROLE_TITLE_CUE_PATTERN.search(clean)
+        or _PROFESSIONAL_ROLE_SUFFIX_PATTERN.search(clean)
+    )
+
+
+def _looks_like_location_line(value: str) -> bool:
+    clean = value.strip(" •*-\t")
+    if (
+        not clean
+        or len(clean) > 180
+        or len(clean.split()) > 10
+        or _looks_like_date_only(clean)
+        or _looks_like_role_title(clean)
+        or _looks_like_responsibility(clean)
+        or _ORGANIZATION_CUE_PATTERN.search(clean)
+    ):
+        return False
+    if clean.casefold() in {"remote", "hybrid", "on-site", "onsite"}:
+        return True
+    if re.search(
+        r"\b(?:and|or|strategy|planning|reporting|analysis|budgeting|forecasting|variance|"
+        r"audit|risk|compliance|management|finance|treasury|controls|operations|sales|"
+        r"marketing|development|research)\b|&",
+        clean,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    location_parts = [part.strip() for part in re.split(r"[,،]", clean) if part.strip()]
+    if location_parts and all(_KNOWN_LOCATION_PATTERN.fullmatch(part) for part in location_parts):
+        return True
+    if "," not in clean and "،" not in clean:
+        return False
+    if re.search(r"[\u0600-\u06ff]", clean):
+        return bool(
+            re.search(
+                r"(?:السعودية|المملكة|الإمارات|مصر|الرياض|جدة|الدمام|الظهران|الجبيل|"
+                r"مكة|المدينة|دبي|أبو\s*ظبي|الكويت|البحرين|قطر|عمان|الأردن|لبنان)",
+                clean,
+            )
+        )
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", clean)
+    return bool(words) and all(
+        word.casefold() in {"of", "the"} or word[:1].isupper() for word in words
+    )
 
 
 def _is_low_information_fact(
@@ -1061,6 +1218,14 @@ def _section_record_blocks(section_heading: str, lines: list[str]) -> list[str]:
 
     category = _heading_category(section_heading)
     if category == FactCategory.EXPERIENCE:
+        expanded_lines: list[str] = []
+        for line in lines:
+            leading_date, remainder = _split_leading_date_range(line)
+            if leading_date and remainder and _looks_like_role_title(remainder):
+                expanded_lines.extend((leading_date, remainder))
+            else:
+                expanded_lines.append(line)
+        lines = expanded_lines
         record_indexes = [index for index, line in enumerate(lines) if _looks_like_role_title(line)]
     elif category == FactCategory.EDUCATION:
         record_indexes = [
@@ -1074,34 +1239,15 @@ def _section_record_blocks(section_heading: str, lines: list[str]) -> list[str]:
 
     starts = [0]
     for index in record_indexes[1:]:
-        date_start = index
-        while date_start > starts[-1] and _looks_like_date_only(lines[date_start - 1]):
-            date_start -= 1
-
         start = index
-        if date_start < index:
-            previous_has_date = any(
-                _looks_like_date_only(line) for line in lines[starts[-1] : date_start]
-            )
-            date_cluster = lines[date_start:index]
-            normalized_cluster = [
-                value.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")) for value in date_cluster
-            ]
-            trailing_points = 0
-            for value in reversed(normalized_cluster):
-                if not _DATE_POINT_ONLY_PATTERN.fullmatch(value):
-                    break
-                trailing_points += 1
-
-            if previous_has_date:
-                start = date_start
-            elif trailing_points >= 2:
-                # A split ``2025`` / ``Present`` pair belongs to the record that follows it.
-                start = index - trailing_points
-            elif len(date_cluster) >= 2:
-                # Mixed layouts can put the previous record's trailing range immediately before
-                # the next record's leading range.  Only the final complete range moves forward.
-                start = index - 1
+        cursor = index - 1
+        while cursor > starts[-1] and _looks_like_location_line(lines[cursor]):
+            cursor -= 1
+        date_cursor = cursor
+        while date_cursor > starts[-1] and _looks_like_date_only(lines[date_cursor]):
+            date_cursor -= 1
+        if date_cursor < cursor:
+            start = date_cursor + 1
         if start <= starts[-1]:
             start = index
         starts.append(start)
@@ -1154,7 +1300,7 @@ def _coalesce_wrapped_resume_lines(lines: list[str]) -> list[str]:
             if separator not in line:
                 continue
             possible_heading, first_value = line.split(separator, 1)
-            if _heading_category(possible_heading) is not None:
+            if _is_structural_heading(possible_heading):
                 inline_section = (
                     possible_heading.strip(" :：—–-"),
                     first_value.strip(),
@@ -1171,7 +1317,7 @@ def _coalesce_wrapped_resume_lines(lines: list[str]) -> list[str]:
                     section_lines.append(first_value)
             continue
 
-        if _is_heading_only(line):
+        if _is_structural_heading(line):
             flush_pending()
             flush_section()
             section_heading = line.strip(" :：—–-")
@@ -1199,6 +1345,17 @@ def _coalesce_wrapped_resume_lines(lines: list[str]) -> list[str]:
                 pending = candidate
             else:
                 grouped.append(candidate)
+            continue
+        if (
+            section_lines
+            and section_lines[-1].lstrip().startswith(("•", "*"))
+            and not section_lines[-1].rstrip().endswith((".", "!", "?", ";", "؛"))
+            and not candidate.lstrip().startswith(("•", "*"))
+            and not _looks_like_date_only(candidate)
+            and not _looks_like_role_title(candidate)
+            and not _looks_like_structured_detail(candidate)
+        ):
+            section_lines[-1] = f"{section_lines[-1]} {candidate}"
             continue
         if _looks_incomplete(candidate):
             pending = candidate
@@ -1255,7 +1412,7 @@ def _bounded_resume_segment_texts(value: str) -> list[str]:
         return [clean]
 
     lines = clean.splitlines()
-    section_heading = lines[0] if len(lines) > 1 and _heading_category(lines[0]) else None
+    section_heading = lines[0] if len(lines) > 1 and _is_structural_heading(lines[0]) else None
     content_lines = lines[1:] if section_heading else lines
     content_units = content_lines
     if section_heading and _heading_category(section_heading) == FactCategory.PROJECT:
@@ -1450,6 +1607,47 @@ def _looks_like_organization(value: str) -> bool:
     return bool(re.search(r"[\u0600-\u06ff]", clean)) and len(clean.split()) <= 3
 
 
+def _looks_like_compact_organization(value: str) -> bool:
+    clean = value.strip(" •*.\t")
+    if _looks_like_organization(clean):
+        return True
+    return bool(
+        clean
+        and len(clean.split()) <= 7
+        and not any(mark in clean for mark in (",", "،", ";", "؛", ":"))
+        and not _looks_like_date_only(clean)
+        and not _looks_like_location_line(clean)
+        and not _looks_like_role_title(clean)
+        and not _looks_like_responsibility(clean)
+        and not clean.endswith(("!", "?"))
+        and re.search(r"[A-Za-z\u0600-\u06ff]", clean)
+    )
+
+
+def _looks_like_safe_inline_organization(value: str) -> bool:
+    clean = value.strip(" •*.\t")
+    if _STRONG_INLINE_ORGANIZATION_PATTERN.search(clean):
+        return True
+    words = re.findall(r"[A-Za-z][A-Za-z0-9.'-]*", clean)
+    if len(words) != 1 or words[0] != clean or clean.isupper():
+        return False
+    return clean.casefold() not in _INLINE_ROLE_DOMAIN_TERMS
+
+
+def _split_known_location_suffix(value: str) -> tuple[str | None, str | None]:
+    parts = [part.strip() for part in re.split(r"[,،]", value) if part.strip()]
+    if len(parts) < 2 or _KNOWN_LOCATION_PATTERN.fullmatch(parts[0]):
+        return None, None
+    for index in range(1, len(parts)):
+        location = ", ".join(parts[index:])
+        if not _KNOWN_LOCATION_PATTERN.search(location) or not _looks_like_location_line(location):
+            continue
+        prefix = ", ".join(parts[:index])
+        if prefix and not _looks_like_responsibility(prefix):
+            return prefix, location
+    return None, None
+
+
 def _parse_gpa(value: str) -> tuple[str | None, str | None]:
     match = re.search(
         r"(?<!\d)([0-9٠-٩]{1,3}(?:[.,][0-9٠-٩]{1,2})?)\s*(?:/|من)\s*"
@@ -1506,9 +1704,9 @@ def _record_from_candidate(
         "tools": [],
     }
     fragments = [
-        fragment.strip(" .")
+        fragment.strip(" •*.\t")
         for fragment in _FIELD_SEPARATOR_PATTERN.split(detail or "")
-        if fragment.strip(" .")
+        if fragment.strip(" •*.\t")
     ]
     unkeyed: list[str] = []
     for fragment in fragments:
@@ -1556,6 +1754,22 @@ def _record_from_candidate(
             # ambiguous, so keep the first instead of combining unrelated dates.
             values["date_range"] = date_fragments[0]
 
+    for index, fragment in enumerate(unkeyed):
+        prefix, location = _split_known_location_suffix(fragment)
+        if not prefix or not location:
+            continue
+        values.setdefault("location", location)
+        unkeyed[index] = prefix
+        break
+
+    location_fragment = next(
+        (fragment for fragment in unkeyed if _looks_like_location_line(fragment)),
+        None,
+    )
+    if location_fragment and "location" not in values:
+        values["location"] = location_fragment
+        unkeyed.remove(location_fragment)
+
     if category == FactCategory.EDUCATION:
         if _DEGREE_CUE_PATTERN.search(label):
             values.setdefault("degree", label)
@@ -1579,7 +1793,12 @@ def _record_from_candidate(
         if institution_fragment and "institution" not in values:
             values["institution"] = institution_fragment
     elif category in {FactCategory.EXPERIENCE, FactCategory.PROJECT}:
-        if unkeyed and "organization" not in values and _looks_like_organization(unkeyed[0]):
+        organization_like = (
+            _looks_like_compact_organization
+            if category == FactCategory.EXPERIENCE
+            else _looks_like_organization
+        )
+        if unkeyed and "organization" not in values and organization_like(unkeyed[0]):
             values["organization"] = unkeyed[0]
         values["responsibilities"].extend(unkeyed[1:] if values.get("organization") else unkeyed)
     elif category == FactCategory.CERTIFICATION:
@@ -1661,6 +1880,8 @@ def _resolve_generated_facts(
         excerpt = source_text.get(fact.source_handle)
         if excerpt is None:
             raise ResumeIntakeProviderError("Resume intake provider returned no usable response")
+        if _is_context_segment(excerpt):
+            continue
         guided_field = _parse_guided_field(excerpt)
         if guided_field is not None:
             if (
@@ -1689,6 +1910,8 @@ def _resolve_generated_facts(
         ):
             detail = None
         category = FactCategory(fact.category)
+        if category == FactCategory.LANGUAGE and detail:
+            detail = re.sub(r"\s*/\s*", "/", detail)
         if (
             category == FactCategory.PROJECT
             and _looks_like_responsibility(label)
@@ -1763,6 +1986,157 @@ def _split_candidate_label_detail(value: str) -> tuple[str, str | None]:
     return value.strip(), None
 
 
+def _split_role_candidate(value: str) -> tuple[str, str | None, str | None]:
+    leading_date, role_text = _split_leading_date_range(value)
+    for separator in (" — ", " – ", " - "):
+        if separator not in role_text:
+            continue
+        possible_label, possible_detail = role_text.split(separator, 1)
+        detail_fragments = _FIELD_SEPARATOR_PATTERN.split(possible_detail)
+        first_detail = detail_fragments[0].strip()
+        has_structured_tail = any(
+            _looks_like_structured_detail(fragment) for fragment in detail_fragments[1:]
+        )
+        has_grounded_organization = bool(
+            _looks_like_safe_inline_organization(first_detail)
+            or (has_structured_tail and _looks_like_compact_organization(first_detail))
+        )
+        if possible_label.strip() and has_grounded_organization:
+            return possible_label.strip(), possible_detail.strip(), leading_date
+        break
+    return role_text.strip(), None, leading_date
+
+
+def _coalesce_list_lines(lines: list[str]) -> list[str]:
+    logical: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if logical and (
+            line.startswith(("(", "["))
+            or logical[-1].count("(") > logical[-1].count(")")
+            or logical[-1].count("[") > logical[-1].count("]")
+        ):
+            logical[-1] = f"{logical[-1]} {line}"
+        else:
+            logical.append(line)
+    return logical
+
+
+def _split_top_level_list(value: str, *, split_ascii_dash: bool = False) -> list[str]:
+    items: list[str] = []
+    buffer: list[str] = []
+    depth = 0
+    index = 0
+
+    def flush() -> None:
+        item = "".join(buffer).strip(" •|,،;؛\t")
+        buffer.clear()
+        if item:
+            items.append(item)
+
+    while index < len(value):
+        char = value[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+
+        is_separator = depth == 0 and char in ",،;؛•|"
+        if depth == 0 and char == "/":
+            previous_space = index > 0 and value[index - 1].isspace()
+            next_space = index + 1 < len(value) and value[index + 1].isspace()
+            is_separator = previous_space or next_space
+        if depth == 0 and value[index : index + 5].casefold() == " and ":
+            flush()
+            index += 5
+            continue
+        if split_ascii_dash and depth == 0 and char == "-":
+            previous = value[index - 1] if index else ""
+            following = value[index + 1] if index + 1 < len(value) else ""
+            is_separator = following.isspace() and (previous.isspace() or previous in ")]")
+        if is_separator:
+            flush()
+        else:
+            buffer.append(char)
+        index += 1
+    flush()
+    return items
+
+
+_KNOWN_LANGUAGE_NAMES = (
+    "American Sign Language",
+    "Mandarin Chinese",
+    "Brazilian Portuguese",
+    "English",
+    "Arabic",
+    "French",
+    "Spanish",
+    "German",
+    "Italian",
+    "Portuguese",
+    "Mandarin",
+    "Chinese",
+    "Japanese",
+    "Korean",
+    "Hindi",
+    "Urdu",
+    "Turkish",
+    "Russian",
+    "Dutch",
+    "Swedish",
+    "Norwegian",
+    "Danish",
+    "Greek",
+    "Hebrew",
+    "العربية",
+    "الإنجليزية",
+    "الفرنسية",
+    "الإسبانية",
+)
+_LANGUAGE_NAME_SOURCE = "|".join(
+    sorted((re.escape(name) for name in _KNOWN_LANGUAGE_NAMES), key=len, reverse=True)
+)
+_LANGUAGE_NAME_PATTERN = re.compile(rf"(?<!\w)({_LANGUAGE_NAME_SOURCE})(?!\w)", re.IGNORECASE)
+_INLINE_LANGUAGE_PAIR_PATTERN = re.compile(
+    rf"(?P<label>{_LANGUAGE_NAME_SOURCE})\s*(?:—|–|-)\s*(?P<detail>.*?)"
+    rf"(?=\s+(?:{_LANGUAGE_NAME_SOURCE})\s*(?:—|–|-)|$)",
+    re.IGNORECASE,
+)
+
+
+def _language_baseline_entries(lines: list[str]) -> list[tuple[str, str | None]]:
+    logical = _coalesce_list_lines(lines)
+    if not logical:
+        return []
+
+    first_line_names = [match.group(1) for match in _LANGUAGE_NAME_PATTERN.finditer(logical[0])]
+    trailing_proficiencies = [
+        re.sub(r"\s*/\s*", "/", line.lstrip(" —–-\t").strip())
+        for line in logical[1:]
+        if line.lstrip().startswith(("—", "–", "-"))
+    ]
+    if first_line_names and len(first_line_names) == len(trailing_proficiencies):
+        return list(zip(first_line_names, trailing_proficiencies, strict=True))
+
+    joined = " ".join(logical)
+    inline_pairs = [
+        (
+            match.group("label").strip(),
+            re.sub(r"\s*/\s*", "/", match.group("detail").strip()) or None,
+        )
+        for match in _INLINE_LANGUAGE_PAIR_PATTERN.finditer(joined)
+    ]
+    if inline_pairs:
+        return inline_pairs
+
+    names = [match.group(1) for match in _LANGUAGE_NAME_PATTERN.finditer(joined)]
+    if names:
+        return [(name, None) for name in names]
+    return []
+
+
 def _looks_like_structured_detail(value: str) -> bool:
     for separator in (":", "："):
         if separator not in value:
@@ -1780,6 +2154,8 @@ def _section_baseline_candidates(segment: ResumeSegment) -> list[FactCandidate] 
     lines = [line.strip() for line in segment.text.splitlines() if line.strip()]
     if len(lines) < 2:
         return None
+    if _is_context_heading(lines[0]):
+        return []
     category = _heading_category(lines[0])
     if category is None:
         return None
@@ -1812,8 +2188,10 @@ def _section_baseline_candidates(segment: ResumeSegment) -> list[FactCandidate] 
         if len(role_indexes) != 1:
             return candidates
         role_index = role_indexes[0]
-        label, inline_detail = _split_candidate_label_detail(body[role_index])
+        label, inline_detail, leading_date = _split_role_candidate(body[role_index])
         details = [*body[:role_index], *body[role_index + 1 :]]
+        if leading_date:
+            details.insert(0, leading_date)
         if inline_detail:
             details.insert(0, inline_detail)
         add(label, "; ".join(details))
@@ -1833,12 +2211,30 @@ def _section_baseline_candidates(segment: ResumeSegment) -> list[FactCandidate] 
         add(label, "; ".join(details))
         return candidates
 
-    if category in {FactCategory.SKILL, FactCategory.LANGUAGE}:
-        for line in body:
-            for item in re.split(r"\s*(?:[,،|•]|\s+/\s+|\s+and\s+)\s*", line, flags=re.IGNORECASE):
-                if item.strip():
-                    label, detail = _split_candidate_label_detail(item)
-                    add(label, detail)
+    if category == FactCategory.SKILL:
+        for line in _coalesce_list_lines(body):
+            content = line
+            for separator in (":", "："):
+                if separator not in line:
+                    continue
+                possible_heading, possible_content = line.split(separator, 1)
+                if _heading_category(possible_heading) == FactCategory.SKILL:
+                    content = possible_content.strip()
+                break
+            for item in _split_top_level_list(content, split_ascii_dash=True):
+                label, detail = _split_candidate_label_detail(item.strip(" ."))
+                if (
+                    label.startswith(("(", ")", "[", "]"))
+                    or label.count("(") != label.count(")")
+                    or label.count("[") != label.count("]")
+                ):
+                    continue
+                add(label, detail)
+        return candidates
+
+    if category == FactCategory.LANGUAGE:
+        for label, detail in _language_baseline_entries(body):
+            add(label, detail)
         return candidates
 
     if category == FactCategory.PROJECT:
@@ -1929,6 +2325,64 @@ def _candidate_information_score(candidate: FactCandidate) -> int:
     return score
 
 
+def _same_grounded_fact(existing: FactCandidate, candidate: FactCandidate) -> bool:
+    if (
+        existing.category != candidate.category
+        or existing.source_excerpt.casefold() != candidate.source_excerpt.casefold()
+    ):
+        return False
+    if existing.label.casefold() == candidate.label.casefold():
+        return True
+    if existing.category not in {FactCategory.SKILL, FactCategory.LANGUAGE}:
+        return False
+    existing_tokens = _material_tokens(f"{existing.label} {existing.detail or ''}")
+    candidate_tokens = _material_tokens(f"{candidate.label} {candidate.detail or ''}")
+    return bool(existing_tokens) and existing_tokens == candidate_tokens
+
+
+def _baseline_should_replace(existing: FactCandidate, baseline: FactCandidate) -> bool:
+    existing_record = existing.structured_value
+    baseline_record = baseline.structured_value
+    if existing.category == FactCategory.LANGUAGE:
+        return bool(
+            baseline_record.get("proficiency")
+            and not existing_record.get("proficiency")
+        )
+    if existing.category == FactCategory.CERTIFICATION:
+        return bool(
+            (baseline_record.get("issuer") and not existing_record.get("issuer"))
+            or (baseline.detail and not existing.detail)
+        )
+    if existing.category == FactCategory.SKILL:
+        return bool(
+            existing.label.casefold() == baseline.label.casefold()
+            and baseline.detail
+            and not existing.detail
+        )
+    if existing.category not in {
+        FactCategory.EXPERIENCE,
+        FactCategory.EDUCATION,
+        FactCategory.PROJECT,
+    }:
+        return False
+    fields = {
+        FactCategory.EXPERIENCE: ("organization", "date_range", "location"),
+        FactCategory.EDUCATION: (
+            "degree",
+            "institution",
+            "date_range",
+            "gpa_score",
+        ),
+        FactCategory.PROJECT: ("organization", "date_range"),
+    }[existing.category]
+    if any(baseline_record.get(field) and not existing_record.get(field) for field in fields):
+        return True
+    for field in ("responsibilities", "outcomes", "tools"):
+        if baseline_record.get(field) and not existing_record.get(field):
+            return True
+    return not existing.detail and bool(baseline.detail)
+
+
 def _merge_grounded_baseline(
     generated: list[FactCandidate],
     segments: tuple[ResumeSegment, ...],
@@ -1947,18 +2401,14 @@ def _merge_grounded_baseline(
         matching_indexes = [
             index
             for index, existing in enumerate(merged)
-            if existing.category == candidate.category
-            and existing.label.casefold() == candidate.label.casefold()
-            and existing.source_excerpt.casefold() == candidate.source_excerpt.casefold()
+            if _same_grounded_fact(existing, candidate)
         ]
         if matching_indexes:
             best_index = max(
                 matching_indexes,
                 key=lambda index: _candidate_information_score(merged[index]),
             )
-            if _candidate_information_score(candidate) > _candidate_information_score(
-                merged[best_index]
-            ):
+            if _baseline_should_replace(merged[best_index], candidate):
                 merged[best_index] = candidate
             continue
         if (

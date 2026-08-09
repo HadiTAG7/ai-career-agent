@@ -27,6 +27,84 @@ from career_agent_api.services.resume_intake import (
     get_resume_intake_provider,
 )
 
+# Synthetic, shape-preserving ``PdfReader(...).pages[0].extract_text()`` output. The wrapped lines,
+# bullets, NBSP, and spaced letters mirror the PDF artifacts under test without storing a person's
+# identity, employers, institution, or career metrics in the repository.
+_TWO_COLUMN_FINANCE_RESUME_PYPDF_TEXT = (
+    "Candidate Name  Finance\n"
+    "candidate@example.test\n"
+    "Riyadh, Saudi Arabia\n"
+    "+966551234567\n"
+    "linkedin.com/in/candidate-profile\n"
+    "Profile\n"
+    "Finance & Investment Professional with 6+ years of hands-on experience in equity trading, "
+    "strategy development, and risk management. Built and\n"
+    "validated multiple systematic trading strategies through extensive backtesting using "
+    "4,000+ data samples across various market conditions.\n"
+    "Experienced trading educator with 1,200+ students trained and 20,000+ educational content "
+    "views. Strong foundation in finance, treasury, and\n"
+    "financial analysis.\n"
+    "Education\n"
+    "Bachelor degree in Finance\n"
+    "Gulf Technical University, Dammam, Saudi Arabia\n"
+    "GPA: 3.4/ 4\n"
+    "Graduation Date: Dec 2023\n"
+    "Relevant Courses: Auditing, Financial Accounting, Risk Management, Cost Control, Internal "
+    "Control Systems, Financial Modelling\n"
+    "Professional Experience\n"
+    "2025 – Present\n"
+    "Riyadh, Saudi Arabia\n"
+    "Cost Control & Finance Analyst — Northstar Consumer Brands\n"
+    "• Performed monthly variance analysis, cost control, and internal financial reviews.\n"
+    "• Supported audit processes, compliance checks, and management reporting.\n"
+    "2024/01 – 2024/08\n"
+    "Jubail, Saudi Arabia\n"
+    "Finance Trainee — Treasury, Reporting & Internal Controls\n"
+    "Meridian Petrochemical\n"
+    "•Supported month-end and year-end financial closing, reconciliations, and journal posting.\n"
+    "•Assisted in tracking audit adjustments and documenting internal control findings.\n"
+    "•Prepared reports on financial performance, liquidity, and variance analysis.\n"
+    "•Participated in risk and compliance checks with the internal audit function.\n"
+    "2022 – 2025 Financial Markets Instructor — MarketLearn\n"
+    "• Trained 1,200+ students in trading strategy execution, market analysis, and risk "
+    "management.\n"
+    "• Designed structured educational programs covering strategy logic, psychology, and "
+    "discipline.\n"
+    "• Produced investment content exceeding 20,000 total views.\n"
+    "• Guest lecturer on trading & risk management at GTU.\n"
+    "Investment & Trading Experience\n"
+    "2018 – Present Investment & Trading Professional\n"
+    "• Active trader in U.S. and regional equity markets since 2018.\n"
+    "• Built and optimized multiple trading strategies validated using 4,000+ backtesting "
+    "samples across different market \n"
+    "environments.\n"
+    "• Performed robustness testing, scenario analysis, and volatility stress testing.\n"
+    "• Designed professional risk management frameworks focused on R-multiples, position "
+    "sizing, and drawdown control.\n"
+    "• Applied portfolio diversification and systematic execution to improve risk-adjusted "
+    "consistency.\n"
+    "Certificates\n"
+    "CME-4 Certification (Both CME-4A & CME-4B)\n"
+    "Advanced Microsoft Excel\n"
+    "CME-1 Certification (Both CME-1A & CME-1B)\n"
+    "ERP Implementation Experience (Internship-based)\n"
+    "Skills\n"
+    "Financial Skills\n"
+    "Trading Strategy Development, Backtesting & Optimization, Risk & Money Management, "
+    "Portfolio Construction, Market Analysis, Options Strategies \n"
+    "(Covered Calls).\n"
+    "Data & Technical:\n"
+    "Advanced Excel (Pivot Tables, VBA Basics, Lookups)- Power BI (Foundational dashboards)- "
+    "Python — Financial Modelling & Scenario Analysis\n"
+    "Soft Skills:\n"
+    "Attention to Detail • Fast Market Response • Team Collaboration • Compliance Mindset • "
+    "Clear Communication\n"
+    "Languages\n"
+    "English Arabic\n"
+    " — \xa0 F l u e n t\n"
+    " — \xa0 N a t i v e / B i l i n g u a l"
+)
+
 
 def _generated_json(*, source_handle: str = "segment_1") -> str:
     return json.dumps(
@@ -314,6 +392,69 @@ def test_inline_resume_header_name_is_removed_before_segment_building() -> None:
     assert "hadi@example.test" not in serialized
     assert "Data Analyst" in serialized
     assert "Acme Corporation" in serialized
+
+
+def test_spaced_header_name_after_profile_is_removed_before_segment_building() -> None:
+    segments = build_resume_segments(
+        "Profile\n"
+        "J o h n D o e\n"
+        "candidate@example.test\n"
+        "Finance analyst with experience in cost control."
+    )
+
+    serialized = repr(segments)
+    assert "J o h n" not in serialized
+    assert "JohnDoe" not in serialized
+    assert "candidate@example.test" not in serialized
+    assert "Finance analyst with experience in cost control." in serialized
+
+
+def test_profile_descriptor_cannot_hide_the_real_name_from_privacy_filter() -> None:
+    segments = build_resume_segments(
+        "Profile\n"
+        "Finance Investment Professional\n"
+        "John Doe\n"
+        "john@example.test\n"
+        "Experienced analyst"
+    )
+
+    serialized = repr(segments)
+    assert "John Doe" not in serialized
+    assert "john@example.test" not in serialized
+    assert "Experienced analyst" in serialized
+
+
+def test_location_detection_preserves_business_phrases_and_location_named_employers() -> None:
+    assert not resume_intake._looks_like_location_line(
+        "Saudi Arabia market analysis and reporting"
+    )
+    assert not resume_intake._looks_like_location_line(
+        "Riyadh sales planning and forecasting"
+    )
+    assert not resume_intake._looks_like_location_line("Riyadh Air")
+    assert resume_intake._looks_like_location_line("Riyadh, Saudi Arabia")
+
+    record = resume_intake._record_from_candidate(
+        category=FactCategory.EXPERIENCE,
+        label="Financial Analyst",
+        detail="Riyadh Air; Saudi Arabia market analysis and reporting",
+        source_handle="segment_1",
+        source_excerpt="Professional Experience",
+    )
+    assert record.organization == "Riyadh Air"
+    assert record.location is None
+    assert record.responsibilities == ["Saudi Arabia market analysis and reporting"]
+
+    combined = resume_intake._record_from_candidate(
+        category=FactCategory.EXPERIENCE,
+        label="Financial Analyst",
+        detail="Riyadh Air, Riyadh, Saudi Arabia; Prepared monthly reports",
+        source_handle="segment_1",
+        source_excerpt="Professional Experience",
+    )
+    assert combined.organization == "Riyadh Air"
+    assert combined.location == "Riyadh, Saudi Arabia"
+    assert combined.responsibilities == ["Prepared monthly reports"]
 
 
 def test_build_resume_segments_enforces_segment_and_character_caps() -> None:
@@ -665,6 +806,87 @@ async def test_multi_entry_experience_keeps_date_before_and_after_with_the_right
     assert result[1].structured_value["responsibilities"] == [
         "Led equity research and prepared investment reports"
     ]
+
+
+@pytest.mark.asyncio
+async def test_professional_development_bullet_stays_inside_its_experience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(content=json.dumps({"facts": []}))
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        "Professional Experience\n"
+        "Financial Analyst\n"
+        "Acme Corporation\n"
+        "2023 - Present\n"
+        "Professional development and team training.\n"
+        "Prepared monthly reports."
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert len(segments) == 1
+    assert [fact.label for fact in result] == ["Financial Analyst"]
+    assert result[0].structured_value["responsibilities"] == [
+        "Professional development and team training",
+        "Prepared monthly reports",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_role_specialization_after_dash_is_not_invented_as_an_employer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(content=json.dumps({"facts": []}))
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+    segments = build_resume_segments(
+        "Professional Experience\n"
+        "Investment Analyst - Equity Research\n"
+        "2023 - Present\n"
+        "Analyzed listed companies and prepared valuation models."
+    )
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [fact.label for fact in result] == ["Investment Analyst - Equity Research"]
+    assert result[0].structured_value.get("organization") is None
+    assert result[0].structured_value["date_range"] == "2023 - Present"
+
+
+@pytest.mark.asyncio
+async def test_explicit_language_proficiency_fills_partial_provider_fact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = build_resume_segments("Languages\nEnglish - Fluent")
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "language",
+                        "label": "English",
+                        "detail": None,
+                        "source_handle": segments[0].handle,
+                    }
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert [(fact.label, fact.detail) for fact in result] == [("English", "Fluent")]
+    assert result[0].structured_value["proficiency"] == "Fluent"
 
 
 @pytest.mark.asyncio
@@ -1097,11 +1319,265 @@ async def test_upload_replaces_heading_and_date_fragments_with_complete_records(
     ]
     education = result[-1].structured_value
     assert education["degree"] == "Bachelor of Science in Finance"
-    assert education["institution"] == (
-        "King Fahd University of Petroleum and Minerals, Dhahran, Saudi Arabia"
-    )
+    assert education["institution"] == "King Fahd University of Petroleum and Minerals"
+    assert education["location"] == "Dhahran, Saudi Arabia"
     assert education["date_range"] == "2024"
     assert len(capture.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_column_pdf_keeps_complete_resume_records_without_layout_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = build_resume_segments(_TWO_COLUMN_FINANCE_RESUME_PYPDF_TEXT)
+
+    def source_handle(marker: str) -> str:
+        matches = [segment.handle for segment in segments if marker in segment.text]
+        assert len(matches) == 1, (marker, matches)
+        return matches[0]
+
+    def fact(
+        category: str,
+        label: str,
+        marker: str,
+        detail: str | None = None,
+    ) -> dict[str, str | None]:
+        return {
+            "category": category,
+            "label": label,
+            "detail": detail,
+            "source_handle": source_handle(marker),
+        }
+
+    raw_facts = [
+        fact(
+            "education",
+            "Bachelor degree in Finance",
+            "Bachelor degree in Finance",
+            (
+                "Gulf Technical University, Dammam, Saudi Arabia; "
+                "GPA: 3.4/ 4; Dec 2023"
+            ),
+        ),
+        fact(
+            "experience",
+            "Cost Control & Finance Analyst",
+            "Cost Control & Finance Analyst",
+            (
+                "Northstar Consumer Brands; 2025 – Present; Performed monthly variance analysis, "
+                "cost control, and internal financial reviews; Supported audit processes, "
+                "compliance checks, and management reporting"
+            ),
+        ),
+        fact(
+            "experience",
+            "Finance Trainee — Treasury, Reporting & Internal Controls",
+            "Finance Trainee — Treasury, Reporting & Internal Controls",
+            (
+                "Meridian Petrochemical; 2024/01 – 2024/08; Supported month-end and year-end "
+                "financial closing, reconciliations, and journal posting; Assisted in tracking "
+                "audit adjustments and documenting internal control findings; Prepared reports "
+                "on financial performance, liquidity, and variance analysis; Participated in "
+                "risk and compliance checks with the internal audit function"
+            ),
+        ),
+        fact(
+            "experience",
+            "Financial Markets Instructor",
+            "Financial Markets Instructor",
+            (
+                "MarketLearn; 2022 – 2025; Trained 1,200+ students in trading strategy execution, "
+                "market analysis, and risk management; Designed structured educational programs "
+                "covering strategy logic, psychology, and discipline; Produced investment "
+                "content exceeding 20,000 total views; Guest lecturer on trading & risk "
+                "management at GTU"
+            ),
+        ),
+        fact(
+            "experience",
+            "Investment & Trading Professional",
+            "Investment & Trading Professional",
+            (
+                "2018 – Present; Active trader in U.S. and regional equity markets since 2018; "
+                "Built and optimized multiple trading strategies validated using 4,000+ "
+                "backtesting samples across different market environments; Performed robustness "
+                "testing, scenario analysis, and volatility stress testing; Designed professional "
+                "risk management frameworks focused on R-multiples, position sizing, and "
+                "drawdown control; Applied portfolio diversification and systematic execution to "
+                "improve risk-adjusted consistency"
+            ),
+        ),
+        fact(
+            "certification",
+            "CME-4 Certification (Both CME-4A & CME-4B)",
+            "CME-4 Certification",
+        ),
+        fact(
+            "certification",
+            "Advanced Microsoft Excel",
+            "Advanced Microsoft Excel",
+        ),
+        fact(
+            "certification",
+            "CME-1 Certification (Both CME-1A & CME-1B)",
+            "CME-1 Certification",
+        ),
+        fact(
+            "certification",
+            "ERP Implementation Experience (Internship-based)",
+            "ERP Implementation Experience",
+        ),
+        fact("skill", "Trading Strategy Development", "Financial Skills"),
+        fact("skill", "Backtesting & Optimization", "Financial Skills"),
+        fact("skill", "Risk & Money Management", "Financial Skills"),
+        fact("skill", "Portfolio Construction", "Financial Skills"),
+        fact("skill", "Market Analysis", "Financial Skills"),
+        fact("skill", "Options Strategies (Covered Calls)", "Financial Skills"),
+        fact(
+            "skill",
+            "Advanced Excel (Pivot Tables, VBA Basics, Lookups)",
+            "Data & Technical",
+        ),
+        fact("skill", "Power BI (Foundational dashboards)", "Data & Technical"),
+        fact(
+            "skill",
+            "Python — Financial Modelling & Scenario Analysis",
+            "Data & Technical",
+        ),
+        fact("skill", "Attention to Detail", "Soft Skills"),
+        fact("skill", "Fast Market Response", "Soft Skills"),
+        fact("skill", "Team Collaboration", "Soft Skills"),
+        fact("skill", "Compliance Mindset", "Soft Skills"),
+        fact("skill", "Clear Communication", "Soft Skills"),
+        fact("language", "English", "Languages", "Fluent"),
+        fact("language", "Arabic", "Languages", "Native/Bilingual"),
+    ]
+    assert len(raw_facts) == 25
+
+    capture = _MistralCapture(
+        content=json.dumps({"facts": raw_facts}, ensure_ascii=False)
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+
+    result = await provider.generate(
+        ResumeIntakeProviderContext(locale="en", mode="upload", segments=segments)
+    )
+
+    assert len(capture.create_calls) == 1
+    assert len(result) == 25
+
+    education = [fact for fact in result if fact.category == FactCategory.EDUCATION]
+    assert [fact.label for fact in education] == ["Bachelor degree in Finance"]
+    assert education[0].structured_value["degree"] == "Bachelor degree in Finance"
+    assert education[0].structured_value["institution"] == (
+        "Gulf Technical University"
+    )
+    assert education[0].structured_value["location"] == "Dammam, Saudi Arabia"
+    assert education[0].structured_value["date_range"] == "Dec 2023"
+    assert education[0].structured_value["gpa_score"] == "3.4"
+    assert education[0].structured_value["gpa_scale"] == "4"
+    assert education[0].structured_value["gpa_display_recommended"] is True
+
+    experiences = [fact for fact in result if fact.category == FactCategory.EXPERIENCE]
+    assert [fact.label for fact in experiences] == [
+        "Cost Control & Finance Analyst",
+        "Finance Trainee — Treasury, Reporting & Internal Controls",
+        "Financial Markets Instructor",
+        "Investment & Trading Professional",
+    ]
+    assert all(fact.label.casefold() != "profile" for fact in experiences)
+    assert [fact.structured_value.get("organization") for fact in experiences] == [
+        "Northstar Consumer Brands",
+        "Meridian Petrochemical",
+        "MarketLearn",
+        None,
+    ]
+    assert [fact.structured_value["date_range"] for fact in experiences] == [
+        "2025 – Present",
+        "2024/01 – 2024/08",
+        "2022 – 2025",
+        "2018 – Present",
+    ]
+    assert [fact.structured_value["responsibilities"] for fact in experiences] == [
+        [
+            "Performed monthly variance analysis, cost control, and internal financial reviews",
+            "Supported audit processes, compliance checks, and management reporting",
+        ],
+        [
+            "Supported month-end and year-end financial closing, reconciliations, and journal "
+            "posting",
+            "Assisted in tracking audit adjustments and documenting internal control findings",
+            "Prepared reports on financial performance, liquidity, and variance analysis",
+            "Participated in risk and compliance checks with the internal audit function",
+        ],
+        [
+            "Trained 1,200+ students in trading strategy execution, market analysis, and risk "
+            "management",
+            "Designed structured educational programs covering strategy logic, psychology, and "
+            "discipline",
+            "Produced investment content exceeding 20,000 total views",
+            "Guest lecturer on trading & risk management at GTU",
+        ],
+        [
+            "Active trader in U.S. and regional equity markets since 2018",
+            "Built and optimized multiple trading strategies validated using 4,000+ backtesting "
+            "samples across different market environments",
+            "Performed robustness testing, scenario analysis, and volatility stress testing",
+            "Designed professional risk management frameworks focused on R-multiples, position "
+            "sizing, and drawdown control",
+            "Applied portfolio diversification and systematic execution to improve risk-adjusted "
+            "consistency",
+        ],
+    ]
+
+    certifications = [fact for fact in result if fact.category == FactCategory.CERTIFICATION]
+    assert [fact.label for fact in certifications] == [
+        "CME-4 Certification (Both CME-4A & CME-4B)",
+        "Advanced Microsoft Excel",
+        "CME-1 Certification (Both CME-1A & CME-1B)",
+        "ERP Implementation Experience (Internship-based)",
+    ]
+
+    skills = [fact for fact in result if fact.category == FactCategory.SKILL]
+    assert [fact.label for fact in skills] == [
+        "Trading Strategy Development",
+        "Backtesting & Optimization",
+        "Risk & Money Management",
+        "Portfolio Construction",
+        "Market Analysis",
+        "Options Strategies (Covered Calls)",
+        "Advanced Excel (Pivot Tables, VBA Basics, Lookups)",
+        "Power BI (Foundational dashboards)",
+        "Python — Financial Modelling & Scenario Analysis",
+        "Attention to Detail",
+        "Fast Market Response",
+        "Team Collaboration",
+        "Compliance Mindset",
+        "Clear Communication",
+    ]
+    fragment_labels = {
+        "Financial Skills",
+        "Data & Technical",
+        "Soft Skills",
+        "Options Strategies",
+        "(Covered Calls).",
+        "English Arabic",
+        "— F l u e n t",
+        "— N a t i v e",
+        "B i l i n g u a l",
+    }
+    assert fragment_labels.isdisjoint(fact.label for fact in result)
+
+    languages = [fact for fact in result if fact.category == FactCategory.LANGUAGE]
+    assert [(fact.label, fact.detail) for fact in languages] == [
+        ("English", "Fluent"),
+        ("Arabic", "Native/Bilingual"),
+    ]
+    assert [fact.structured_value["proficiency"] for fact in languages] == [
+        "Fluent",
+        "Native/Bilingual",
+    ]
 
 
 @pytest.mark.asyncio
