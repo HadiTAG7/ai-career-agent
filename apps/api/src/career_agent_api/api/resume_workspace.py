@@ -1864,9 +1864,14 @@ async def _handle_resume_quick_action(
         if should_generate:
             had_draft = workspace.current_draft is not None
             draft: ResumeDraftContent | None = None
+            dispatch_revision = workspace.revision
+            output_language = workspace.language
+            # Release the row lock during the writer round trip; the pending user message
+            # is already persisted and results are applied only after re-locking.
+            await session.commit()
             try:
                 draft = await provider.generate_draft(
-                    language=workspace.language,
+                    language=output_language,
                     target_role=None,
                     evidence=evidence,
                     answers=[],
@@ -1880,7 +1885,7 @@ async def _handle_resume_quick_action(
                     raise
                 else:
                     draft = build_evidence_fallback_draft(
-                        language=workspace.language,
+                        language=output_language,
                         evidence=evidence,
                     )
                     generation_warning = "ai_unavailable_evidence_fallback_created"
@@ -1891,10 +1896,16 @@ async def _handle_resume_quick_action(
                     raise
                 else:
                     draft = build_evidence_fallback_draft(
-                        language=workspace.language,
+                        language=output_language,
                         evidence=evidence,
                     )
                     generation_warning = "ai_unavailable_evidence_fallback_created"
+            workspace = await _relock_workspace_for_dispatch(
+                session,
+                workspace.profile_id,
+                dispatch_revision=dispatch_revision,
+                user_message=user_message,
+            )
             if draft is not None:
                 _store_verified_supplemental_translations(
                     workspace,
@@ -2241,26 +2252,46 @@ async def get_resume_workspace(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db),
 ) -> ResumeWorkspaceRead:
-    await _owned_profile(session, profile_id, user.id)
-    workspace = await _load_workspace(
-        session,
-        profile_id,
-        for_update=True,
-        include_messages=False,
-        include_versions=False,
-    )
+    profile = await _owned_profile(session, profile_id, user.id)
+    provider = get_resume_writer_provider(settings)
+    workspace = await _load_workspace(session, profile_id)
     if not workspace:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
         )
-    provider = get_resume_writer_provider(settings)
-    await _refresh_workspace(session, workspace)
-    workspace.provider = provider.provider_name
-    workspace.model = provider.model if provider.available else None
-    await session.commit()
-    workspace = await _load_workspace(session, profile_id)
-    assert workspace is not None
-    return _workspace_read(workspace, provider)
+    if workspace.evidence_revision != profile.evidence_revision:
+        # Evidence drifted since the last mutation: persist the invalidation once,
+        # under a row lock, exactly as the mutation paths do.
+        locked = await _load_workspace(
+            session,
+            profile_id,
+            for_update=True,
+            include_messages=False,
+            include_versions=False,
+        )
+        if not locked:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
+            )
+        await _refresh_workspace(session, locked)
+        locked.provider = provider.provider_name
+        locked.model = provider.model if provider.available else None
+        await session.commit()
+        workspace = await _load_workspace(session, profile_id)
+        assert workspace is not None
+        return _workspace_read(workspace, provider)
+    # Common case: a plain read. Compute coverage in memory so a GET never takes a row
+    # lock, bumps the revision, or commits — concurrent tabs must not 409 because of reads.
+    facts = await _workspace_facts(session, workspace)
+    draft = (
+        ResumeDraftContent.model_validate(workspace.current_draft)
+        if workspace.current_draft
+        else None
+    )
+    coverage, score = _coverage(facts, draft)
+    return _workspace_read(workspace, provider).model_copy(
+        update={"section_coverage": coverage, "readiness_score": score}
+    )
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
@@ -2585,18 +2616,26 @@ async def send_resume_message(
         assert workspace is not None
         return _workspace_read(workspace, provider)
 
+    dispatch_revision = workspace.revision
+    output_language = workspace.language
+    recent_turns = [
+        {"role": message.role.value, "content": message.content}
+        for message in workspace.messages[-12:]
+    ]
+    ordered_conversation = _workspace_conversation(workspace)
+    # Release the row lock during the provider round trip: the PENDING user message is
+    # already persisted, and a slow upstream must not pin a pooled connection or block
+    # every other operation on this workspace.
+    await session.commit()
     try:
         adaptive = getattr(provider, "generate_adaptive_turn", None)
         if callable(adaptive):
             result = await adaptive(
                 conversation_language=conversation_language,
-                output_language=workspace.language,
+                output_language=output_language,
                 target_role=None,
                 evidence=evidence,
-                conversation=[
-                    {"role": message.role.value, "content": message.content}
-                    for message in workspace.messages[-12:]
-                ],
+                conversation=recent_turns,
                 current_question=current_question,
                 answer=answer,
                 answer_handle=f"answer_{payload.client_turn_id.hex}",
@@ -2628,7 +2667,7 @@ async def send_resume_message(
                 language=conversation_language,
                 evidence=evidence,
                 category=cast(ResumeWriterCategory, required_category),
-                conversation=_workspace_conversation(workspace),
+                conversation=ordered_conversation,
             )
             understanding = answer
             proposed_records = [
@@ -2651,6 +2690,12 @@ async def send_resume_message(
             "The AI resume writer is temporarily unavailable; your answer was saved",
         ) from exc
 
+    workspace = await _relock_workspace_for_dispatch(
+        session,
+        profile_id,
+        dispatch_revision=dispatch_revision,
+        user_message=user_message,
+    )
     understanding_id = uuid4()
     pending = {
         "id": str(understanding_id),
@@ -2690,6 +2735,54 @@ async def send_resume_message(
     workspace = await _load_workspace(session, profile_id)
     assert workspace is not None
     return _workspace_read(workspace, provider)
+
+
+async def _relock_workspace_for_dispatch(
+    session: AsyncSession,
+    profile_id: UUID,
+    *,
+    dispatch_revision: int,
+    dispatch_draft_revision: int | None = None,
+    user_message: ResumeMessage | None = None,
+) -> ResumeWorkspace:
+    """Re-acquire the workspace row lock after a provider round trip.
+
+    Provider calls run with the transaction committed so a slow upstream never pins a
+    pooled connection or blocks other workspace operations. This verifies nothing else
+    mutated the workspace while the lock was released before results are applied.
+    """
+    workspace = await _load_workspace(
+        session,
+        profile_id,
+        for_update=True,
+        include_versions=False,
+    )
+    if workspace is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
+        )
+    draft_conflict = (
+        dispatch_draft_revision is not None
+        and workspace.draft_revision != dispatch_draft_revision
+    )
+    if workspace.revision != dispatch_revision or draft_conflict:
+        if user_message is not None:
+            user_message.status = ResumeMessageStatus.FAILED
+            await session.commit()
+        if draft_conflict:
+            raise _api_error(
+                status.HTTP_409_CONFLICT,
+                "resume_draft_revision_conflict",
+                "The resume draft changed while the assistant was responding; "
+                "reload it and retry",
+            )
+        raise _api_error(
+            status.HTTP_409_CONFLICT,
+            "resume_workspace_revision_conflict",
+            "The resume workspace changed while the assistant was responding; "
+            "reload it and retry",
+        )
+    return workspace
 
 
 def _pending_understanding(
@@ -2931,26 +3024,45 @@ async def confirm_resume_understanding(
         )
         and (guided_import_flow is None or explicit_generation)
     )
+    revision_already_bumped = False
     if should_generate_full_draft:
+        generation_facts = await _workspace_facts(session, workspace)
+        draft_generation_evidence = build_resume_evidence(generation_facts)
+        output_language = workspace.language
+        # Consume the pending understanding and persist the confirmed evidence before
+        # the writer round trip, then release the row locks: the bumped revision makes a
+        # duplicate confirm 409 instead of double-creating facts, and a slow provider no
+        # longer pins a pooled connection or serializes other workspace operations.
+        workspace.pending_understanding = None
+        workspace.revision += 1
+        revision_already_bumped = True
+        dispatch_revision = workspace.revision
+        await session.commit()
+        generation_failed = False
         try:
-            generation_facts = await _workspace_facts(session, workspace)
-            draft_generation_evidence = build_resume_evidence(generation_facts)
             draft = await provider.generate_draft(
-                language=workspace.language,
+                language=output_language,
                 target_role=None,
                 evidence=draft_generation_evidence,
                 answers=[],
             )
+        except ResumeWriterError as exc:
+            logger.warning("Resume workspace full generation failed: %s", exc)
+            generation_failed = True
+        await _owned_profile(session, profile_id, user.id, for_update=True)
+        workspace = await _relock_workspace_for_dispatch(
+            session, profile_id, dispatch_revision=dispatch_revision
+        )
+        if generation_failed:
+            workspace.provider_metadata = {
+                **workspace.provider_metadata,
+                "generation_warning": "full_generation_unavailable",
+            }
+        else:
             workspace.provider_metadata = {
                 **workspace.provider_metadata,
                 "last_full_generation_at": datetime.now(UTC).isoformat(),
                 "generation_warning": None,
-            }
-        except ResumeWriterError as exc:
-            logger.warning("Resume workspace full generation failed: %s", exc)
-            workspace.provider_metadata = {
-                **workspace.provider_metadata,
-                "generation_warning": "full_generation_unavailable",
             }
     if (
         draft is None
@@ -3033,7 +3145,8 @@ async def confirm_resume_understanding(
                 corrected_facts,
             )
     workspace.pending_understanding = None
-    workspace.revision += 1
+    if not revision_already_bumped:
+        workspace.revision += 1
     if isinstance(next_question, dict) and next_question.get("question"):
         sequence = _next_sequence(workspace)
         session.add(
@@ -3301,9 +3414,14 @@ async def rewrite_resume_draft(
         build_resume_evidence(await _workspace_facts(session, workspace)),
     )
     instruction = _rewrite_instruction(payload)
+    dispatch_revision = workspace.revision
+    dispatch_draft_revision = workspace.draft_revision
+    output_language = workspace.language
+    # Release the row locks while the rewrite round trip runs.
+    await session.commit()
     try:
         candidate = await rewrite(
-            language=workspace.language,
+            language=output_language,
             target_role=None,
             evidence=evidence,
             section_key=payload.section_key or payload.target_kind,
@@ -3327,6 +3445,12 @@ async def rewrite_resume_draft(
             "resume_writer_unavailable",
             "The AI resume writer returned no usable rewrite",
         )
+    workspace = await _relock_workspace_for_dispatch(
+        session,
+        profile_id,
+        dispatch_revision=dispatch_revision,
+        dispatch_draft_revision=dispatch_draft_revision,
+    )
     suggestion = ResumeRewriteSuggestionRead(
         suggestion_id=uuid4(),
         target_kind=payload.target_kind,

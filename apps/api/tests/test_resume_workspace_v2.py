@@ -4388,3 +4388,75 @@ async def test_delete_my_data_removes_resume_workspace_rows(
 
     missing = await client.get(base, headers=headers)
     assert missing.status_code == 404
+
+
+async def test_concurrent_mutation_during_provider_call_conflicts_cleanly(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The workspace row lock is released during provider round trips; a request whose
+    state changed while the provider was thinking must fail with the existing 409 code
+    instead of applying stale results."""
+
+    gate = asyncio.Event()
+    calls = {"count": 0}
+
+    async def parked_turn(**kwargs: object) -> SimpleNamespace:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            await gate.wait()
+        return SimpleNamespace(
+            understanding="فهمت إجابتك.",
+            proposed_records=[],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(stub_provider, "generate_adaptive_turn", parked_turn)
+    profile, _ = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "ar", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+    revision = started.json()["revision"]
+
+    first = asyncio.create_task(
+        client.post(
+            f"{base}/messages",
+            headers=headers,
+            json={
+                "content": "الإجابة الأولى",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": revision,
+            },
+        )
+    )
+    for _ in range(200):
+        if calls["count"] >= 1:
+            break
+        await asyncio.sleep(0.01)
+    assert calls["count"] >= 1
+
+    second = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "الإجابة الثانية",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": revision,
+        },
+    )
+    # The second request completed while the first was still waiting on the provider.
+    assert second.status_code == 200, second.text
+    assert second.json()["revision"] == revision + 1
+
+    gate.set()
+    first_response = await first
+    assert first_response.status_code == 409, first_response.text
+    assert first_response.json()["detail"]["code"] == "resume_workspace_revision_conflict"
