@@ -7,6 +7,14 @@ import type {
   ApiResumeSectionKey,
 } from "@/lib/api-client";
 
+export type ResumeCanvasSelection = {
+  targetKind: "headline" | "professional_summary" | "bullet";
+  sectionKey?: string;
+  itemId?: string;
+  bulletIndex?: number;
+  text: string;
+};
+
 export const RESUME_PRESENTATION_ORDER: readonly ApiResumeSectionKey[] = [
   "education",
   "experience",

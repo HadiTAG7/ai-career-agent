@@ -273,21 +273,6 @@ export type ApiResumeQuestion = {
   required: boolean;
 };
 
-export type ApiResumeQuestionsResult = {
-  provider: string;
-  model: string;
-  questions: ApiResumeQuestion[];
-  covered_categories: ApiResumeFactCategory[];
-};
-
-export type ApiResumeInterviewAnswer = {
-  question_id: string;
-  category: ApiResumeFactCategory;
-  question: string;
-  answer: string;
-  skipped: boolean;
-};
-
 export type ApiResumeDraftItem = {
   id: string;
   title: string;
@@ -309,12 +294,6 @@ export type ApiResumeDraftContent = {
   professional_summary: string;
   summary_evidence_handles: string[];
   sections: ApiResumeDraftSection[];
-};
-
-export type ApiResumeDraft = ApiResumeDraftContent & {
-  provider: string;
-  model: string;
-  fact_count: number;
 };
 
 export type ApiResumeWorkspaceStage = "understanding" | "writing" | "review" | "complete";
@@ -824,96 +803,6 @@ export async function importCareerFile(
   body.set("use_ai", String(Boolean(options.useAi)));
   body.set("data_sharing_acknowledged", String(Boolean(options.dataSharingAcknowledged)));
   return apiRequest<ApiImportResult>(`/v1/profiles/${encodeURIComponent(profileId)}/imports`, { method: "POST", body, timeoutMs: 60_000 });
-}
-
-export async function createResumeDraft(
-  profileId: string,
-  input: { content: string; dataSharingAcknowledged: boolean },
-) {
-  return apiRequest<ApiImportResult>(`/v1/profiles/${encodeURIComponent(profileId)}/resume-drafts`, {
-    method: "POST",
-    body: JSON.stringify({
-      content: input.content,
-      data_sharing_acknowledged: input.dataSharingAcknowledged,
-    }),
-    timeoutMs: 60_000,
-  });
-}
-
-export async function createResumeQuestions(
-  profileId: string,
-  input: { language: "ar" | "en"; targetRole?: string; dataSharingAcknowledged: boolean },
-) {
-  return apiRequest<ApiResumeQuestionsResult>(
-    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/questions`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        language: input.language,
-        target_role: input.targetRole?.trim() || null,
-        data_sharing_acknowledged: input.dataSharingAcknowledged,
-      }),
-      timeoutMs: 90_000,
-    },
-  );
-}
-
-export async function generateProfessionalResume(
-  profileId: string,
-  input: {
-    language: "ar" | "en";
-    targetRole?: string;
-    answers: ApiResumeInterviewAnswer[];
-    dataSharingAcknowledged: boolean;
-  },
-) {
-  return apiRequest<ApiResumeDraft>(
-    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/generate`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        language: input.language,
-        target_role: input.targetRole?.trim() || null,
-        answers: input.answers,
-        data_sharing_acknowledged: input.dataSharingAcknowledged,
-      }),
-      timeoutMs: 120_000,
-    },
-  );
-}
-
-export async function exportProfessionalResumePdf(
-  profileId: string,
-  input: {
-    language: "ar" | "en";
-    draft: ApiResumeDraft;
-    contact: { email?: string; phone?: string; linkedin?: string };
-    reviewAcknowledged: boolean;
-  },
-) {
-  const response = await apiResponse(
-    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/export`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        language: input.language,
-        draft: {
-          headline: input.draft.headline,
-          professional_summary: input.draft.professional_summary,
-          summary_evidence_handles: input.draft.summary_evidence_handles,
-          sections: input.draft.sections,
-        },
-        contact: {
-          email: input.contact.email?.trim() || null,
-          phone: input.contact.phone?.trim() || null,
-          linkedin: input.contact.linkedin?.trim() || null,
-        },
-        review_acknowledged: input.reviewAcknowledged,
-      }),
-      timeoutMs: 90_000,
-    },
-  );
-  return response.blob();
 }
 
 function resumeWorkspacePath(profileId: string, suffix = "") {

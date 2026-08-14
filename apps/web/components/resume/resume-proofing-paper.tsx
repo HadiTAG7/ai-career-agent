@@ -18,7 +18,7 @@ import type {
 } from "@/lib/api-client";
 import { buildFallbackResumeDraft } from "@/lib/resume-presentation";
 import { cn } from "@/lib/utils";
-import type { ResumeCanvasSelection } from "@/components/resume/resume-document-canvas";
+import type { ResumeCanvasSelection } from "@/lib/resume-presentation";
 
 type ResumeProofingPaperProps = {
   locale: "ar" | "en";

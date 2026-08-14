@@ -11,9 +11,9 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from career_agent_api.api.career_path import router as career_path_router
-from career_agent_api.api.resume import router as resume_router
 from career_agent_api.api.resume_workspace import router as resume_workspace_router
 from career_agent_api.core.auth import CurrentUser
 from career_agent_api.core.config import Settings, get_settings
@@ -112,7 +112,6 @@ from career_agent_api.services.resume_intake import (
 
 router = APIRouter(prefix="/v1")
 router.include_router(career_path_router)
-router.include_router(resume_router)
 router.include_router(resume_workspace_router)
 
 RESUME_EXTRACTOR_VERSION = "resume-records-v7"
@@ -891,8 +890,9 @@ async def _import_professional_file(
         data = await read_limited_upload(file, settings.max_import_bytes)
     finally:
         await file.close()
-    parsed = parse_import(file.filename, file.content_type, data)
-    import_metadata = metadata_for_import(data, parsed)
+    # PDF/DOCX parsing and hashing are CPU-bound; keep them off the event loop.
+    parsed = await run_in_threadpool(parse_import, file.filename, file.content_type, data)
+    import_metadata = await run_in_threadpool(metadata_for_import, data, parsed)
     content_sha256 = str(import_metadata["content_sha256"])
     ai_enhanced = use_ai and parsed.source_kind is SourceKind.CV_UPLOAD
     existing_source = await _evidence_source_for_content(session, profile_id, content_sha256)

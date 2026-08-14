@@ -230,14 +230,6 @@ class ResumeNarrativeCreate(BaseModel):
     data_sharing_acknowledged: bool = False
 
 
-class ResumeQuestionCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    language: PreferredLanguage
-    target_role: str | None = Field(default=None, max_length=300)
-    data_sharing_acknowledged: bool = False
-
-
 class ResumeQuestionRead(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -247,13 +239,6 @@ class ResumeQuestionRead(BaseModel):
     why_it_matters: str = Field(min_length=3, max_length=500)
     placeholder: str = Field(min_length=3, max_length=800)
     required: bool = False
-
-
-class ResumeQuestionsRead(BaseModel):
-    provider: str
-    model: str
-    questions: list[ResumeQuestionRead] = Field(max_length=8)
-    covered_categories: list[FactCategory] = Field(max_length=10)
 
 
 class ResumeInterviewAnswerCreate(BaseModel):
@@ -352,36 +337,12 @@ class ResumeDraftContent(BaseModel):
         return value
 
 
-class ResumeDraftGenerateCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    language: PreferredLanguage
-    target_role: str | None = Field(default=None, max_length=300)
-    answers: list[ResumeInterviewAnswerCreate] = Field(default_factory=list, max_length=20)
-    data_sharing_acknowledged: bool = False
-
-
-class ResumeDraftRead(ResumeDraftContent):
-    provider: str
-    model: str
-    fact_count: int = Field(ge=0, le=120)
-
-
 class ResumeExportContact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: str | None = Field(default=None, max_length=320)
     phone: str | None = Field(default=None, max_length=80)
     linkedin: str | None = Field(default=None, max_length=500)
-
-
-class ResumeDraftExportCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    language: PreferredLanguage
-    draft: ResumeDraftContent
-    contact: ResumeExportContact = Field(default_factory=ResumeExportContact)
-    review_acknowledged: bool = False
 
 
 ResumeQuickAction = Literal[

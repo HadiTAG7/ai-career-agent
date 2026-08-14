@@ -35,7 +35,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { ResumeCanvasSelection } from "@/components/resume/resume-document-canvas";
+import type { ResumeCanvasSelection } from "@/lib/resume-presentation";
 import { ResumeProofingPaper } from "@/components/resume/resume-proofing-paper";
 import {
   ProofingEvidenceRail,

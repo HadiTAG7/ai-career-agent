@@ -50,6 +50,7 @@ async def career_path_client(
         return Settings(
             _env_file=None,
             environment="test",
+            dev_auth_bypass=True,
             database_url="sqlite+aiosqlite://",
             auto_create_schema=True,
             ai_provider="deterministic",
