@@ -15,6 +15,9 @@ class Settings(BaseSettings):
 
     app_name: str = "AI Career Agent API"
     environment: Literal["development", "test", "production"] = "development"
+    # Explicit opt-in for header-based identity in local development. Without it the API
+    # refuses unauthenticated requests even outside production.
+    dev_auth_bypass: bool = False
     database_url: str = "sqlite+aiosqlite:///./career_agent.db"
     auto_create_schema: bool = True
     cors_origins: Annotated[list[str], NoDecode] = Field(
@@ -69,6 +72,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def secure_production(self) -> "Settings":
         if self.environment == "production":
+            if self.dev_auth_bypass:
+                raise ValueError("DEV_AUTH_BYPASS must be false in production")
             if not self.clerk_jwks_url:
                 raise ValueError("CLERK_JWKS_URL is required in production")
             if not self.clerk_issuer:

@@ -25,34 +25,25 @@ services:
     networks:
       - app
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
-    ports:
-      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-    networks:
-      - app
-
   api:
     build:
       context: ./apps/api
       dockerfile: Dockerfile
     init: true
     restart: unless-stopped
+    command:
+      [
+        "sh",
+        "-c",
+        "alembic upgrade head && uvicorn career_agent_api.main:app --app-dir src --host 0.0.0.0 --port 8000",
+      ]
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Header-based identity is opt-in; deployments that forget Clerk config fail closed.
+      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-false}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-career_agent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-career_agent}
-      AUTO_CREATE_SCHEMA: ${AUTO_CREATE_SCHEMA:-true}
+      AUTO_CREATE_SCHEMA: ${AUTO_CREATE_SCHEMA:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       CLERK_JWKS_URL: ${CLERK_JWKS_URL:-}
       CLERK_ISSUER: ${CLERK_ISSUER:-}
@@ -66,14 +57,13 @@ services:
       AI_REQUEST_TIMEOUT_SECONDS: ${AI_REQUEST_TIMEOUT_SECONDS:-25}
       AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-800}
       MAX_IMPORT_BYTES: ${MAX_IMPORT_BYTES:-10000000}
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RESUME_AI_MAX_OUTPUT_TOKENS: ${RESUME_AI_MAX_OUTPUT_TOKENS:-4000}
+      RESUME_INTERVIEW_MODEL: ${RESUME_INTERVIEW_MODEL:-}
+      RESUME_WRITER_MODEL: ${RESUME_WRITER_MODEL:-}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     healthcheck:
       test:
@@ -90,47 +80,6 @@ services:
     networks:
       - app
 
-  worker:
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile
-    init: true
-    restart: unless-stopped
-    command:
-      [
-        "celery",
-        "-A",
-        "career_agent_api.worker:celery_app",
-        "worker",
-        "--loglevel=INFO",
-      ]
-    environment:
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-career_agent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-career_agent}
-      AUTO_CREATE_SCHEMA: "false"
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import os; from career_agent_api.worker import celery_app; assert celery_app.control.inspect(destination=['celery@' + os.environ['HOSTNAME']], timeout=5).ping()",
-        ]
-      interval: 20s
-      timeout: 10s
-      retries: 5
-      start_period: 25s
-    networks:
-      - app
-
   web:
     build:
       context: ./apps/web
@@ -138,13 +87,14 @@ services:
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+        NEXT_PUBLIC_DEV_AUTH_BYPASS: ${NEXT_PUBLIC_DEV_AUTH_BYPASS:-false}
     init: true
     restart: unless-stopped
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
-      INTERNAL_API_BASE_URL: http://api:8000
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+      NEXT_PUBLIC_DEV_AUTH_BYPASS: ${NEXT_PUBLIC_DEV_AUTH_BYPASS:-false}
     ports:
       - "127.0.0.1:${WEB_PORT:-3000}:3000"
     depends_on:
@@ -167,7 +117,6 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
 
 networks:
   app:
