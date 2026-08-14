@@ -249,13 +249,6 @@ select option {
     @apply inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-primary-text transition-colors duration-150 hover:text-primary-text/80;
   }
 
-  .surface-panel {
-    @apply rounded-[4px] border border-border bg-card;
-  }
-
-  .status-badge {
-    @apply inline-flex min-h-7 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold;
-  }
 }
 
 @keyframes page-in {
