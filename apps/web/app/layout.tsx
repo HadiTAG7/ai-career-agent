@@ -10,6 +10,7 @@ import "@fontsource/noto-sans-arabic/700.css";
 import "./globals.css";
 import { AuthGate } from "@/components/auth/auth-gate";
 import { AppShell } from "@/components/layout/app-shell";
+import { LocaleInitScript } from "@/components/layout/locale-init-script";
 import { ThemeInitScript } from "@/components/layout/theme-init-script";
 import { LocaleProvider } from "@/lib/i18n";
 import { ThemeProvider } from "@/lib/theme";
@@ -22,7 +23,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="ar" dir="rtl" data-theme="dark" data-scroll-behavior="smooth" suppressHydrationWarning>
-      <head><ThemeInitScript /></head>
+      <head><ThemeInitScript /><LocaleInitScript /></head>
       <body>
         <ThemeProvider>
           <LocaleProvider>

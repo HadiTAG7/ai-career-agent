@@ -63,7 +63,9 @@ export default function JobAnalysisPage() {
   const [selectedRequirement, setSelectedRequirement] = useState<JobRequirement | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notice, setNotice] = useState<PageNotice | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // Raw error kept in state and formatted at render time so switching the UI language
+  // does not force a refetch that wipes selection and optimistic state.
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [evidenceDetails, setEvidenceDetails] = useState<Record<string, DrawerEvidenceDetail>>({});
   const [reviewingRequirements, startReviewTransition] = useTransition();
   const [savingApplication, startSaveTransition] = useTransition();
@@ -91,14 +93,14 @@ export default function JobAnalysisPage() {
             if (active) setEvidenceDetails(details);
           }
         }
-        if (window.matchMedia("(min-width: 1024px)").matches) setDrawerOpen(true);
+        if (window.matchMedia("(min-width: 900px)").matches) setDrawerOpen(true);
       } catch (caughtError) {
-        if (active) setLoadError(apiErrorMessage(caughtError, locale));
+        if (active) setLoadError(caughtError);
       }
     }
     void load();
     return () => { active = false; };
-  }, [locale, params.id]);
+  }, [params.id]);
 
   useEffect(() => () => {
     if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
@@ -200,8 +202,8 @@ export default function JobAnalysisPage() {
     });
   }
 
-  if (loadError) {
-    return <div className="page-wrap grid min-h-[60vh] place-items-center"><section className="w-full max-w-lg border-y border-danger py-6 text-center" role="alert"><h1 className="text-xl font-bold">{locale === "ar" ? "تعذر تحميل التحليل" : "Could not load analysis"}</h1><p className="mt-3 text-sm text-danger">{loadError}</p><Button variant="secondary" className="mt-5" onClick={() => router.push("/jobs")}>{locale === "ar" ? "العودة إلى الفرص" : "Back to opportunities"}</Button></section></div>;
+  if (loadError != null) {
+    return <div className="page-wrap grid min-h-[60vh] place-items-center"><section className="w-full max-w-lg border-y border-danger py-6 text-center" role="alert"><h1 className="text-xl font-bold">{locale === "ar" ? "تعذر تحميل التحليل" : "Could not load analysis"}</h1><p className="mt-3 text-sm text-danger">{apiErrorMessage(loadError, locale)}</p><Button variant="secondary" className="mt-5" onClick={() => router.push("/jobs")}>{locale === "ar" ? "العودة إلى الفرص" : "Back to opportunities"}</Button></section></div>;
   }
 
   if (!job) {
@@ -219,9 +221,9 @@ export default function JobAnalysisPage() {
   const displayedRecommendation: JobRecommendation = analysisComplete ? job.recommendation : "need_information";
 
   return (
-    <div className="page-enter pb-28 lg:pb-24">
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_320px]" dir="ltr">
-        <div className="min-w-0 px-5 py-8 md:px-8 lg:py-10" dir={locale === "ar" ? "rtl" : "ltr"}>
+    <div className="page-enter pb-28 shell:pb-24">
+      <div className="grid shell:grid-cols-[minmax(0,1fr)_320px]" dir="ltr">
+        <div className="min-w-0 px-5 py-8 md:px-8 shell:py-10" dir={locale === "ar" ? "rtl" : "ltr"}>
           <div className="mx-auto max-w-[900px]">
             <Link href="/jobs" className="subtle-link"><ChevronLeft className="h-4 w-4 ltr:rotate-180" />{locale === "ar" ? "العودة إلى الفرص" : "Back to opportunities"}</Link>
             {job.isDemo ? <DemoNotice className="mt-3" /> : null}
@@ -236,7 +238,7 @@ export default function JobAnalysisPage() {
                   <p className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted">
                     <span className="flex items-center gap-1"><Building2 className="h-4 w-4" />{text(job.company)}</span>
                     <span className="flex items-center gap-1"><MapPin className="h-4 w-4" />{text(job.location)}</span>
-                    <span>{text(job.employmentType)}</span>
+                    {job.employmentType ? <span>{text(job.employmentType)}</span> : null}
                   </p>
                 </div>
                 <Button onClick={() => analysisComplete ? actionBarRef.current?.focus() : reviewSectionRef.current?.focus()} size="lg"><Send className="h-5 w-5" />{analysisComplete ? text(recommendationCopy[displayedRecommendation]) : (locale === "ar" ? "راجع المتطلبات" : "Review requirements")}</Button>
@@ -270,7 +272,7 @@ export default function JobAnalysisPage() {
               {analysisComplete ? <div className="flex flex-wrap gap-4"><span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-emerald" />{locale === "ar" ? "تم التحقق" : "Verified"}</span><span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-amber" />{locale === "ar" ? "متوافق جزئيًا" : "Partial"}</span><span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-danger" />{locale === "ar" ? "غير مدعوم" : "Unsupported"}</span></div> : <span>{locale === "ar" ? "اختر أي بند لتصحيحه أو إضافة متطلب مفقود." : "Select any item to correct it or add a missed requirement."}</span>}
             </div>
 
-            <button className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-[2px] border border-border px-4 text-sm font-semibold lg:hidden" onClick={() => setDrawerOpen(true)}><Info className="h-4 w-4" />{locale === "ar" ? "فتح دليل القرار" : "Open decision evidence"}</button>
+            <button className="mt-5 inline-flex min-h-11 items-center gap-2 rounded-[2px] border border-border px-4 text-sm font-semibold shell:hidden" onClick={() => setDrawerOpen(true)}><Info className="h-4 w-4" />{locale === "ar" ? "فتح دليل القرار" : "Open decision evidence"}</button>
 
             <section className="mt-2" aria-label={locale === "ar" ? "تفاصيل المتطلبات" : "Requirement details"}>
               {groups.map((group) => (
@@ -285,18 +287,24 @@ export default function JobAnalysisPage() {
           </div>
         </div>
 
-        <div className="border-border lg:border-l" dir={locale === "ar" ? "rtl" : "ltr"}>
+        <div className="border-border shell:border-l" dir={locale === "ar" ? "rtl" : "ltr"}>
           <EvidenceDrawer key={selectedRequirement.id} requirement={selectedRequirement} reviewMode={!analysisComplete} evidenceDetail={selectedRequirement.evidenceFactId ? evidenceDetails[selectedRequirement.evidenceFactId] : undefined} open={drawerOpen} onClose={() => setDrawerOpen(false)} onCorrectRequirement={!job.isDemo && apiConfiguration.baseUrl ? handleRequirementCorrection : undefined} onAddRequirement={!job.isDemo && apiConfiguration.baseUrl ? handleAddRequirement : undefined} onRetireRequirement={!job.isDemo && apiConfiguration.baseUrl ? handleRetireRequirement : undefined} />
         </div>
       </div>
 
-      {notice ? <div className={cn("fixed bottom-28 start-5 z-50 flex max-w-sm items-start gap-2 border bg-background p-4 text-sm lg:bottom-24", notice.tone === "error" ? "border-danger text-danger" : "border-emerald")} role={notice.tone === "error" ? "alert" : "status"}>{notice.tone === "error" ? <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" />}<div><p>{notice.message}</p>{applicationSaved && notice.tone === "success" ? <Link href="/applications" className="mt-2 inline-flex font-semibold text-emerald underline underline-offset-4">{locale === "ar" ? "عرض لوحة التقديمات" : "View application tracker"}</Link> : null}</div></div> : null}
+      {notice ? <div className={cn("fixed bottom-28 start-5 z-50 flex max-w-sm items-start gap-2 border bg-background p-4 text-sm shell:bottom-24", notice.tone === "error" ? "border-danger text-danger" : "border-emerald")} role={notice.tone === "error" ? "alert" : "status"}>{notice.tone === "error" ? <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald" />}<div><p>{notice.message}</p>{applicationSaved && notice.tone === "success" ? <Link href="/applications" className="mt-2 inline-flex font-semibold text-emerald underline underline-offset-4">{locale === "ar" ? "عرض لوحة التقديمات" : "View application tracker"}</Link> : null}</div></div> : null}
 
-      <div ref={actionBarRef} tabIndex={-1} className="fixed inset-x-0 bottom-[76px] z-30 border-t border-border bg-background/95 px-5 py-3 backdrop-blur-sm lg:bottom-0 lg:end-0 lg:start-[244px] lg:px-8" aria-label={locale === "ar" ? "إجراءات الوظيفة" : "Job actions"}>
+      <div ref={actionBarRef} tabIndex={-1} className="fixed inset-x-0 bottom-[76px] z-30 border-t border-border bg-background/95 px-5 py-3 backdrop-blur-sm shell:bottom-0 shell:end-0 shell:start-[244px] shell:px-8" aria-label={locale === "ar" ? "إجراءات الوظيفة" : "Job actions"}>
         <div className="mx-auto flex max-w-[1220px] flex-col-reverse gap-3 md:flex-row md:items-center md:justify-between">
-          <p className="hidden items-center gap-2 text-sm text-muted lg:flex"><LockKeyhole className="h-4 w-4" />{locale === "ar" ? "لن تُضاف أي حقيقة غير مؤكدة إلى مستنداتك." : "No unconfirmed fact will be added to your documents."}</p>
+          <p className="hidden items-center gap-2 text-sm text-muted shell:flex"><LockKeyhole className="h-4 w-4" />{locale === "ar" ? "لن تُضاف أي حقيقة غير مؤكدة إلى مستنداتك." : "No unconfirmed fact will be added to your documents."}</p>
           <div className="grid grid-cols-2 gap-3 md:flex">
-            <Button disabled={!analysisComplete} onClick={() => router.push(`/documents?job=${job.id}`)}><FilePlus2 className="h-4 w-4" />{locale === "ar" ? "أنشئ CV مخصصًا" : "Create tailored CV"}</Button>
+            {job.isDemo || !apiConfiguration.baseUrl ? (
+              <Button disabled={!analysisComplete} onClick={() => router.push(`/documents?job=${job.id}`)}><FilePlus2 className="h-4 w-4" />{locale === "ar" ? "أنشئ CV مخصصًا" : "Create tailored CV"}</Button>
+            ) : (
+              // Honest dead-end: per-job document generation has not shipped for connected
+              // accounts yet, so do not navigate into a walled page.
+              <Button disabled title={locale === "ar" ? "توليد مستندات لكل وظيفة لم يتوفر بعد؛ استخدم صفحة السيرة لإنشاء سيرتك." : "Per-job document generation is not available yet; use the resume page to build your CV."}><FilePlus2 className="h-4 w-4" />{locale === "ar" ? "أنشئ CV مخصصًا (قريبًا)" : "Create tailored CV (soon)"}</Button>
+            )}
             <Button variant="secondary" disabled={!analysisComplete || savingApplication || applicationSaved} onClick={handleSaveToTracker}><Bookmark className="h-4 w-4" />{applicationSaved ? (locale === "ar" ? "محفوظ للمتابعة" : "Saved to tracker") : savingApplication ? (locale === "ar" ? "جارٍ الحفظ…" : "Saving…") : (locale === "ar" ? "حفظ للمتابعة" : "Save to tracker")}</Button>
             {isSafeHttpUrl(job.originalUrl) ? <a href={job.originalUrl} target="_blank" rel="noopener noreferrer" className="col-span-2 inline-flex min-h-11 items-center justify-center gap-2 text-sm font-semibold text-primary-text hover:text-primary-hover md:px-3">{locale === "ar" ? "فتح صفحة التقديم" : "Open application page"}<ExternalLink className="h-4 w-4" /></a> : <span className="col-span-2 flex min-h-11 items-center justify-center gap-2 text-xs text-muted"><ShieldCheck className="h-4 w-4" />{locale === "ar" ? "لا يوجد رابط صالح محفوظ" : "No valid saved URL"}</span>}
           </div>

@@ -98,7 +98,7 @@ export function EvidenceDrawer({ requirement, reviewMode = false, evidenceDetail
 
   return (
     <aside
-      className="fixed inset-x-0 bottom-[76px] top-[86px] z-40 overflow-y-auto border-s border-border bg-background p-5 lg:sticky lg:inset-auto lg:top-24 lg:z-auto lg:block lg:max-h-[calc(100vh-112px)]"
+      className="fixed inset-x-0 bottom-[76px] top-[86px] z-40 overflow-y-auto border-s border-border bg-background p-5 shell:sticky shell:inset-auto shell:top-24 shell:z-auto shell:block shell:max-h-[calc(100vh-112px)]"
       aria-labelledby="decision-evidence-title"
     >
       <div className="flex items-center justify-between border-b border-border pb-4">

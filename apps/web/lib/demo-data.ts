@@ -22,7 +22,7 @@ export const evidenceFacts: EvidenceFact[] = [
   },
   {
     id: "fact-powerbi",
-    category: "certificate",
+    category: "certification",
     title: localized("شهادة Power BI", "Power BI certificate"),
     detail: localized("شهادة إتمام مؤكدة في أساسيات Power BI", "Verified completion certificate in Power BI fundamentals"),
     source: localized("power-bi-certificate.pdf", "power-bi-certificate.pdf"),
@@ -31,7 +31,7 @@ export const evidenceFacts: EvidenceFact[] = [
   },
   {
     id: "fact-google-analytics",
-    category: "certificate",
+    category: "certification",
     title: localized("Google Data Analytics", "Google Data Analytics"),
     detail: localized("شهادة مستخرجة وتحتاج مراجعة الرابط والتاريخ", "Extracted certificate requiring link and date review"),
     source: localized("CV-2026.pdf، الصفحة 2", "CV-2026.pdf, page 2"),
@@ -220,7 +220,7 @@ export const demoApplications: Application[] = [
   },
   {
     id: "app-3",
-    jobId: "demo-business-analyst",
+    jobId: "demo-data-analyst",
     role: localized("محلل أعمال", "Business Analyst"),
     company: localized("شركة أفق", "Ofuq Co."),
     location: localized("الرياض", "Riyadh"),
@@ -232,7 +232,7 @@ export const demoApplications: Application[] = [
   },
   {
     id: "app-4",
-    jobId: "demo-bi-analyst",
+    jobId: "demo-software-engineer",
     role: localized("محلل ذكاء أعمال", "BI Analyst"),
     company: localized("مدار الرقمية", "Madar Digital"),
     location: localized("جدة", "Jeddah"),

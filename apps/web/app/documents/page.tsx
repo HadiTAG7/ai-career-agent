@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Clipboard, Download, FileCheck2, FileText, LockKeyhole, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DemoNotice } from "@/components/ui/demo-notice";
@@ -33,15 +33,27 @@ export default function DocumentsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [targetJobId, setTargetJobId] = useState(demoJobs[0].id);
 
+  const noticeTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     const job = new URLSearchParams(window.location.search).get("job");
+    // Query params are client-only input here; applying them after hydration is intentional.
     if (job) {
-      queueMicrotask(() => {
-        setTargetJobId(job);
-        setGenerated(true);
-      });
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTargetJobId(job);
+      setGenerated(true);
     }
   }, []);
+
+  useEffect(() => () => {
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+  }, []);
+
+  function showNotice(message: string, duration: number) {
+    setNotice(message);
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), duration);
+  }
 
   const targetJob = demoJobs.find((job) => job.id === targetJobId) ?? demoJobs[0];
   const documentText = useMemo(() => {
@@ -62,8 +74,7 @@ export default function DocumentsPage() {
       document.execCommand("copy");
       area.remove();
     }
-    setNotice(locale === "ar" ? "تم نسخ المستند." : "Document copied.");
-    window.setTimeout(() => setNotice(null), 2200);
+    showNotice(locale === "ar" ? "تم نسخ المستند." : "Document copied.", 2200);
   }
 
   function downloadDocument() {
@@ -72,9 +83,13 @@ export default function DocumentsPage() {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = activeKind === "cv" ? "DO-NOT-USE_fictional-cv-demo.txt" : "DO-NOT-USE_fictional-cover-letter-demo.txt";
+    // The anchor must be in the DOM and the URL revoked only after the click has been
+    // processed, or Firefox/Safari silently drop the download.
+    document.body.appendChild(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
-    setNotice(locale === "ar" ? "تم تنزيل النسخة التجريبية." : "Demo document downloaded.");
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    showNotice(locale === "ar" ? "تم تنزيل النسخة التجريبية." : "Demo document downloaded.", 2200);
   }
 
   if (apiConfiguration.baseUrl) {

@@ -4,7 +4,7 @@ export function cn(...inputs: ClassValue[]) {
   return clsx(inputs);
 }
 
-export function formatDemoDate(value: string, locale: "ar" | "en") {
+export function formatDisplayDate(value: string, locale: "ar" | "en") {
   const candidate = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00` : value;
   const date = new Date(candidate);
   if (Number.isNaN(date.getTime())) return locale === "ar" ? "تاريخ غير متاح" : "Date unavailable";

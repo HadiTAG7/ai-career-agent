@@ -113,3 +113,16 @@ describe("resume presentation", () => {
     ]);
   });
 });
+
+describe("resume presentation trust boundary", () => {
+  it("excludes AI-extracted and rejected facts from the live projection", () => {
+    const confirmedFact = fact("skill-ok", "skill", "Financial Analysis", {});
+    const extractedFact = { ...fact("skill-ai", "skill", "Invented Skill", {}), verification_status: "extracted" as const };
+    const rejectedFact = { ...fact("skill-no", "skill", "Rejected Skill", {}), verification_status: "unconfirmed" as const };
+    const sections = factsToResumeSections("en", [confirmedFact, extractedFact, rejectedFact]);
+    const labels = sections.flatMap((section) => section.items.map((item) => item.title));
+    expect(labels).toContain("Financial Analysis");
+    expect(labels).not.toContain("Invented Skill");
+    expect(labels).not.toContain("Rejected Skill");
+  });
+});

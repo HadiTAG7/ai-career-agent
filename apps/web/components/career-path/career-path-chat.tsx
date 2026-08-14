@@ -13,7 +13,9 @@ type LoadState = "loading" | "success" | "error";
 type FailedTurn = { content: string; clientTurnId: string };
 
 function createClientTurnId() {
-  return globalThis.crypto.randomUUID();
+  // crypto.randomUUID is unavailable on non-secure origins and older Safari.
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `career-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function DeleteCareerPathDialog({

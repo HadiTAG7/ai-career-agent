@@ -7,9 +7,9 @@ export function ProgressRing({ value, size = "md", label }: { value: number; siz
       aria-label={label ?? `${value}%`}
       role="img"
       className={cn("grid shrink-0 place-items-center rounded-full", dimensions)}
-      style={{ background: `conic-gradient(#07845c ${value * 3.6}deg, #e8eef3 0deg)` }}
+      style={{ background: `conic-gradient(var(--emerald, #07845c) ${value * 3.6}deg, var(--border, #e8eef3) 0deg)` }}
     >
-      <div className="grid h-[78%] w-[78%] place-items-center rounded-full bg-white text-xl font-bold text-ink">
+      <div className="grid h-[78%] w-[78%] place-items-center rounded-full bg-background text-xl font-bold text-foreground">
         {value}%
       </div>
     </div>

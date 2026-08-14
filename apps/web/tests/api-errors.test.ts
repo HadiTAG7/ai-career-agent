@@ -136,12 +136,76 @@ describe("API authentication and HTTP errors", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(jobPayload), { status: 200, headers: { "Content-Type": "application/json" } })));
 
     const { getApplications } = await import("@/lib/api-client");
-    const { formatDemoDate, normalizeApiDate } = await import("@/lib/utils");
+    const { formatDisplayDate, normalizeApiDate } = await import("@/lib/utils");
     const applications = await getApplications();
 
     expect(applications[0].updatedAt).toBe("2026-08-06");
-    expect(formatDemoDate(applications[0].updatedAt, "en")).not.toBe("Date unavailable");
+    expect(formatDisplayDate(applications[0].updatedAt, "en")).not.toBe("Date unavailable");
     expect(normalizeApiDate("not-a-date")).toBe("");
-    expect(formatDemoDate("", "en")).toBe("Date unavailable");
+    expect(formatDisplayDate("", "en")).toBe("Date unavailable");
+  });
+});
+
+describe("error code coverage", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  // Every error code the backend emits must resolve to a translated message in both
+  // languages, never the generic fallback with a raw English server string.
+  const backendEmittedCodes = [
+    "ai_provider_not_configured", "ai_provider_unavailable",
+    "career_path_context_changed", "career_path_rate_limited", "career_path_revision_conflict",
+    "career_path_save_conflict", "career_profile_evidence_required",
+    "data_sharing_acknowledgement_required", "profile_deletion_in_progress",
+    "internal_error", "unsupported_claims",
+    "resume_ai_consent_required", "resume_ai_not_configured", "resume_ai_unavailable",
+    "resume_content_duplicate", "resume_conversation_language_change_not_allowed",
+    "resume_correction_required", "resume_draft_required", "resume_draft_revision_conflict",
+    "resume_evidence_revision_conflict", "resume_export_failed", "resume_gap_interview",
+    "resume_import_confirmed_evidence_required", "resume_import_draft_exists",
+    "resume_import_fact_mismatch", "resume_import_fact_rejected",
+    "resume_import_guided_flow_required", "resume_import_phase_conflict",
+    "resume_import_questions_incomplete", "resume_import_review_idempotency_conflict",
+    "resume_import_review_incomplete", "resume_language_change_requires_new_version",
+    "resume_quick_action_invalid", "resume_review_blocked", "resume_review_required",
+    "resume_review_stale", "resume_rewrite_not_supported", "resume_suggestion_stale",
+    "resume_text_unreadable", "resume_understanding_pending",
+    "resume_verified_translation_invalid", "resume_workspace_revision_conflict",
+    "resume_writer_consent_required", "resume_writer_evidence_required",
+    "resume_writer_not_configured", "resume_writer_unavailable",
+  ];
+
+  it("translates every backend error code in both languages", async () => {
+    const { ApiHttpError, apiErrorMessage } = await import("@/lib/api-client");
+    for (const code of backendEmittedCodes) {
+      const error = new ApiHttpError(409, "raw server text", code);
+      const arabic = apiErrorMessage(error, "ar");
+      const english = apiErrorMessage(error, "en");
+      expect(arabic, `missing ar translation for ${code}`).not.toContain("raw server text");
+      expect(english, `missing en translation for ${code}`).not.toContain("raw server text");
+      expect(arabic.length).toBeGreaterThan(5);
+      expect(english.length).toBeGreaterThan(5);
+    }
+  });
+
+  it("renders FastAPI 422 validation arrays as readable text, not raw JSON", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.test");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      detail: [
+        { type: "missing", loc: ["body", "full_name"], msg: "Field required" },
+        { type: "string_too_short", loc: ["body", "city"], msg: "String should have at least 1 character" },
+      ],
+    }), { status: 422, statusText: "Unprocessable Entity", headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { ApiHttpError, getJob } = await import("@/lib/api-client");
+    const failure = await getJob("11111111-1111-4111-8111-111111111111").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiHttpError);
+    const detail = (failure as InstanceType<typeof ApiHttpError>).detail;
+    expect(detail).toBe("full_name: Field required; city: String should have at least 1 character");
+    expect(detail).not.toContain("{");
   });
 });

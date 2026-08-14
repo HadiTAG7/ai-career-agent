@@ -23,7 +23,7 @@ import { ProgressRing } from "@/components/ui/progress-ring";
 import { evidenceFacts, profileCompletion } from "@/lib/demo-data";
 import { useLocale } from "@/lib/i18n";
 import type { EvidenceFact, EvidenceStatus } from "@/lib/types";
-import { cn, formatDemoDate } from "@/lib/utils";
+import { cn, formatDisplayDate } from "@/lib/utils";
 import {
   apiConfiguration,
   apiErrorMessage,
@@ -62,7 +62,7 @@ const categoryCopy: Record<EvidenceFact["category"], { ar: string; en: string }>
   education: { ar: "التعليم", en: "Education" },
   skill: { ar: "المهارات", en: "Skills" },
   project: { ar: "المشاريع", en: "Projects" },
-  certificate: { ar: "الشهادات", en: "Certificates" },
+  certification: { ar: "الشهادات", en: "Certificates" },
   language: { ar: "اللغات", en: "Languages" },
   achievement: { ar: "الإنجازات", en: "Achievements" },
   preference: { ar: "التفضيلات والأهلية", en: "Preferences & eligibility" },
@@ -85,7 +85,7 @@ const completionCategories = [
 function mapApiFact(fact: ApiCareerFact, source?: ApiEvidenceSource): EvidenceFact {
   const categoryMap: Record<string, EvidenceFact["category"]> = {
     experience: "experience", education: "education", skill: "skill", project: "project",
-    certification: "certificate", language: "language", achievement: "achievement",
+    certification: "certification", language: "language", achievement: "achievement",
     preference: "preference", eligibility: "eligibility", identity: "identity",
   };
   return {
@@ -102,6 +102,24 @@ function mapApiFact(fact: ApiCareerFact, source?: ApiEvidenceSource): EvidenceFa
     sourceExcerpt: fact.source_excerpt,
     extractionConfidence: fact.extraction_confidence,
   };
+}
+
+// Minimal dialog focus containment: keeps Tab cycling inside the open modal.
+function trapDialogFocus(event: React.KeyboardEvent<HTMLElement>) {
+  if (event.key !== "Tab") return;
+  const focusable = event.currentTarget.querySelectorAll<HTMLElement>(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+  );
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function isProfileManagedFact(fact: EvidenceFact) {
@@ -124,7 +142,7 @@ export default function ProfilePage() {
   const [evidenceSources, setEvidenceSources] = useState<ApiEvidenceSource[]>([]);
   const [statusFilter, setStatusFilter] = useState<FactStatusFilter>("all");
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<string | null>("fact-google-analytics");
+  const [expanded, setExpanded] = useState<string | null>(apiMode ? null : "fact-google-analytics");
   const [modalOpen, setModalOpen] = useState(false);
   const [editingFact, setEditingFact] = useState<EvidenceFact | null>(null);
   const [notice, setNotice] = useState<ProfileNotice | null>(null);
@@ -134,9 +152,21 @@ export default function ProfilePage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (!modalOpen && !editingFact) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setModalOpen(false);
+      setEditingFact(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [modalOpen, editingFact]);
+
+  useEffect(() => {
     if (new URLSearchParams(window.location.search).get("status") !== "review") return;
-    const timer = window.setTimeout(() => setStatusFilter("review"), 0);
-    return () => window.clearTimeout(timer);
+    // Query params are client-only input here; applying them after hydration is intentional.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatusFilter("review");
   }, []);
 
   useEffect(() => {
@@ -207,8 +237,26 @@ export default function ProfilePage() {
     }
   }
 
+  const MAX_IMPORT_BYTES = 10_000_000;
+  const IMPORT_EXTENSIONS = [".pdf", ".docx", ".zip"];
+
   async function handleFileSelected(file?: File) {
     if (!file) return;
+    const lowerName = file.name.toLocaleLowerCase("en");
+    if (!IMPORT_EXTENSIONS.some((extension) => lowerName.endsWith(extension))) {
+      setNotice({
+        message: locale === "ar" ? "نوع الملف غير مدعوم؛ استخدم PDF أو DOCX أو أرشيف ZIP." : "Unsupported file type; use PDF, DOCX, or a ZIP archive.",
+        tone: "warning",
+      });
+      return;
+    }
+    if (file.size > MAX_IMPORT_BYTES) {
+      setNotice({
+        message: locale === "ar" ? "حجم الملف يتجاوز 10 ميغابايت؛ صغّر الملف ثم أعد المحاولة." : "The file exceeds 10 MB; reduce its size and try again.",
+        tone: "warning",
+      });
+      return;
+    }
     if (!apiMode || !profileId) {
       setNotice({
         message: locale === "ar" ? `تم اختيار ${file.name} للمراجعة التجريبية فقط.` : `${file.name} selected for demo-only review.`,
@@ -325,7 +373,7 @@ export default function ProfilePage() {
     const detail = String(form.get("detail") ?? "").trim();
     const correctionReason = String(form.get("correctionReason") ?? "").trim();
     const rawCategory = String(form.get("category") ?? editingFact.category);
-    const category = rawCategory === "certificate" ? "certification" : rawCategory;
+    const category = rawCategory as EvidenceFact["category"];
     setSavingFact(true);
     setDialogError(null);
     try {
@@ -361,8 +409,7 @@ export default function ProfilePage() {
     setDialogError(null);
     if (apiMode && profileId) {
       try {
-        const apiCategory = rawCategory === "certificate" ? "certification" : rawCategory;
-        const createdResult = await createCareerFact(profileId, { category: apiCategory, label: title, detail });
+        const createdResult = await createCareerFact(profileId, { category, label: title, detail });
         const created = mapApiFact(createdResult.fact, createdResult.source);
         setFacts((current) => [created, ...current]);
         setModalOpen(false);
@@ -586,7 +633,7 @@ export default function ProfilePage() {
                   <div className="mb-5 grid gap-4 border-s-2 border-primary bg-surface px-4 py-5 md:grid-cols-[1fr_auto] md:items-center">
                     <div>
                       <p className="flex items-center gap-2 text-sm font-semibold"><Link2 className="h-4 w-4 text-emerald" />{locale === "ar" ? "المصدر" : "Source"}</p>
-                      <p className="mt-1 text-sm text-muted">{text(fact.source)} · {formatDemoDate(fact.updatedAt, locale)}</p>
+                      <p className="mt-1 text-sm text-muted">{text(fact.source)} · {formatDisplayDate(fact.updatedAt, locale)}</p>
                       {fact.sourceExcerpt ? <div className="mt-3 border-y border-border py-3"><p className="text-xs font-semibold text-muted">{locale === "ar" ? "النص المستخرج من المصدر" : "Source excerpt"}</p><p className="mt-1 text-sm">{fact.sourceExcerpt}</p></div> : null}
                       {fact.structuredValue && Object.keys(fact.structuredValue).length > 0 ? <div className="mt-3 border-y border-amber bg-amber-pale/40 py-3"><p className="text-xs font-semibold text-foreground">{locale === "ar" ? "قيم منظمة ستدخل في الربط بعد التأكيد" : "Structured values used for grounding after confirmation"}</p><dl className="mt-2 grid gap-2">{Object.entries(fact.structuredValue).map(([key, value]) => <div className="grid grid-cols-[120px_1fr] gap-3 text-xs" key={key}><dt className="font-semibold text-muted" dir="ltr">{key}</dt><dd className="break-words">{typeof value === "string" ? value : JSON.stringify(value)}</dd></div>)}</dl></div> : null}
                       {fact.extractionConfidence != null ? <p className="mt-2 text-xs text-muted">{locale === "ar" ? "ثقة الاستخراج" : "Extraction confidence"}: {Math.round(fact.extractionConfidence * 100)}%</p> : null}
@@ -621,13 +668,13 @@ export default function ProfilePage() {
 
       {modalOpen ? (
         <div className="fixed inset-0 z-50 grid overflow-y-auto bg-black/70 p-5 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (!savingFact && event.target === event.currentTarget) setModalOpen(false); }}>
-          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-subtle" role="dialog" aria-modal="true" aria-labelledby="add-fact-title">
+          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-subtle" role="dialog" aria-modal="true" onKeyDown={trapDialogFocus} aria-labelledby="add-fact-title">
             <div className="flex items-center justify-between">
               <h2 id="add-fact-title" className="section-title">{locale === "ar" ? "أضف حقيقة مهنية" : "Add a career fact"}</h2>
               <button className="grid h-11 w-11 place-items-center rounded-lg hover:bg-surface" disabled={savingFact} onClick={() => setModalOpen(false)} aria-label={locale === "ar" ? "إغلاق" : "Close"}><X className="h-5 w-5" /></button>
             </div>
             <form className="mt-5 space-y-4" onSubmit={handleAddFact}>
-              <label><span className="field-label">{locale === "ar" ? "الفئة" : "Category"}</span><select className="field-control" name="category" defaultValue="achievement"><option value="identity">{locale === "ar" ? "هوية مهنية" : "Professional identity"}</option><option value="experience">{locale === "ar" ? "خبرة" : "Experience"}</option><option value="education">{locale === "ar" ? "تعليم" : "Education"}</option><option value="skill">{locale === "ar" ? "مهارة" : "Skill"}</option><option value="project">{locale === "ar" ? "مشروع" : "Project"}</option><option value="certificate">{locale === "ar" ? "شهادة" : "Certificate"}</option><option value="language">{locale === "ar" ? "لغة" : "Language"}</option><option value="achievement">{locale === "ar" ? "إنجاز" : "Achievement"}</option><option value="preference">{locale === "ar" ? "تفضيل مهني" : "Career preference"}</option><option value="eligibility">{locale === "ar" ? "أهلية العمل" : "Work eligibility"}</option></select></label>
+              <label><span className="field-label">{locale === "ar" ? "الفئة" : "Category"}</span><select className="field-control" name="category" defaultValue="achievement"><option value="identity">{locale === "ar" ? "هوية مهنية" : "Professional identity"}</option><option value="experience">{locale === "ar" ? "خبرة" : "Experience"}</option><option value="education">{locale === "ar" ? "تعليم" : "Education"}</option><option value="skill">{locale === "ar" ? "مهارة" : "Skill"}</option><option value="project">{locale === "ar" ? "مشروع" : "Project"}</option><option value="certification">{locale === "ar" ? "شهادة" : "Certificate"}</option><option value="language">{locale === "ar" ? "لغة" : "Language"}</option><option value="achievement">{locale === "ar" ? "إنجاز" : "Achievement"}</option><option value="preference">{locale === "ar" ? "تفضيل مهني" : "Career preference"}</option><option value="eligibility">{locale === "ar" ? "أهلية العمل" : "Work eligibility"}</option></select></label>
               <label><span className="field-label">{locale === "ar" ? "عنوان الحقيقة" : "Fact title"}</span><input className="field-control" name="title" required autoFocus /></label>
               <label><span className="field-label">{locale === "ar" ? "التفاصيل" : "Details"}</span><textarea className="field-control min-h-28 py-3" name="detail" required /></label>
               <p className="text-xs text-muted">{locale === "ar" ? "سنسجل المصدر كإدخال مباشر منك. لا تضف معلومة لا يمكنك إثباتها." : "The source will be recorded as direct user input. Do not add information you cannot support."}</p>
@@ -640,11 +687,11 @@ export default function ProfilePage() {
 
       {editingFact ? (
         <div className="fixed inset-0 z-50 grid overflow-y-auto bg-black/70 p-5 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (!savingFact && event.target === event.currentTarget) setEditingFact(null); }}>
-          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-subtle" role="dialog" aria-modal="true" aria-labelledby="edit-fact-title">
+          <section className="my-auto max-h-[calc(100vh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-subtle" role="dialog" aria-modal="true" onKeyDown={trapDialogFocus} aria-labelledby="edit-fact-title">
             <div className="flex items-center justify-between"><h2 id="edit-fact-title" className="section-title">{locale === "ar" ? "صحّح الحقيقة" : "Correct fact"}</h2><button className="grid h-11 w-11 place-items-center rounded-lg hover:bg-surface" disabled={savingFact} onClick={() => setEditingFact(null)} aria-label={locale === "ar" ? "إغلاق" : "Close"}><X className="h-5 w-5" /></button></div>
             <p className="mt-2 text-sm text-muted">{locale === "ar" ? "أي تعديل يسحب التأكيد ويبطل تحليلات أو مستندات اعتمدت على النسخة السابقة حتى تراجعها مجددًا." : "Any edit withdraws confirmation and invalidates analyses or documents grounded in the previous version until you review it again."}</p>
             <form className="mt-5 space-y-4" onSubmit={handleEditFact}>
-              <label><span className="field-label">{locale === "ar" ? "الفئة الصحيحة" : "Correct category"}</span><select className="field-control" name="category" defaultValue={editingFact.category}><option value="identity">{locale === "ar" ? "هوية مهنية" : "Professional identity"}</option><option value="experience">{locale === "ar" ? "خبرة" : "Experience"}</option><option value="education">{locale === "ar" ? "تعليم" : "Education"}</option><option value="skill">{locale === "ar" ? "مهارة" : "Skill"}</option><option value="project">{locale === "ar" ? "مشروع" : "Project"}</option><option value="certificate">{locale === "ar" ? "شهادة" : "Certificate"}</option><option value="language">{locale === "ar" ? "لغة" : "Language"}</option><option value="achievement">{locale === "ar" ? "إنجاز" : "Achievement"}</option><option value="preference">{locale === "ar" ? "تفضيل مهني" : "Career preference"}</option><option value="eligibility">{locale === "ar" ? "أهلية العمل" : "Work eligibility"}</option></select></label>
+              <label><span className="field-label">{locale === "ar" ? "الفئة الصحيحة" : "Correct category"}</span><select className="field-control" name="category" defaultValue={editingFact.category}><option value="identity">{locale === "ar" ? "هوية مهنية" : "Professional identity"}</option><option value="experience">{locale === "ar" ? "خبرة" : "Experience"}</option><option value="education">{locale === "ar" ? "تعليم" : "Education"}</option><option value="skill">{locale === "ar" ? "مهارة" : "Skill"}</option><option value="project">{locale === "ar" ? "مشروع" : "Project"}</option><option value="certification">{locale === "ar" ? "شهادة" : "Certificate"}</option><option value="language">{locale === "ar" ? "لغة" : "Language"}</option><option value="achievement">{locale === "ar" ? "إنجاز" : "Achievement"}</option><option value="preference">{locale === "ar" ? "تفضيل مهني" : "Career preference"}</option><option value="eligibility">{locale === "ar" ? "أهلية العمل" : "Work eligibility"}</option></select></label>
               <label><span className="field-label">{locale === "ar" ? "العنوان الصحيح" : "Correct title"}</span><input className="field-control" name="label" required defaultValue={text(editingFact.title)} autoFocus /></label>
               <label><span className="field-label">{locale === "ar" ? "التفاصيل الصحيحة" : "Correct details"}</span><textarea className="field-control min-h-28 py-3" name="detail" required defaultValue={text(editingFact.detail)} /></label>
               <label><span className="field-label">{locale === "ar" ? "سبب التصحيح" : "Correction reason"}</span><textarea className="field-control min-h-20 py-3" name="correctionReason" required minLength={3} placeholder={locale === "ar" ? "مثال: التاريخ المستخرج غير صحيح" : "e.g. The extracted date was incorrect"} /></label>

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Bell, Lightbulb, Menu, X } from "lucide-react";
+import { Lightbulb, Menu, X } from "lucide-react";
 import { AccountControl } from "@/components/auth/account-control";
 import { authConfiguration } from "@/components/auth/auth-gate";
 import { Brand } from "@/components/layout/brand";
@@ -21,19 +21,6 @@ import { useLocale } from "@/lib/i18n";
 import type { LocalizedText } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-function NotificationButton({ label }: { label: string }) {
-  return (
-    <button
-      className="relative grid h-11 w-11 shrink-0 place-items-center text-secondary-foreground transition-colors hover:text-primary-text"
-      type="button"
-      aria-label={label}
-    >
-      <Bell className="h-5 w-5" strokeWidth={1.7} aria-hidden="true" />
-      <span className="absolute end-2.5 top-2.5 h-2 w-2 rounded-full bg-primary" aria-hidden="true" />
-    </button>
-  );
-}
-
 function ChapterLink({
   item,
   active,
@@ -49,7 +36,7 @@ function ChapterLink({
     <Link
       href={item.href}
       className={cn(
-        "group relative flex min-h-14 w-full items-baseline gap-2 border-l-2 px-4 py-3 text-start transition-colors",
+        "group relative flex min-h-14 w-full items-baseline gap-2 border-s-2 px-4 py-3 text-start transition-colors",
         active
           ? "border-primary text-foreground"
           : "border-transparent text-muted hover:border-control/60 hover:text-secondary-foreground",
@@ -109,7 +96,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <aside
-        className="fixed inset-y-0 right-0 z-40 hidden w-[244px] flex-col border-l border-border bg-background shell:flex"
+        className="fixed inset-y-0 start-0 z-40 hidden w-[244px] flex-col border-e border-border bg-background shell:flex"
         aria-label={primaryNavigationLabel}
       >
         <div className="flex h-16 shrink-0 items-center border-b border-border px-7">
@@ -131,7 +118,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      <div className="shell:pr-[244px]">
+      <div className="shell:ps-[244px]">
         <header className="sticky top-0 z-30 hidden h-16 items-center justify-between border-b border-border bg-background px-7 shell:flex">
           <div className="flex min-w-0 items-center gap-2">
             <LanguageSwitch />
@@ -144,7 +131,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             ) : null}
           </div>
           <div className="flex min-w-0 items-center gap-3">
-            <NotificationButton label={locale === "ar" ? "الإشعارات" : "Notifications"} />
             <div className="min-w-0 [&>div>span:first-child]:border [&>div>span:first-child]:border-primary/70 [&>div>span:first-child]:bg-transparent [&>div>span:first-child]:text-foreground">
               <AccountControl />
             </div>

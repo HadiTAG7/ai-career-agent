@@ -123,7 +123,7 @@ export default function JobsPage() {
                 </div>
                 <p className="mt-3 flex flex-wrap items-center gap-1 text-xs text-muted">
                   <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
-                  {text(job.location)} · {text(job.employmentType)}
+                  {text(job.location)}{job.employmentType ? ` · ${text(job.employmentType)}` : null}
                 </p>
               </div>
               <div>

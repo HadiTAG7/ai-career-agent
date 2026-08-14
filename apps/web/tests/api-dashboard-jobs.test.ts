@@ -73,7 +73,7 @@ describe("jobs and dashboard API mapping", () => {
     expect(result.map((item) => item.id)).toEqual(["job-1", "job-2"]);
     expect(result[0]).toMatchObject({ analysisId: "analysis-1", coverage: 74, recommendation: "improve_then_apply" });
     expect(result[1].analysisId).toBeUndefined();
-    expect(result[1].freshness.en).toBe("Added 2026-08-06");
+    expect(result[1].freshness.en).toBe("Added 6 Aug 2026");
   });
 
   it("does not swallow a latest-analysis server error", async () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, BriefcaseBusiness, CalendarDays, ChevronLeft, FileText, LoaderCircle, MapPin, Plus, RotateCcw } from "lucide-react";
 import { DemoNotice } from "@/components/ui/demo-notice";
 import { demoApplications } from "@/lib/demo-data";
@@ -9,7 +9,7 @@ import { apiConfiguration, apiErrorMessage, getApplications, updateApplication }
 import { useLocale } from "@/lib/i18n";
 import { readApplications, updateApplicationStage } from "@/lib/local-store";
 import type { Application, ApplicationStage } from "@/lib/types";
-import { cn, formatDemoDate } from "@/lib/utils";
+import { cn, formatDisplayDate } from "@/lib/utils";
 
 const stageCopy: Record<ApplicationStage, { ar: string; en: string }> = {
   discovered: { ar: "مكتشفة", en: "Discovered" },
@@ -36,7 +36,10 @@ export default function ApplicationsPage() {
   const [applications, setApplications] = useState<Application[]>(apiConfiguration.baseUrl ? [] : demoApplications);
   const [filter, setFilter] = useState<"all" | ApplicationStage>("all");
   const [notice, setNotice] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // Raw error kept in state and formatted at render time so switching the UI language
+  // does not refetch and wipe optimistic stage updates.
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const noticeTimerRef = useRef<number | null>(null);
   const [loadState, setLoadState] = useState<"loading" | "success" | "error">(apiConfiguration.baseUrl ? "loading" : "success");
   const [retryKey, setRetryKey] = useState(0);
 
@@ -51,14 +54,18 @@ export default function ApplicationsPage() {
         }
       } catch (error) {
         if (active) {
-          setLoadError(apiErrorMessage(error, locale));
+          setLoadError(error);
           setLoadState("error");
         }
       }
     }
     void load();
     return () => { active = false; };
-  }, [locale, retryKey]);
+  }, [retryKey]);
+
+  useEffect(() => () => {
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+  }, []);
 
   function retryLoad() {
     setLoadError(null);
@@ -80,7 +87,8 @@ export default function ApplicationsPage() {
     } catch (error) {
       setNotice(apiErrorMessage(error, locale));
     }
-    window.setTimeout(() => setNotice(null), 2400);
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), 2400);
   }
 
   return (
@@ -95,12 +103,12 @@ export default function ApplicationsPage() {
         <Link href="/jobs/new" className="inline-flex min-h-[52px] items-center justify-center gap-2 bg-primary px-6 font-semibold text-primary-foreground hover:bg-primary-hover"><Plus className="h-5 w-5" />{locale === "ar" ? "أضف فرصة" : "Add opportunity"}</Link>
       </header>
 
-      <div className="overflow-x-auto border-b border-border" role="tablist" aria-label={locale === "ar" ? "تصفية التقديمات" : "Filter applications"}>
+      <div className="overflow-x-auto border-b border-border" role="group" aria-label={locale === "ar" ? "تصفية التقديمات" : "Filter applications"}>
         <div className="flex min-w-max gap-2">
           {filterGroups.map((item) => {
             const count = item.key === "all" ? applications.length : applications.filter((application) => application.stage === item.key).length;
             return (
-              <button key={item.key} type="button" role="tab" aria-selected={filter === item.key} onClick={() => setFilter(item.key)} className={cn("relative min-h-14 px-4 text-sm font-semibold", filter === item.key ? "text-foreground" : "text-muted hover:text-foreground")}>
+              <button key={item.key} type="button" aria-pressed={filter === item.key} onClick={() => setFilter(item.key)} className={cn("relative min-h-14 px-4 text-sm font-semibold", filter === item.key ? "text-foreground" : "text-muted hover:text-foreground")}>
                 {locale === "ar" ? item.ar : item.en} <span className="ms-1 text-xs tabular-nums">({count})</span>
                 {filter === item.key ? <span className="absolute inset-x-1 bottom-0 h-0.5 bg-primary" /> : null}
               </button>
@@ -111,7 +119,7 @@ export default function ApplicationsPage() {
 
       {apiConfiguration.baseUrl ? <p className="border-b border-primary/45 py-4 text-sm text-muted" role="note"><strong className="text-primary-text">{locale === "ar" ? "قيد الربط: " : "Connection pending: "}</strong>{locale === "ar" ? "مرحلتا «جاهزة» وما بعد الإرسال معطلتان حتى يُربط تدفق حزمة CV الموثقة والمراجعة. لن نسجل تقديمًا لا يملك مستندًا صالحًا." : "Ready and post-submission stages are disabled until the reviewed, evidence-backed CV package flow is connected. We will not record an application without a valid document."}</p> : null}
 
-      <section className="mt-7" aria-live="polite" aria-label={locale === "ar" ? "التقديمات" : "Applications"}>
+      <section className="mt-7" aria-label={locale === "ar" ? "التقديمات" : "Applications"}>
         <div className="hidden grid-cols-[minmax(220px,1.2fr)_160px_minmax(190px,1fr)_170px_44px] gap-5 border-y border-border px-3 py-3 text-xs font-medium text-muted lg:grid">
           <span>{locale === "ar" ? "الفرصة" : "Opportunity"}</span>
           <span>{locale === "ar" ? "الحالة" : "Stage"}</span>
@@ -121,7 +129,7 @@ export default function ApplicationsPage() {
         </div>
 
         {loadState === "loading" ? <div className="flex min-h-40 items-center justify-center gap-3 border-b border-border text-sm text-muted" role="status"><LoaderCircle className="h-5 w-5 animate-spin text-primary-text" />{locale === "ar" ? "جارٍ تحميل التقديمات…" : "Loading applications…"}</div> : null}
-        {loadState === "error" && loadError ? <div className="border-b border-danger py-5 text-sm" role="alert"><p className="flex items-start gap-2 text-danger"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{loadError}</p><button type="button" className="mt-3 inline-flex min-h-11 items-center gap-2 border border-danger px-4 font-semibold text-danger hover:text-foreground" onClick={retryLoad}><RotateCcw className="h-4 w-4" />{locale === "ar" ? "إعادة المحاولة" : "Try again"}</button></div> : null}
+        {loadState === "error" && loadError != null ? <div className="border-b border-danger py-5 text-sm" role="alert"><p className="flex items-start gap-2 text-danger"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{apiErrorMessage(loadError, locale)}</p><button type="button" className="mt-3 inline-flex min-h-11 items-center gap-2 border border-danger px-4 font-semibold text-danger hover:text-foreground" onClick={retryLoad}><RotateCcw className="h-4 w-4" />{locale === "ar" ? "إعادة المحاولة" : "Try again"}</button></div> : null}
 
         {loadState === "success" ? visibleApplications.map((application) => (
           <article className="grid gap-5 border-b border-border px-3 py-5 lg:grid-cols-[minmax(220px,1.2fr)_160px_minmax(190px,1fr)_170px_44px] lg:items-center" key={application.id}>
@@ -136,7 +144,7 @@ export default function ApplicationsPage() {
                 {Object.entries(stageCopy).map(([key, label]) => <option value={key} key={key} disabled={Boolean(apiConfiguration.baseUrl) && ["ready", "applied", "interview", "rejected", "offer"].includes(key)}>{text(label)}</option>)}
               </select>
             </label>
-            <div><p className="text-sm font-semibold text-foreground">{text(application.nextAction)}</p><p className="mt-1 flex items-center gap-1 text-xs text-muted"><CalendarDays className="h-3.5 w-3.5" />{formatDemoDate(application.updatedAt, locale)}</p></div>
+            <div><p className="text-sm font-semibold text-foreground">{text(application.nextAction)}</p><p className="mt-1 flex items-center gap-1 text-xs text-muted"><CalendarDays className="h-3.5 w-3.5" />{formatDisplayDate(application.updatedAt, locale)}</p></div>
             <div className="flex items-center gap-2 text-sm text-muted"><FileText className="h-4 w-4" />{application.documentVersion}</div>
             <Link href={`/jobs/${application.jobId}`} className="grid h-11 w-11 place-items-center text-muted hover:text-primary-text" aria-label={locale === "ar" ? "فتح تحليل الوظيفة" : "Open job analysis"}><ChevronLeft className="h-5 w-5 rtl:rotate-0 ltr:rotate-180" /></Link>
           </article>
