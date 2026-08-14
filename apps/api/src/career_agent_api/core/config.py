@@ -98,13 +98,15 @@ class Settings(BaseSettings):
                 )
                 if not provider_api_key:
                     raise ValueError(
-                        f"{provider_key_name} is required when "
-                        f"AI_PROVIDER={self.ai_provider} in production"
+                        f"{provider_key_name} is required when AI_PROVIDER={self.ai_provider} "
+                        "in production. On Render it is declared with sync:false, so set the "
+                        "secret in the service's Environment tab before deploying."
                     )
                 if not self.ai_safety_salt:
                     raise ValueError(
                         "AI_SAFETY_SALT is required when an external AI provider is enabled "
-                        "in production"
+                        "in production. On Render it is declared with sync:false, so set the "
+                        "secret in the service's Environment tab before deploying."
                     )
         return self
 

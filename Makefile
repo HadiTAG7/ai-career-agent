@@ -1,8 +1,8 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help config up dev down restart ps logs api-logs web-logs worker-logs \
-	api-install api-lint api-test api-migrate web-install web-lint web-typecheck \
-	web-test web-build check
+.PHONY: help config up dev down restart ps logs api-logs web-logs \
+	api-install api-lint api-test api-migrate api-migration-check web-install web-lint \
+	web-typecheck web-test web-build check
 
 help: ## Show available commands
 	@echo "AI Career Agent commands"
@@ -43,9 +43,6 @@ api-logs:
 web-logs:
 	docker compose logs --follow --tail=200 web
 
-worker-logs:
-	docker compose logs --follow --tail=200 worker
-
 api-install: ## Install API and development dependencies in the active Python environment
 	python -m pip install -e "./apps/api[dev]"
 
@@ -57,6 +54,12 @@ api-test:
 
 api-migrate: ## Apply database migrations inside the API container
 	docker compose exec api alembic upgrade head
+
+api-migration-check: ## Verify migrations apply, match models, and roll back on SQLite
+	cd apps/api && ENVIRONMENT=test DATABASE_URL="sqlite+aiosqlite:///./ci-migration.db" AUTO_CREATE_SCHEMA=false alembic upgrade head
+	cd apps/api && ENVIRONMENT=test DATABASE_URL="sqlite+aiosqlite:///./ci-migration.db" AUTO_CREATE_SCHEMA=false alembic check
+	cd apps/api && ENVIRONMENT=test DATABASE_URL="sqlite+aiosqlite:///./ci-migration.db" AUTO_CREATE_SCHEMA=false alembic downgrade base
+	rm -f apps/api/ci-migration.db
 
 web-install: ## Install exact frontend dependencies
 	npm --prefix apps/web ci
@@ -73,4 +76,6 @@ web-test:
 web-build:
 	npm --prefix apps/web run build
 
-check: api-lint api-test web-lint web-typecheck web-test web-build ## Run the same checks as CI
+# Mirrors the blocking CI jobs; the advisory audit/typecheck steps and the container
+# smoke test still run only in CI.
+check: api-lint api-test api-migration-check web-lint web-typecheck web-test web-build ## Run the blocking CI checks

@@ -31,6 +31,10 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
       - name: Lint
         run: python -m ruff check .
+      - name: Typecheck (advisory)
+        # Advisory until the existing findings are burned down; it must not block PRs yet.
+        continue-on-error: true
+        run: python -m pip install mypy && python -m mypy src --ignore-missing-imports --no-strict-optional
       - name: Test
         run: python -m pytest
       - name: Apply migrations to an empty database
@@ -56,8 +60,6 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - name: Install exact dependencies
         run: npm ci
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
       - name: Lint
         run: npm run lint
       - name: Typecheck
@@ -68,6 +70,26 @@ jobs:
         env:
           NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
         run: npm run build
+
+  audit:
+    name: Dependency audit (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # New advisories in the transitive tree must stay visible without turning
+    # unrelated PRs red; this job is intentionally non-blocking.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
   compose:
     name: Container smoke test

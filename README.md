@@ -64,7 +64,6 @@ docker compose ps
 | Web | <http://localhost:3000> | <http://localhost:3000/api/health> |
 | API / OpenAPI | <http://localhost:8000/docs> | <http://localhost:8000/health/ready> |
 | PostgreSQL | `127.0.0.1:5432` | Docker healthcheck |
-| Redis / Celery | `127.0.0.1:6379` | Docker healthcheck / worker ping |
 
 أوقف الخدمات مع الاحتفاظ بالبيانات:
 
@@ -81,13 +80,20 @@ make logs     # follow all logs
 make check    # backend lint/tests + frontend lint/build
 ```
 
-للتطوير اليدوي مع PostgreSQL وRedis عبر Docker، يتطلب الـAPI Python 3.12+،
-وتتطلب الواجهة Node.js 22:
+للتطوير اليدوي مع PostgreSQL عبر Docker، يتطلب الـAPI Python 3.12+،
+وتتطلب الواجهة Node.js 22. شغّل الـAPI من داخل `apps/api` حتى يقرأ ملف
+`apps/api/.env` الصحيح:
 
 ```powershell
-docker compose up --detach postgres redis
-python -m pip install -e ".\apps\api[dev]"
-python -m uvicorn career_agent_api.main:app --app-dir apps/api/src --reload
+docker compose up --detach postgres
+python -m pip install -e "./apps/api[dev]"
+cd apps/api
+python -m uvicorn career_agent_api.main:app --app-dir src --reload
+```
+
+وفي جلسة أخرى:
+
+```powershell
 npm --prefix apps/web ci
 npm --prefix apps/web run dev
 ```
@@ -98,15 +104,12 @@ npm --prefix apps/web run dev
 |---|---|
 | `apps/web` | Next.js + TypeScript + Tailwind، واجهة عربية/إنجليزية RTL/LTR |
 | `apps/api` | FastAPI، عقود المجال، PostgreSQL/Alembic، وفحوص الثقة |
-| `worker` | أساس Celery ومهمة health؛ نقل الاستيراد/التوليد إليه بوابة قبل الـbeta |
-| `redis` | وسيط Celery ونتائج المهام؛ ليس مصدر الحقيقة |
 | `postgres` | مصدر الحقيقة للملف والأدلة والوظائف والمستندات والنتائج |
 
-اخترنا **Celery + Redis** للـMVP لأن الفريق صغير، والباك Python، والمهام
-الحالية قصيرة وقابلة لإعادة المحاولة، مع حفظ حالة العمل الأساسية في
-PostgreSQL. هذا أقل عبئًا تشغيليًا من Temporal الآن. نعيد تقييم Temporal إذا
-ظهرت تدفقات طويلة جدًا أو انتظار بشري أو حاجة قوية إلى replay/durable
-orchestration.
+كل المعالجة الحالية متزامنة داخل الـAPI (مع threadpool للمهام الثقيلة مثل
+تحليل الملفات وتوليد PDF). يبقى `apps/api/src/career_agent_api/worker.py`
+أساسًا لـCelery إذا احتجنا مهام خلفية قبل الـbeta؛ عندها نعيد Redis/worker
+إلى Compose ونقيّم Temporal إذا ظهرت تدفقات طويلة أو انتظار بشري.
 
 راجع [متطلبات المنتج واستراتيجية السوق](docs/product-requirements-market-strategy.md)،
 [بنية النظام](docs/architecture.md)، [عقود المنتج](docs/product-contracts.md)،
