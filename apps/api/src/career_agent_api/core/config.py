@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     app_name: str = "AI Career Agent API"
     environment: Literal["development", "test", "production"] = "development"
+    log_level: str = "INFO"
     # Explicit opt-in for header-based identity in local development. Without it the API
     # refuses unauthenticated requests even outside production.
     dev_auth_bypass: bool = False

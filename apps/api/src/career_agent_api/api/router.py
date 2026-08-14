@@ -34,6 +34,8 @@ from career_agent_api.models.domain import (
     MatchAnalysis,
     Outcome,
     RequirementMatch,
+    ResumeDraftVersion,
+    ResumeMessage,
     ResumeWorkspace,
     SourcePolicy,
 )
@@ -2684,6 +2686,25 @@ async def delete_my_data(
     )
     await session.execute(delete(CareerFact).where(CareerFact.id.in_(fact_ids)))
     await session.execute(delete(EvidenceSource).where(EvidenceSource.id.in_(source_ids)))
+    # Resume workspace rows are deleted explicitly rather than via FK cascades so the
+    # receipt reflects what actually happened on every backend, SQLite included.
+    if resume_workspace:
+        await session.execute(
+            delete(ResumeMessage).where(ResumeMessage.workspace_id == resume_workspace.id)
+        )
+        await session.execute(
+            update(ResumeDraftVersion)
+            .where(ResumeDraftVersion.workspace_id == resume_workspace.id)
+            .values(base_version_id=None)
+        )
+        await session.execute(
+            delete(ResumeDraftVersion).where(
+                ResumeDraftVersion.workspace_id == resume_workspace.id
+            )
+        )
+        await session.execute(
+            delete(ResumeWorkspace).where(ResumeWorkspace.id == resume_workspace.id)
+        )
     if profile:
         await session.execute(delete(CareerProfile).where(CareerProfile.id == profile.id))
 

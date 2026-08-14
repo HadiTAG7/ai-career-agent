@@ -61,6 +61,7 @@ from career_agent_api.schemas.api import (
     ResumeVerifiedSupplementalTranslation,
     ResumeWorkspaceRead,
     ResumeWorkspaceStartCreate,
+    sanitize_structured_evidence,
 )
 from career_agent_api.services.resume_assessment import (
     ResumeAssessmentGap,
@@ -1203,6 +1204,19 @@ def _enrich_fact_from_confirmed_gap(
     fact.user_corrected_at = confirmed_at
 
 
+async def _invalidate_profile_match_analyses(
+    session: AsyncSession, *, profile_id: UUID, changed_at: datetime, reason: str
+) -> None:
+    await session.execute(
+        update(MatchAnalysis)
+        .where(
+            MatchAnalysis.profile_id == profile_id,
+            MatchAnalysis.invalidated_at.is_(None),
+        )
+        .values(invalidated_at=changed_at, invalidation_reason=reason)
+    )
+
+
 async def _invalidate_enriched_fact_dependents(
     session: AsyncSession,
     *,
@@ -1235,16 +1249,11 @@ async def _invalidate_enriched_fact_dependents(
                 evidence_revision_at_review=None,
             )
         )
-    await session.execute(
-        update(MatchAnalysis)
-        .where(
-            MatchAnalysis.profile_id == workspace.profile_id,
-            MatchAnalysis.invalidated_at.is_(None),
-        )
-        .values(
-            invalidated_at=changed_at,
-            invalidation_reason="Confirmed resume gap enriched professional evidence",
-        )
+    await _invalidate_profile_match_analyses(
+        session,
+        profile_id=workspace.profile_id,
+        changed_at=changed_at,
+        reason="Confirmed resume gap enriched professional evidence",
     )
     workspace.pending_suggestion = None
     if workspace.current_draft and workspace.stage in {
@@ -1358,6 +1367,22 @@ def _record_category(record: dict[str, Any], fallback: str) -> FactCategory:
     except ValueError:
         category = FactCategory.ACHIEVEMENT
     return category if category in PROFESSIONAL_CATEGORIES else FactCategory.ACHIEVEMENT
+
+
+def _record_text_grounded(record: dict[str, Any], *confirmed_texts: str) -> bool:
+    """True when every substantive text field of a model-proposed record appears verbatim
+    in text the user actually wrote or confirmed."""
+    haystack = " ".join(confirmed_texts).casefold()
+    values = [
+        value.strip()
+        for key, value in record.items()
+        if key not in {"source", "category", "record_type", "kind"}
+        and isinstance(value, str)
+        and value.strip()
+    ]
+    if not values:
+        return False
+    return all(value.casefold() in haystack for value in values)
 
 
 def _record_label(record: dict[str, Any], fallback: str) -> str:
@@ -2581,7 +2606,13 @@ async def send_resume_message(
                 understanding = str(understanding_payload.get("summary") or "").strip()
             else:
                 understanding = str(understanding_payload or "").strip()
-            proposed_records = _dump(getattr(result, "proposed_records", []))
+            # Provider records are model output: strip reserved keys and stamp their
+            # origin so confirmation cannot mistake them for user-grounded records.
+            proposed_records = [
+                {**sanitize_structured_evidence(record), "source": "provider"}
+                for record in _dump(getattr(result, "proposed_records", []))
+                if isinstance(record, dict)
+            ]
             next_question = _dump(getattr(result, "next_question", None))
             draft_patch = _dump(getattr(result, "draft_patch", None))
             ready_to_generate = bool(getattr(result, "ready_to_generate", False))
@@ -2773,7 +2804,7 @@ async def confirm_resume_understanding(
     if records:
         source = await _manual_source(session, profile_id)
         for raw_record in records[:12]:
-            record = (
+            record = sanitize_structured_evidence(
                 dict(raw_record) if isinstance(raw_record, dict) else {"label": str(raw_record)}
             )
             category = _record_category(
@@ -2781,6 +2812,12 @@ async def confirm_resume_understanding(
             )
             label = _record_label(record, text)
             detail = _record_detail(record, text)
+            # The user confirmed a prose summary, not the structured records. Records whose
+            # text is the user's own words stay confirmed; anything the model invented beyond
+            # that goes through the normal review queue before it can feed matching or export.
+            grounded = record.get("source") in {"conversation", "user_correction"} or (
+                _record_text_grounded(record, confirmed_answer, text)
+            )
             fact = CareerFact(
                 profile_id=profile_id,
                 source_id=source.id,
@@ -2789,9 +2826,11 @@ async def confirm_resume_understanding(
                 detail=detail,
                 structured_value={**record, "record_version": "resume-records-v2"},
                 source_excerpt=text[:10_000],
-                verification_status=VerificationStatus.CONFIRMED,
-                extraction_confidence=1.0,
-                confirmed_at=now,
+                verification_status=(
+                    VerificationStatus.CONFIRMED if grounded else VerificationStatus.EXTRACTED
+                ),
+                extraction_confidence=1.0 if grounded else None,
+                confirmed_at=now if grounded else None,
                 original_extraction=record,
             )
             session.add(fact)
@@ -2806,6 +2845,17 @@ async def confirm_resume_understanding(
             workspace=workspace,
             fact_id=enriched_fact.id,
             changed_at=now,
+        )
+    elif any(
+        fact.verification_status is VerificationStatus.CONFIRMED for fact in created_facts
+    ):
+        # New confirmed evidence changes matching inputs the same way an enrichment does;
+        # stale analyses must not keep presenting pre-change coverage as current.
+        await _invalidate_profile_match_analyses(
+            session,
+            profile_id=workspace.profile_id,
+            changed_at=now,
+            reason="New confirmed professional evidence was added",
         )
 
     await session.flush()

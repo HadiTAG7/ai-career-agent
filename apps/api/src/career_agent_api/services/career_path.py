@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from career_agent_api.schemas.api import (
     CareerPathGeneratedReply,
     CareerPathSuggestionRead,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_MESSAGES = 12
 CONSENT_VERSION = "2026-08-07-v2"
@@ -180,9 +183,14 @@ class OpenAICareerPathProvider(CareerPathProvider):
                     safety_identifier=context.safety_identifier,
                     store=False,
                 )
-        except Exception:
-            # Provider bodies and prompts are intentionally never logged or returned.
-            pass
+        except Exception as exc:
+            # Provider bodies and prompts are intentionally never logged or returned;
+            # the exception class and status code are safe and needed for diagnosis.
+            logger.warning(
+                "Career path provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
 
         if response is None:
             raise CareerPathProviderError("Career path provider request failed")
@@ -238,9 +246,14 @@ class MistralCareerPathProvider(CareerPathProvider):
                         },
                     },
                 )
-        except Exception:
-            # Provider bodies and prompts are intentionally never logged or returned.
-            pass
+        except Exception as exc:
+            # Provider bodies and prompts are intentionally never logged or returned;
+            # the exception class and status code are safe and needed for diagnosis.
+            logger.warning(
+                "Career path provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
 
         if response is None:
             raise CareerPathProviderError("Career path provider request failed")

@@ -551,6 +551,27 @@ class ResumeWorkspaceRead(ORMModel):
     updated_at: datetime
 
 
+RESERVED_STRUCTURED_KEY = "profile_field"
+
+
+def has_reserved_structured_keys(value: dict[str, Any]) -> bool:
+    return RESERVED_STRUCTURED_KEY in value or any(key.startswith("_") for key in value)
+
+
+def sanitize_structured_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys reserved for internal use before storing model-proposed records.
+
+    User-submitted facts are rejected outright by the schema validators below; records
+    that arrive from an AI provider cannot be rejected mid-flow, so the reserved keys
+    are stripped instead.
+    """
+    return {
+        key: item
+        for key, item in record.items()
+        if key != RESERVED_STRUCTURED_KEY and not key.startswith("_")
+    }
+
+
 class CareerFactCreate(BaseModel):
     source_id: UUID
     category: FactCategory
@@ -563,7 +584,7 @@ class CareerFactCreate(BaseModel):
     @field_validator("structured_value")
     @classmethod
     def reject_reserved_structured_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
-        if "profile_field" in value or any(key.startswith("_") for key in value):
+        if has_reserved_structured_keys(value):
             raise ValueError("Reserved structured evidence key")
         return value
 
@@ -580,7 +601,7 @@ class CareerFactUpdate(BaseModel):
     @field_validator("structured_value")
     @classmethod
     def reject_reserved_structured_keys(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        if value and ("profile_field" in value or any(key.startswith("_") for key in value)):
+        if value and has_reserved_structured_keys(value):
             raise ValueError("Reserved structured evidence key")
         return value
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from career_agent_api.services.imports import (
     _facts_from_cv_text,
     _unsafe_skill_attribution,
 )
+
+logger = logging.getLogger(__name__)
 
 MISTRAL_API_BASE_URL = "https://api.mistral.ai/v1"
 MAX_RESUME_SEGMENTS = 400
@@ -2555,9 +2558,14 @@ class OpenAIResumeIntakeProvider(ResumeIntakeProvider):
                     max_output_tokens=RESUME_MAX_OUTPUT_TOKENS,
                     store=False,
                 )
-        except Exception:
-            # Provider response bodies, document text, and prompts are intentionally not retained.
-            pass
+        except Exception as exc:
+            # Provider response bodies, document text, and prompts are intentionally not
+            # retained; the exception class and status code are safe and aid diagnosis.
+            logger.warning(
+                "Resume intake provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
 
         if response is None:
             raise ResumeIntakeProviderError("Resume intake provider request failed")
@@ -2606,9 +2614,14 @@ class MistralResumeIntakeProvider(ResumeIntakeProvider):
                         },
                     },
                 )
-        except Exception:
-            # Provider response bodies, document text, and prompts are intentionally not retained.
-            pass
+        except Exception as exc:
+            # Provider response bodies, document text, and prompts are intentionally not
+            # retained; the exception class and status code are safe and aid diagnosis.
+            logger.warning(
+                "Resume intake provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
 
         if response is None:
             raise ResumeIntakeProviderError("Resume intake provider request failed")

@@ -335,7 +335,7 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
         f"{base}/messages",
         headers=headers,
         json={
-            "content": "حللت المبيعات باستخدام Power BI",
+            "content": "عملت محلل بيانات في شركة تجريبية وحللت المبيعات باستخدام Power BI",
             "client_turn_id": client_turn_id,
             "expected_revision": 0,
         },
@@ -2864,7 +2864,10 @@ async def test_confirmed_import_answer_filters_only_resolved_remaining_gaps(
         f"/v1/profiles/{profile['id']}/resume-workspace/messages",
         headers=headers,
         json={
-            "content": "I work as a finance analyst and speak English fluently.",
+            "content": (
+                "I work as a Finance Analyst at Harbor Company, 2025 - Present, "
+                "and speak English fluently."
+            ),
             "client_turn_id": str(uuid4()),
             "expected_revision": workspace["revision"],
         },
@@ -4281,3 +4284,107 @@ async def test_restore_recovers_version_bound_translation_and_patch_cannot_forge
         restored.json()["provider_metadata"]["verified_supplemental_translations"]
         == original_bundle
     )
+
+
+async def test_ungrounded_provider_records_are_not_auto_confirmed(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def inventive_turn(**kwargs: object) -> SimpleNamespace:
+        stub_provider.adaptive_calls.append(kwargs)
+        return SimpleNamespace(
+            understanding="فهمت إجابتك.",
+            proposed_records=[
+                {
+                    "record_type": "experience",
+                    "title": "Senior Growth Director",
+                    "organization": "Invented Global Corp",
+                    "profile_field": "full_name",
+                    "_internal": "escalate",
+                }
+            ],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(stub_provider, "generate_adaptive_turn", inventive_turn)
+    profile, _ = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "ar", "data_sharing_acknowledged": True},
+    )
+    answered = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "عملت في خدمة العملاء لمدة سنة",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    pending = answered.json()["pending_understanding"]
+    confirmed = await client.post(
+        f"{base}/understandings/{pending['id']}/confirm",
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    facts = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    created = next(fact for fact in facts if fact["label"] == "Senior Growth Director")
+    # The user confirmed only a prose summary; invented structure must pass profile review
+    # before it can feed matching, generation, or export.
+    assert created["verification_status"] == "extracted"
+    assert created["extraction_confidence"] is None
+    assert created["confirmed_at"] is None
+    assert "profile_field" not in created["structured_value"]
+    assert "_internal" not in created["structured_value"]
+    assert created["structured_value"]["source"] == "provider"
+
+
+async def test_delete_my_data_removes_resume_workspace_rows(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _ = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "ar", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+    answered = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "عملت محلل بيانات في شركة تجريبية وحللت المبيعات باستخدام Power BI",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    pending = answered.json()["pending_understanding"]
+    confirmed = await client.post(
+        f"{base}/understandings/{pending['id']}/confirm",
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["messages"]
+
+    deleted = await client.delete("/v1/me/data", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    counts = deleted.json()["deleted_counts"]
+    assert counts["resume_workspaces"] == 1
+    assert counts["resume_messages"] > 0
+
+    missing = await client.get(base, headers=headers)
+    assert missing.status_code == 404

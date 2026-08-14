@@ -5550,6 +5550,12 @@ class OpenAIResumeWriterProvider(_StructuredResumeWriterProvider):
             async with asyncio.timeout(request_timeout):
                 response = await request
         except Exception as exc:
+            # Only the exception class and status code are logged; bodies and prompts never are.
+            logger.warning(
+                "Resume writer provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
             raise ResumeWriterTransportError(
                 "Resume writer provider request failed",
                 transient=_provider_failure_is_transient(exc),
