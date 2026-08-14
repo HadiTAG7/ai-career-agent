@@ -114,8 +114,11 @@ class CareerFact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     profile_id: Mapped[UUID] = mapped_column(
         ForeignKey("career_profiles.id", ondelete="CASCADE"), index=True
     )
+    # CASCADE keeps a bare profile delete consistent on PostgreSQL: the profile cascade removes
+    # evidence_sources, so facts must die with their source instead of tripping a RESTRICT.
+    # The app's delete_my_data flow still deletes facts before sources explicitly.
     source_id: Mapped[UUID] = mapped_column(
-        ForeignKey("evidence_sources.id", ondelete="RESTRICT"), index=True
+        ForeignKey("evidence_sources.id", ondelete="CASCADE"), index=True
     )
     category: Mapped[FactCategory] = mapped_column(enum_type(FactCategory, "fact_category"))
     label: Mapped[str] = mapped_column(String(500))

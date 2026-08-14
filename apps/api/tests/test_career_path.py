@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest_asyncio
 from fastapi import FastAPI
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from career_agent_api.api.router import router
@@ -54,6 +55,7 @@ async def career_path_client(
             database_url="sqlite+aiosqlite://",
             auto_create_schema=True,
             ai_provider="deterministic",
+            ai_safety_salt=SecretStr("test-only-safety-pepper"),
             max_import_bytes=1_000_000,
         )
 

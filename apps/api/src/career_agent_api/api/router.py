@@ -1982,7 +1982,7 @@ async def update_job_requirement(
 
 
 async def _load_analysis(session: AsyncSession, analysis_id: UUID) -> MatchAnalysis:
-    return await session.scalar(
+    analysis = await session.scalar(
         select(MatchAnalysis)
         .where(MatchAnalysis.id == analysis_id)
         .options(
@@ -1991,6 +1991,12 @@ async def _load_analysis(session: AsyncSession, analysis_id: UUID) -> MatchAnaly
             )
         )
     )
+    if analysis is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Match analysis not found",
+        )
+    return analysis
 
 
 @router.get("/jobs/{job_id}/analyses/latest", response_model=MatchAnalysisRead)

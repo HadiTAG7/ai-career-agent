@@ -79,14 +79,20 @@ _PO_BOX_PATTERN = re.compile(
     r"صندوق\s+بريد)\s*[:#=\-]?\s*[A-Z0-9٠-٩][^;|\n]{0,100}",
     re.IGNORECASE,
 )
+# Every quantifier is bounded so the pattern cannot backtrack catastrophically on
+# attacker-supplied text (an unbounded `\s*`/`\d+` here previously made a long
+# digit-comma-whitespace run quadratic). The bounds comfortably cover real addresses.
 _STREET_ADDRESS_PATTERN = re.compile(
-    r"(?<![\w.])(?:(?:apt\.?|apartment|unit|suite|flat|building)\s+)?#?\s*"
-    r"\d{1,6}[A-Z]?(?:[-/]\d+)?(?:\s*,\s*|\s+)"
-    r"(?:[A-Z0-9][\w.'’\-]*\s+){0,8}"
+    r"(?<![\w.])(?:(?:apt\.?|apartment|unit|suite|flat|building)\s{1,8})?#?\s{0,8}"
+    r"\d{1,6}[A-Z]?(?:[-/]\d{1,6})?(?:\s{0,8},\s{0,8}|\s{1,8})"
+    r"(?:[A-Z0-9][\w.'’\-]{0,40}\s{1,8}){0,8}"
     r"(?:street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd|"
-    r"highway|hwy|way|court|ct|place|pl)\.?(?:\s*,\s*[^;|\n]{1,100})?",
+    r"highway|hwy|way|court|ct|place|pl)\.?(?:\s{0,8},\s{0,8}[^;|\n]{1,100})?",
     re.IGNORECASE,
 )
+# Upper bound on any single _STREET_ADDRESS_PATTERN match given the bounded quantifiers
+# above; used to overlap scan windows so no match is missed at a window edge.
+_STREET_ADDRESS_MAX_MATCH_CHARS = 600
 _ARABIC_ADDRESS_CUE_PATTERN = re.compile(
     r"(?:^|[\s،,|])(?:حي|شارع|طريق|مبنى|عمارة|منزل|شقة|رقم\s+المبنى)\b",
     re.IGNORECASE,
@@ -810,12 +816,43 @@ class DisabledResumeIntakeProvider(ResumeIntakeProvider):
         raise ResumeIntakeProviderError("Resume intake provider is not configured")
 
 
+def _sub_street_addresses(value: str) -> str:
+    """Redact street addresses while feeding the pattern bounded windows per call.
+
+    Provider-facing segments are already capped at ``MAX_RESUME_SEGMENT_CHARS``; only rare
+    oversized single lines take the windowed path. Windows overlap by the maximum possible
+    match length so an address spanning a window edge is still caught.
+    """
+
+    if len(value) <= MAX_RESUME_SEGMENT_CHARS:
+        return _STREET_ADDRESS_PATTERN.sub("[redacted]", value)
+    pieces: list[str] = []
+    position = 0
+    while position < len(value):
+        window = value[position : position + MAX_RESUME_SEGMENT_CHARS]
+        if position + MAX_RESUME_SEGMENT_CHARS >= len(value):
+            pieces.append(_STREET_ADDRESS_PATTERN.sub("[redacted]", window))
+            break
+        boundary = len(window) - _STREET_ADDRESS_MAX_MATCH_CHARS
+        consumed = 0
+        for match in _STREET_ADDRESS_PATTERN.finditer(window):
+            if match.start() >= boundary:
+                break
+            pieces.append(window[consumed : match.start()])
+            pieces.append("[redacted]")
+            consumed = match.end()
+        advance = max(consumed, boundary)
+        pieces.append(window[consumed:advance])
+        position += advance
+    return "".join(pieces)
+
+
 def _redact_postal_addresses(value: str) -> str:
     if _ADDRESS_LABEL_PATTERN.match(value):
         return "[redacted]"
 
     redacted = _PO_BOX_PATTERN.sub("[redacted]", value)
-    redacted = _STREET_ADDRESS_PATTERN.sub("[redacted]", redacted)
+    redacted = _sub_street_addresses(redacted)
     address_cues = list(_ARABIC_ADDRESS_CUE_PATTERN.finditer(redacted))
     if not address_cues:
         return redacted
@@ -1036,7 +1073,9 @@ def _contains_contact_signal(value: str) -> bool:
         or _URL_PATTERN.search(value)
         or _SOCIAL_CONTACT_PATTERN.search(value)
         or _PO_BOX_PATTERN.search(value)
-        or _STREET_ADDRESS_PATTERN.search(value)
+        # A contact signal in the first bounded window is sufficient for this heuristic;
+        # the cap keeps the pattern off unbounded attacker-supplied text.
+        or _STREET_ADDRESS_PATTERN.search(value[:MAX_RESUME_SEGMENT_CHARS])
     ):
         return True
     return any(pattern.search(value) for pattern in _PHONE_PATTERNS)
@@ -1967,10 +2006,14 @@ def _resolve_generated_facts(
     source_text = {segment.handle: segment.text for segment in segments}
     resolved: list[FactCandidate] = []
     seen: set[tuple[str, str, str | None, str]] = set()
+    unresolvable_count = 0
     for fact in generated.facts:
         excerpt = source_text.get(fact.source_handle)
         if excerpt is None:
-            raise ResumeIntakeProviderError("Resume intake provider returned no usable response")
+            # One hallucinated handle must not discard the whole extraction; drop only the
+            # ungrounded fact.
+            unresolvable_count += 1
+            continue
         if _is_context_segment(excerpt):
             continue
         guided_field = _parse_guided_field(excerpt)
@@ -2029,6 +2072,15 @@ def _resolve_generated_facts(
                 source_handle=fact.source_handle,
             )
         )
+    if unresolvable_count:
+        logger.warning(
+            "Resume intake provider cited unknown source handles; skipped %d of %d facts",
+            unresolvable_count,
+            len(generated.facts),
+        )
+        if unresolvable_count == len(generated.facts) and not resolved:
+            # Nothing the provider returned could be grounded in the supplied segments.
+            raise ResumeIntakeProviderError("Resume intake provider returned no usable response")
     return resolved
 
 
@@ -2532,10 +2584,18 @@ class OpenAIResumeIntakeProvider(ResumeIntakeProvider):
     provider_name = "openai"
     available = True
 
-    def __init__(self, *, api_key: str, model: str, timeout_seconds: float = 25) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        timeout_seconds: float = 25,
+        max_output_tokens: int = RESUME_MAX_OUTPUT_TOKENS,
+    ) -> None:
         self._api_key = api_key
         self.model = model
         self._timeout_seconds = timeout_seconds
+        self._max_output_tokens = max_output_tokens
 
     async def generate(self, context: ResumeIntakeProviderContext) -> list[FactCandidate]:
         segments = _sanitized_segments(context)
@@ -2555,7 +2615,7 @@ class OpenAIResumeIntakeProvider(ResumeIntakeProvider):
                     text_format=_GeneratedResumeFacts,
                     reasoning={"effort": "none"},
                     verbosity="low",
-                    max_output_tokens=RESUME_MAX_OUTPUT_TOKENS,
+                    max_output_tokens=self._max_output_tokens,
                     store=False,
                 )
         except Exception as exc:
@@ -2579,10 +2639,18 @@ class MistralResumeIntakeProvider(ResumeIntakeProvider):
     provider_name = "mistral"
     available = True
 
-    def __init__(self, *, api_key: str, model: str, timeout_seconds: float = 25) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        timeout_seconds: float = 25,
+        max_output_tokens: int = RESUME_MAX_OUTPUT_TOKENS,
+    ) -> None:
         self._api_key = api_key
         self.model = model
         self._timeout_seconds = timeout_seconds
+        self._max_output_tokens = max_output_tokens
 
     async def generate(self, context: ResumeIntakeProviderContext) -> list[FactCandidate]:
         segments = _sanitized_segments(context)
@@ -2602,7 +2670,7 @@ class MistralResumeIntakeProvider(ResumeIntakeProvider):
                         {"role": "system", "content": SYSTEM_INSTRUCTIONS},
                         *_provider_input(context, segments),
                     ],
-                    max_tokens=RESUME_MAX_OUTPUT_TOKENS,
+                    max_tokens=self._max_output_tokens,
                     temperature=0,
                     stream=False,
                     response_format={
@@ -2643,16 +2711,21 @@ class MistralResumeIntakeProvider(ResumeIntakeProvider):
 def get_resume_intake_provider(
     settings: Settings = Depends(get_settings),
 ) -> ResumeIntakeProvider:
+    # Resume intake is part of the interview flow: honor the dedicated interview model when
+    # configured, exactly like the resume writer does.
+    model = settings.resume_interview_model or settings.ai_model
     if settings.ai_provider == "openai" and settings.openai_api_key:
         return OpenAIResumeIntakeProvider(
             api_key=settings.openai_api_key.get_secret_value(),
-            model=settings.ai_model,
+            model=model,
             timeout_seconds=settings.ai_request_timeout_seconds,
+            max_output_tokens=settings.resume_ai_max_output_tokens,
         )
     if settings.ai_provider == "mistral" and settings.mistral_api_key:
         return MistralResumeIntakeProvider(
             api_key=settings.mistral_api_key.get_secret_value(),
-            model=settings.ai_model,
+            model=model,
             timeout_seconds=settings.ai_request_timeout_seconds,
+            max_output_tokens=settings.resume_ai_max_output_tokens,
         )
-    return DisabledResumeIntakeProvider(settings.ai_provider, settings.ai_model)
+    return DisabledResumeIntakeProvider(settings.ai_provider, model)

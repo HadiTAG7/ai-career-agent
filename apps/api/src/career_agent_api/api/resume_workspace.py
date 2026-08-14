@@ -729,13 +729,11 @@ async def _question_for_assessment_gap(
     gap: ResumeAssessmentGap,
 ) -> dict[str, Any]:
     language = _conversation_language(workspace)
+    # The server-selected gap always has a safe deterministic phrasing. When the remote writer
+    # is unavailable or fails, emit that phrasing instead of failing the whole turn.
     question_metadata = deterministic_gap_question(gap, language)
     if not provider.available or not _has_current_consent(workspace, provider):
-        raise _api_error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "resume_writer_unavailable",
-            "The AI resume writer is unavailable; retry this gap question",
-        )
+        return question_metadata
     try:
         questions = await provider.generate_questions(
             language=language,
@@ -751,12 +749,10 @@ async def _question_for_assessment_gap(
                 "Resume writer returned a question for the wrong assessment gap"
             )
     except ResumeWriterError as exc:
-        logger.warning("Assessment gap question generation failed: %s", exc)
-        raise _api_error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "resume_writer_unavailable",
-            "The AI resume writer could not generate the next gap question; retry",
-        ) from exc
+        logger.warning(
+            "Assessment gap question generation failed; using deterministic fallback: %s", exc
+        )
+        return question_metadata
     generated = questions[0]
     return {
         **question_metadata,
@@ -1560,7 +1556,9 @@ async def _create_version(
         base_version_id=base_version_id,
         reason=reason,
         status=status_value,
-        content=workspace.current_draft,
+        # Snapshot a deep copy: the version must stay immutable even when the live draft
+        # dict is mutated in place later.
+        content=deepcopy(workspace.current_draft),
         # Server-owned evidence scope always wins over caller-supplied version annotations.
         diff={**(diff or {}), **scope_diff},
         evidence_revision=workspace.evidence_revision,
@@ -1825,6 +1823,8 @@ async def _handle_resume_quick_action(
             assistant_kind = ResumeMessageKind.QUESTION
             structured_payload = {"question": next_question, "quick_action": action}
     elif action == "improve" and workspace.current_draft is not None:
+        # "improve" with an existing draft never regenerates: it preserves the draft and
+        # points the user at the reviewed-selection rewrite flow.
         workspace.pending_understanding = None
         workspace.pending_suggestion = None
         workspace.stage = ResumeWorkspaceStage.WRITING
@@ -1842,7 +1842,11 @@ async def _handle_resume_quick_action(
             "draft_preserved": True,
             "improvement_mode": "reviewed_selection",
         }
-    elif action in {"generate", "improve", "review"}:
+    elif action in {"generate", "review"} or (
+        # "improve" with a draft was fully handled above, so it reaches this branch only
+        # when no draft exists yet; there it behaves like "generate".
+        action == "improve" and workspace.current_draft is None
+    ):
         if (
             import_flow is not None
             and not bool(import_flow.get("can_generate"))
@@ -2024,7 +2028,7 @@ async def start_resume_workspace(
     # Locking the parent row also serializes the first workspace creation, when no workspace row
     # exists yet to lock. This prevents duplicate POSTs from surfacing a unique-constraint 500.
     profile = await _owned_profile(session, profile_id, user.id, for_update=True)
-    provider = get_resume_writer_provider(settings)
+    provider = await get_resume_writer_provider(settings)
     workspace = await _load_workspace(
         session,
         profile_id,
@@ -2253,7 +2257,7 @@ async def get_resume_workspace(
     session: AsyncSession = Depends(get_db),
 ) -> ResumeWorkspaceRead:
     profile = await _owned_profile(session, profile_id, user.id)
-    provider = get_resume_writer_provider(settings)
+    provider = await get_resume_writer_provider(settings)
     workspace = await _load_workspace(session, profile_id)
     if not workspace:
         raise HTTPException(
@@ -2353,7 +2357,7 @@ async def prepare_resume_import(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resume workspace not found",
         )
-    provider = get_resume_writer_provider(settings)
+    provider = await get_resume_writer_provider(settings)
     metadata = workspace.provider_metadata if isinstance(workspace.provider_metadata, dict) else {}
     flow = _import_flow(workspace)
     if (
@@ -2534,7 +2538,7 @@ async def send_resume_message(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
         )
-    provider = get_resume_writer_provider(settings)
+    provider = await get_resume_writer_provider(settings)
     duplicate = await session.scalar(
         select(ResumeMessage).where(
             ResumeMessage.workspace_id == workspace.id,
@@ -2818,7 +2822,7 @@ async def confirm_resume_understanding(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resume workspace not found"
         )
-    provider = get_resume_writer_provider(settings)
+    provider = await get_resume_writer_provider(settings)
     await _refresh_workspace(session, workspace)
     if payload.expected_revision != workspace.revision:
         raise _api_error(
@@ -3249,7 +3253,7 @@ async def correct_resume_understanding(
     await session.commit()
     workspace = await _load_workspace(session, profile_id)
     assert workspace is not None
-    return _workspace_read(workspace, get_resume_writer_provider(settings))
+    return _workspace_read(workspace, await get_resume_writer_provider(settings))
 
 
 @router.patch("/draft", response_model=ResumeWorkspaceRead)
@@ -3309,7 +3313,7 @@ async def patch_resume_draft(
     await session.commit()
     workspace = await _load_workspace(session, profile_id)
     assert workspace is not None
-    return _workspace_read(workspace, get_resume_writer_provider(settings))
+    return _workspace_read(workspace, await get_resume_writer_provider(settings))
 
 
 def _target_text(draft: ResumeDraftContent, payload: ResumeRewriteCreate) -> tuple[str, list[str]]:
@@ -3393,7 +3397,7 @@ async def rewrite_resume_draft(
             "resume_draft_revision_conflict",
             "The resume draft changed; reload before requesting a rewrite",
         )
-    provider = get_resume_writer_provider(settings)
+    provider = await get_resume_writer_provider(settings)
     if not provider.available or not _has_current_consent(workspace, provider):
         raise _api_error(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -3569,7 +3573,7 @@ async def _suggestion_action(
     await session.commit()
     workspace = await _load_workspace(session, profile_id)
     assert workspace is not None
-    return _workspace_read(workspace, get_resume_writer_provider(settings))
+    return _workspace_read(workspace, await get_resume_writer_provider(settings))
 
 
 @router.post("/draft/suggestions/{suggestion_id}/accept", response_model=ResumeWorkspaceRead)
@@ -3700,7 +3704,9 @@ async def restore_resume_version(
         build_resume_evidence(restored_facts),
         metadata_override=restored_metadata,
     )
-    workspace.current_draft = version.content
+    # Restore a deep copy so the immutable version snapshot never shares a dict with the
+    # live draft.
+    workspace.current_draft = deepcopy(version.content)
     workspace.provider_metadata = restored_metadata
     workspace.draft_revision += 1
     workspace.pending_suggestion = None
@@ -3716,7 +3722,7 @@ async def restore_resume_version(
     await session.commit()
     workspace = await _load_workspace(session, profile_id)
     assert workspace is not None
-    return _workspace_read(workspace, get_resume_writer_provider(settings))
+    return _workspace_read(workspace, await get_resume_writer_provider(settings))
 
 
 def _review_blockers(

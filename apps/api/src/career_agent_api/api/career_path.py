@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -209,15 +209,18 @@ async def send_career_path_message(
         )
 
     if conversation:
-        now = datetime.now(UTC)
-        window_start = now - timedelta(days=1)
-        recent_user_messages = 0
-        for message in conversation.messages:
-            created_at = message.created_at
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            if message.role is CareerPathMessageRole.USER and created_at >= window_start:
-                recent_user_messages += 1
+        window_start = datetime.now(UTC) - timedelta(days=1)
+        # Count in the database instead of loading every message row just to count today's.
+        recent_user_messages = (
+            await session.scalar(
+                select(func.count(CareerPathMessage.id)).where(
+                    CareerPathMessage.conversation_id == conversation.id,
+                    CareerPathMessage.role == CareerPathMessageRole.USER,
+                    CareerPathMessage.created_at >= window_start,
+                )
+            )
+            or 0
+        )
         if recent_user_messages >= DAILY_MESSAGE_LIMIT:
             raise _api_error(
                 status.HTTP_429_TOO_MANY_REQUESTS,
