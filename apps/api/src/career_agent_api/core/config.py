@@ -45,6 +45,26 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
 
+    @field_validator(
+        "clerk_jwks_url",
+        "clerk_issuer",
+        "clerk_audience",
+        "openai_api_key",
+        "mistral_api_key",
+        "ai_safety_salt",
+        "resume_interview_model",
+        "resume_writer_model",
+        mode="before",
+    )
+    @classmethod
+    def empty_env_value_is_unset(cls, value: object) -> object:
+        # Compose and dashboards pass declared-but-empty variables as "". Treating that
+        # as a value would crash min_length fields and, worse, let an empty SecretStr
+        # (which is always truthy) slip past the required-secret production checks.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_origins(cls, value: object) -> object:
