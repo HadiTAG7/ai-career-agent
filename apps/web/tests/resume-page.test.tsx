@@ -593,7 +593,7 @@ describe("resume workspace v2", () => {
       draft: expect.objectContaining({ professional_summary: editedSummary }),
       expectedDraftRevision: 1,
     });
-    expect(await screen.findByText("تم الحفظ تلقائيًا")).toBeVisible();
+    expect(await screen.findByText("محفوظ")).toBeVisible();
     expect(screen.queryByRole("button", { name: "أعد محاولة الحفظ" })).not.toBeInTheDocument();
   });
 
@@ -621,7 +621,7 @@ describe("resume workspace v2", () => {
       contact: { email: "hadi@example.com", phone: undefined, linkedin: undefined },
       dataSharingAcknowledged: false,
     });
-    expect(await screen.findByText("تم الحفظ تلقائيًا")).toBeVisible();
+    expect(await screen.findByText("محفوظ")).toBeVisible();
     expect(screen.queryByRole("button", { name: "أعد محاولة الحفظ" })).not.toBeInTheDocument();
   });
 

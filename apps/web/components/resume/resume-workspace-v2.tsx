@@ -2794,40 +2794,20 @@ export function ResumeWorkspaceV2({
     <div className="min-h-[calc(100vh-86px)] bg-background px-3 pb-44 pt-4 text-foreground sm:px-5 xl:h-[calc(100vh-80px)] xl:min-h-[720px] xl:px-6 xl:pb-4 xl:pt-3" dir={locale === "ar" ? "rtl" : "ltr"}>
       <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col">
         <header className="shrink-0 pb-3 xl:pb-4">
-          <div className="grid items-end gap-3 xl:grid-cols-[minmax(220px,1fr)_minmax(300px,1fr)_minmax(220px,1fr)]">
-            <div className="order-2 flex items-center justify-center xl:order-1 xl:justify-start">
-              <div>
-                <ReadinessBar score={workspace?.readiness_score ?? 0} locale={locale} />
-                <p className="mt-1 text-[11px] text-muted">
-                  {hasDraft
-                    ? (locale === "ar" ? "الحقائق المؤكدة مرتبطة بالمسودة" : "Confirmed facts are linked to the draft")
-                    : activeImportFlow
-                      ? (locale === "ar" ? "نراجع الأدلة قبل كتابة المسودة" : "Reviewing evidence before drafting")
-                      : workspace
-                        ? (locale === "ar" ? "إجاباتك المؤكدة تحفظ تقدمك" : "Confirmed answers preserve your progress")
-                        : (locale === "ar" ? "ابدأ من قصتك المهنية" : "Start with your professional story")}
-                </p>
-              </div>
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <div className="min-w-0">
+              <h1 className="truncate text-xl font-bold leading-tight tracking-[-0.02em] text-foreground sm:text-2xl">
+                {hasDraft
+                  ? (locale === "ar" ? "مختبر تحرير السيرة" : "Resume Proofing Studio")
+                  : (locale === "ar" ? "خلّنا نبني قصتك المهنية" : "Let’s build your professional story")}
+              </h1>
             </div>
 
-            <div className="order-1 text-center xl:order-2">
-              <div className="inline-flex items-center justify-center gap-3">
-                <Pencil className="hidden h-8 w-8 text-primary-text sm:block" strokeWidth={1.25} aria-hidden="true" />
-                <div>
-                  <h1 className="text-[28px] font-bold leading-tight tracking-[-0.025em] text-foreground sm:text-[31px]">
-                    {hasDraft
-                      ? (locale === "ar" ? "مختبر تحرير السيرة" : "Resume Proofing Studio")
-                      : (locale === "ar" ? "خلّنا نبني قصتك المهنية" : "Let’s build your professional story")}
-                  </h1>
-                  <p className="mt-1 text-xs text-muted">{locale === "ar" ? "استوديو التحرير والتحقق قبل الاعتماد" : "Edit and verify before approval"}</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="order-3 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 xl:justify-end">
-              <div className={cn("inline-flex items-center gap-2 text-xs font-semibold", saveState === "error" ? "text-danger" : saveState === "saving" ? "text-primary-text" : "text-emerald")} role="status">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div className="hidden sm:block"><ReadinessBar score={workspace?.readiness_score ?? 0} locale={locale} /></div>
+              <div className={cn("inline-flex items-center gap-1.5 text-xs font-semibold", saveState === "error" ? "text-danger" : saveState === "saving" ? "text-primary-text" : "text-emerald")} role="status">
                 {saveState === "saving" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : saveState === "error" ? <AlertCircle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
-                {saveState === "saving" ? (locale === "ar" ? "جارٍ الحفظ…" : "Saving…") : saveState === "error" ? (locale === "ar" ? "تعذر الحفظ" : "Save failed") : (locale === "ar" ? "تم الحفظ تلقائيًا" : "Autosaved")}
+                {saveState === "saving" ? (locale === "ar" ? "جارٍ الحفظ…" : "Saving…") : saveState === "error" ? (locale === "ar" ? "تعذر الحفظ" : "Save failed") : (locale === "ar" ? "محفوظ" : "Saved")}
               </div>
               {saveState === "error" ? (
                 <button
@@ -2841,13 +2821,12 @@ export function ResumeWorkspaceV2({
               ) : null}
               {workspace ? (
                 <>
-                  <span className="hidden h-5 w-px bg-border sm:block" aria-hidden="true" />
-                  <span className="text-xs font-semibold text-primary-text">
+                  <span className="hidden text-xs text-muted sm:inline">
                     {locale === "ar" ? "الحوار" : "Chat"} {activeConversationLanguage.toUpperCase()} · {locale === "ar" ? "السيرة" : "Resume"} {activeOutputLanguage.toUpperCase()}
                   </span>
                   <button
                     type="button"
-                    className="inline-flex min-h-9 items-center gap-1.5 border-s border-danger ps-3 text-xs font-semibold text-danger hover:text-danger/80 disabled:cursor-not-allowed disabled:opacity-45"
+                    className="inline-flex min-h-9 items-center gap-1.5 text-xs font-semibold text-muted hover:text-danger disabled:cursor-not-allowed disabled:opacity-45"
                     disabled={resetBlocked}
                     onClick={() => { setResetError(null); setResetDialogOpen(true); }}
                   >
@@ -2858,7 +2837,9 @@ export function ResumeWorkspaceV2({
               ) : null}
             </div>
           </div>
-          <div className={cn("mx-auto mt-3 max-w-xl", hasDraft && "hidden xl:block")}><StageRail current={stageIndex} locale={locale} /></div>
+          {/* The stage rail guides the interview; once a draft exists every step is done
+              and the studio's own controls carry the state, so it retires. */}
+          {!hasDraft ? <div className="mx-auto mt-3 max-w-xl"><StageRail current={stageIndex} locale={locale} /></div> : null}
         </header>
 
         {generationWarning ? (
