@@ -11,9 +11,9 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from career_agent_api.api.career_path import router as career_path_router
-from career_agent_api.api.resume import router as resume_router
 from career_agent_api.api.resume_workspace import router as resume_workspace_router
 from career_agent_api.core.auth import CurrentUser
 from career_agent_api.core.config import Settings, get_settings
@@ -34,6 +34,8 @@ from career_agent_api.models.domain import (
     MatchAnalysis,
     Outcome,
     RequirementMatch,
+    ResumeDraftVersion,
+    ResumeMessage,
     ResumeWorkspace,
     SourcePolicy,
 )
@@ -112,7 +114,6 @@ from career_agent_api.services.resume_intake import (
 
 router = APIRouter(prefix="/v1")
 router.include_router(career_path_router)
-router.include_router(resume_router)
 router.include_router(resume_workspace_router)
 
 RESUME_EXTRACTOR_VERSION = "resume-records-v7"
@@ -891,8 +892,9 @@ async def _import_professional_file(
         data = await read_limited_upload(file, settings.max_import_bytes)
     finally:
         await file.close()
-    parsed = parse_import(file.filename, file.content_type, data)
-    import_metadata = metadata_for_import(data, parsed)
+    # PDF/DOCX parsing and hashing are CPU-bound; keep them off the event loop.
+    parsed = await run_in_threadpool(parse_import, file.filename, file.content_type, data)
+    import_metadata = await run_in_threadpool(metadata_for_import, data, parsed)
     content_sha256 = str(import_metadata["content_sha256"])
     ai_enhanced = use_ai and parsed.source_kind is SourceKind.CV_UPLOAD
     existing_source = await _evidence_source_for_content(session, profile_id, content_sha256)
@@ -1980,7 +1982,7 @@ async def update_job_requirement(
 
 
 async def _load_analysis(session: AsyncSession, analysis_id: UUID) -> MatchAnalysis:
-    return await session.scalar(
+    analysis = await session.scalar(
         select(MatchAnalysis)
         .where(MatchAnalysis.id == analysis_id)
         .options(
@@ -1989,6 +1991,12 @@ async def _load_analysis(session: AsyncSession, analysis_id: UUID) -> MatchAnaly
             )
         )
     )
+    if analysis is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Match analysis not found",
+        )
+    return analysis
 
 
 @router.get("/jobs/{job_id}/analyses/latest", response_model=MatchAnalysisRead)
@@ -2684,6 +2692,25 @@ async def delete_my_data(
     )
     await session.execute(delete(CareerFact).where(CareerFact.id.in_(fact_ids)))
     await session.execute(delete(EvidenceSource).where(EvidenceSource.id.in_(source_ids)))
+    # Resume workspace rows are deleted explicitly rather than via FK cascades so the
+    # receipt reflects what actually happened on every backend, SQLite included.
+    if resume_workspace:
+        await session.execute(
+            delete(ResumeMessage).where(ResumeMessage.workspace_id == resume_workspace.id)
+        )
+        await session.execute(
+            update(ResumeDraftVersion)
+            .where(ResumeDraftVersion.workspace_id == resume_workspace.id)
+            .values(base_version_id=None)
+        )
+        await session.execute(
+            delete(ResumeDraftVersion).where(
+                ResumeDraftVersion.workspace_id == resume_workspace.id
+            )
+        )
+        await session.execute(
+            delete(ResumeWorkspace).where(ResumeWorkspace.id == resume_workspace.id)
+        )
     if profile:
         await session.execute(delete(CareerProfile).where(CareerProfile.id == profile.id))
 

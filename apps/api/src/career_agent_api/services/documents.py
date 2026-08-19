@@ -123,8 +123,10 @@ def unsupported_reason(
         return None
     if not facts:
         return "Factual claim has no evidence"
+    # Deliberately identical to the missing-fact message: a caller must not be able to
+    # distinguish a nonexistent fact UUID from another profile's fact.
     if any(fact.profile_id != profile_id for fact in facts):
-        return "Evidence belongs to another profile"
+        return "Evidence not found"
     if any(fact.verification_status is not VerificationStatus.CONFIRMED for fact in facts):
         return "Evidence is not user-confirmed"
     allowed_categories = CLAIM_FACT_CATEGORIES[claim_type]
@@ -174,11 +176,16 @@ async def create_evidence_safe_document(
     requested_fact_ids = {
         fact_id for claim in payload.claims for fact_id in claim.evidence_fact_ids
     }
+    # Scope the lookup to the requesting profile so another profile's facts surface exactly
+    # like nonexistent ones ("Evidence not found"), never as a distinguishable error.
     facts = (
         list(
             (
                 await session.scalars(
-                    select(CareerFact).where(CareerFact.id.in_(requested_fact_ids))
+                    select(CareerFact).where(
+                        CareerFact.id.in_(requested_fact_ids),
+                        CareerFact.profile_id == payload.profile_id,
+                    )
                 )
             ).all()
         )

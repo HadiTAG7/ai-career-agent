@@ -556,6 +556,104 @@ describe("resume workspace v2", () => {
     expect(screen.getByRole("button", { name: "ابدأ المحادثة" })).toBeDisabled();
   });
 
+  it("keeps the chat usable after a failed autosave and retries the same draft payload", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    const editedSummary = `${draft.professional_summary} تعديل بعد فشل الحفظ.`;
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    apiMocks.patchResumeWorkspaceDraft
+      .mockRejectedValueOnce(new Error("save failed"))
+      .mockResolvedValue(makeWorkspace({
+        ...writingWorkspace,
+        current_draft: { ...draft, professional_summary: editedSummary },
+        draft_revision: 2,
+        updated_at: "2026-08-08T10:05:00Z",
+      }));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByRole("textbox", { name: "الملخص المهني" });
+    fireEvent.change(summary, { target: { value: editedSummary } });
+    expect(await screen.findByText("تعذر الحفظ", {}, { timeout: 2_000 })).toBeVisible();
+    expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenCalledTimes(1);
+
+    // A failed save must not freeze the conversation.
+    expect(screen.getByLabelText("اكتب رسالتك")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "إرسال الرسالة" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "أعد محاولة الحفظ" }));
+
+    await waitFor(() => expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenCalledTimes(2));
+    expect(apiMocks.patchResumeWorkspaceDraft).toHaveBeenLastCalledWith(profile.id, {
+      draft: expect.objectContaining({ professional_summary: editedSummary }),
+      expectedDraftRevision: 1,
+    });
+    expect(await screen.findByText("محفوظ")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "أعد محاولة الحفظ" })).not.toBeInTheDocument();
+  });
+
+  it("retries a failed contact save with the stored payload", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace());
+    apiMocks.startResumeWorkspace
+      .mockRejectedValueOnce(new Error("contact save failed"))
+      .mockResolvedValue(makeWorkspace({ contact: { email: "hadi@example.com" } }));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "التواصل" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "البريد الإلكتروني" }), {
+      target: { value: "hadi@example.com" },
+    });
+    expect(await screen.findByText("تعذر الحفظ", {}, { timeout: 2_000 })).toBeVisible();
+    expect(apiMocks.startResumeWorkspace).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "أعد محاولة الحفظ" }));
+
+    await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledTimes(2));
+    expect(apiMocks.startResumeWorkspace).toHaveBeenLastCalledWith(profile.id, {
+      conversationLanguage: "ar",
+      language: "ar",
+      contact: { email: "hadi@example.com", phone: undefined, linkedin: undefined },
+      dataSharingAcknowledged: false,
+    });
+    expect(await screen.findByText("محفوظ")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "أعد محاولة الحفظ" })).not.toBeInTheDocument();
+  });
+
+  it("lets the user fix contact details from the review stage", async () => {
+    const user = userEvent.setup();
+    apiMocks.getResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "review",
+      current_draft: draft,
+      draft_revision: 1,
+    }));
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    apiMocks.startResumeWorkspace.mockResolvedValue(makeWorkspace({
+      stage: "review",
+      current_draft: draft,
+      draft_revision: 1,
+      contact: { email: "review@example.com" },
+    }));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("button", { name: "التواصل" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "البريد الإلكتروني" }), {
+      target: { value: "review@example.com" },
+    });
+
+    await waitFor(() => expect(apiMocks.startResumeWorkspace).toHaveBeenCalledWith(profile.id, {
+      conversationLanguage: "ar",
+      language: "ar",
+      contact: { email: "review@example.com", phone: undefined, linkedin: undefined },
+      dataSharingAcknowledged: false,
+    }), { timeout: 2_000 });
+  });
+
   it("ignores a renewal response that arrives after a same-tick successful reset", async () => {
     const expired = makeWorkspace({
       revision: 9,

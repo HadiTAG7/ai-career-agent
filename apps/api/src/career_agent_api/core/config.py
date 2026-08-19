@@ -15,6 +15,10 @@ class Settings(BaseSettings):
 
     app_name: str = "AI Career Agent API"
     environment: Literal["development", "test", "production"] = "development"
+    log_level: str = "INFO"
+    # Explicit opt-in for header-based identity in local development. Without it the API
+    # refuses unauthenticated requests even outside production.
+    dev_auth_bypass: bool = False
     database_url: str = "sqlite+aiosqlite:///./career_agent.db"
     auto_create_schema: bool = True
     cors_origins: Annotated[list[str], NoDecode] = Field(
@@ -40,6 +44,26 @@ class Settings(BaseSettings):
     max_import_bytes: int = Field(default=10_000_000, ge=1_000_000, le=25_000_000)
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+
+    @field_validator(
+        "clerk_jwks_url",
+        "clerk_issuer",
+        "clerk_audience",
+        "openai_api_key",
+        "mistral_api_key",
+        "ai_safety_salt",
+        "resume_interview_model",
+        "resume_writer_model",
+        mode="before",
+    )
+    @classmethod
+    def empty_env_value_is_unset(cls, value: object) -> object:
+        # Compose and dashboards pass declared-but-empty variables as "". Treating that
+        # as a value would crash min_length fields and, worse, let an empty SecretStr
+        # (which is always truthy) slip past the required-secret production checks.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -69,6 +93,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def secure_production(self) -> "Settings":
         if self.environment == "production":
+            if self.dev_auth_bypass:
+                raise ValueError("DEV_AUTH_BYPASS must be false in production")
             if not self.clerk_jwks_url:
                 raise ValueError("CLERK_JWKS_URL is required in production")
             if not self.clerk_issuer:
@@ -92,13 +118,15 @@ class Settings(BaseSettings):
                 )
                 if not provider_api_key:
                     raise ValueError(
-                        f"{provider_key_name} is required when "
-                        f"AI_PROVIDER={self.ai_provider} in production"
+                        f"{provider_key_name} is required when AI_PROVIDER={self.ai_provider} "
+                        "in production. On Render it is declared with sync:false, so set the "
+                        "secret in the service's Environment tab before deploying."
                     )
                 if not self.ai_safety_salt:
                     raise ValueError(
                         "AI_SAFETY_SALT is required when an external AI provider is enabled "
-                        "in production"
+                        "in production. On Render it is declared with sync:false, so set the "
+                        "secret in the service's Environment tab before deploying."
                     )
         return self
 

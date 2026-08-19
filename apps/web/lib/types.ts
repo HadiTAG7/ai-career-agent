@@ -25,7 +25,7 @@ export type ApplicationStage =
 
 export type EvidenceFact = {
   id: string;
-  category: "identity" | "experience" | "education" | "skill" | "project" | "certificate" | "language" | "achievement" | "preference" | "eligibility";
+  category: "identity" | "experience" | "education" | "skill" | "project" | "certification" | "language" | "achievement" | "preference" | "eligibility";
   title: LocalizedText;
   detail: LocalizedText;
   source: LocalizedText;
@@ -105,7 +105,8 @@ export type Job = {
   location: LocalizedText;
   source: LocalizedText;
   freshness: LocalizedText;
-  employmentType: LocalizedText;
+  // Only present when the source actually provides it; the API has no employment-type field.
+  employmentType?: LocalizedText;
   coverage: number;
   recommendation: JobRecommendation;
   readiness: ReadinessBand;

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
 
@@ -1876,6 +1877,40 @@ async def test_unknown_source_handle_is_rejected(
 
 
 @pytest.mark.asyncio
+async def test_one_unknown_source_handle_keeps_the_grounded_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _MistralCapture(
+        content=json.dumps(
+            {
+                "facts": [
+                    {
+                        "category": "experience",
+                        "label": "Payment APIs",
+                        "detail": "Built payment APIs",
+                        "source_handle": "segment_1",
+                    },
+                    {
+                        "category": "skill",
+                        "label": "Hallucinated skill",
+                        "detail": None,
+                        "source_handle": "segment_unknown",
+                    },
+                ]
+            }
+        )
+    )
+    _install_fake_mistral(monkeypatch, capture)
+    provider = MistralResumeIntakeProvider(api_key="secret", model="test-model")
+
+    result = await provider.generate(_context())
+
+    labels = [fact.label for fact in result]
+    assert "Payment APIs" in labels
+    assert "Hallucinated skill" not in labels
+
+
+@pytest.mark.asyncio
 async def test_provider_output_identifiers_are_redacted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2353,3 +2388,61 @@ def test_provider_factory_uses_only_selected_provider_key() -> None:
         )
     )
     assert isinstance(wrong_key, DisabledResumeIntakeProvider)
+
+
+def test_provider_factory_threads_interview_model_and_output_token_budget() -> None:
+    provider = get_resume_intake_provider(
+        Settings(
+            _env_file=None,
+            environment="test",
+            ai_provider="mistral",
+            mistral_api_key=SecretStr("mistral-key"),
+            ai_model="fallback-model",
+            resume_interview_model="interview-model",
+            resume_ai_max_output_tokens=5_000,
+        )
+    )
+    assert isinstance(provider, MistralResumeIntakeProvider)
+    assert provider.model == "interview-model"
+    assert provider._max_output_tokens == 5_000
+
+    default_model = get_resume_intake_provider(
+        Settings(
+            _env_file=None,
+            environment="test",
+            ai_provider="openai",
+            openai_api_key=SecretStr("openai-key"),
+            ai_model="gpt-test",
+        )
+    )
+    assert isinstance(default_model, OpenAIResumeIntakeProvider)
+    assert default_model.model == "gpt-test"
+    assert default_model._max_output_tokens == Settings(
+        _env_file=None, environment="test"
+    ).resume_ai_max_output_tokens
+
+
+def test_street_address_redaction_is_fast_on_pathological_input() -> None:
+    # A digit, comma, and long whitespace run previously triggered quadratic backtracking.
+    pathological = "12," + " " * 30_000 + "x"
+    started = perf_counter()
+    unchanged = resume_intake._redact_postal_addresses(pathological)
+    assert perf_counter() - started < 0.5
+    assert unchanged == pathological
+
+    repeated_near_match = ("Unit 12-345 " + "Aaaa " * 6 + "; ") * 400
+    started = perf_counter()
+    resume_intake._redact_postal_addresses(repeated_near_match)
+    assert perf_counter() - started < 0.5
+
+    # Real street addresses are still redacted (leading whitespace is part of the match,
+    # matching the previous pattern's behavior).
+    assert (
+        resume_intake._redact_postal_addresses("office: 123 Main Street, Riyadh 12345")
+        == "office:[redacted]"
+    )
+    # Lines above the per-call window are scanned in bounded, overlapping windows.
+    long_line = ("filler " * 700) + "221B Baker Street, London NW1 6XE." + (" filler" * 700)
+    windowed = resume_intake._redact_postal_addresses(long_line)
+    assert "Baker Street" not in windowed
+    assert "[redacted]" in windowed

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from career_agent_api.schemas.api import (
     CareerPathGeneratedReply,
     CareerPathSuggestionRead,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_MESSAGES = 12
 CONSENT_VERSION = "2026-08-07-v2"
@@ -91,7 +94,7 @@ class CareerPathProviderContext:
     locale: str
     confirmed_facts: tuple[CareerPathFactContext, ...]
     messages: tuple[CareerPathContextMessage, ...]
-    safety_identifier: str
+    safety_identifier: str | None
 
 
 class CareerPathProvider(ABC):
@@ -163,6 +166,13 @@ class OpenAICareerPathProvider(CareerPathProvider):
 
     async def generate(self, context: CareerPathProviderContext) -> CareerPathGeneratedReply:
         response = None
+        # Without a dedicated safety salt no pseudonymous identifier exists; omit the field
+        # entirely rather than sending an empty or credential-derived value.
+        safety_kwargs: dict[str, str] = (
+            {"safety_identifier": context.safety_identifier}
+            if context.safety_identifier is not None
+            else {}
+        )
         try:
             async with AsyncOpenAI(
                 api_key=self._api_key,
@@ -177,12 +187,17 @@ class OpenAICareerPathProvider(CareerPathProvider):
                     reasoning={"effort": "low"},
                     verbosity="low",
                     max_output_tokens=self._max_output_tokens,
-                    safety_identifier=context.safety_identifier,
                     store=False,
+                    **safety_kwargs,
                 )
-        except Exception:
-            # Provider bodies and prompts are intentionally never logged or returned.
-            pass
+        except Exception as exc:
+            # Provider bodies and prompts are intentionally never logged or returned;
+            # the exception class and status code are safe and needed for diagnosis.
+            logger.warning(
+                "Career path provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
 
         if response is None:
             raise CareerPathProviderError("Career path provider request failed")
@@ -238,9 +253,14 @@ class MistralCareerPathProvider(CareerPathProvider):
                         },
                     },
                 )
-        except Exception:
-            # Provider bodies and prompts are intentionally never logged or returned.
-            pass
+        except Exception as exc:
+            # Provider bodies and prompts are intentionally never logged or returned;
+            # the exception class and status code are safe and needed for diagnosis.
+            logger.warning(
+                "Career path provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
 
         if response is None:
             raise CareerPathProviderError("Career path provider request failed")
@@ -327,17 +347,16 @@ def build_confirmed_fact_context(facts: list[CareerFact]) -> tuple[CareerPathFac
     return tuple(context)
 
 
-def build_safety_identifier(owner_id: str, settings: Settings) -> str:
-    if settings.ai_safety_salt:
-        secret = settings.ai_safety_salt.get_secret_value()
-    elif settings.ai_provider == "openai" and settings.openai_api_key:
-        # Development fallback only. Production validation requires a dedicated salt.
-        secret = settings.openai_api_key.get_secret_value()
-    elif settings.ai_provider == "mistral" and settings.mistral_api_key:
-        # The identifier is not sent to Mistral, but keep its local construction deterministic.
-        secret = settings.mistral_api_key.get_secret_value()
-    else:
-        secret = "career-agent-local-safety-id-v1"
+def build_safety_identifier(owner_id: str, settings: Settings) -> str | None:
+    """Derive a stable pseudonymous identifier, or None when no dedicated salt is set.
+
+    The provider API key must never double as an HMAC secret, so without AI_SAFETY_SALT the
+    identifier is omitted entirely (production validation requires the salt).
+    """
+
+    if not settings.ai_safety_salt:
+        return None
+    secret = settings.ai_safety_salt.get_secret_value()
     return hmac.new(secret.encode(), owner_id.encode(), sha256).hexdigest()
 
 

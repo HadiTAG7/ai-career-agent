@@ -156,6 +156,38 @@ def _context(*, message_count: int = 1) -> CareerPathProviderContext:
     )
 
 
+def test_safety_identifier_is_none_without_dedicated_salt() -> None:
+    # The provider API key must never be reused as an HMAC secret.
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        database_url="sqlite+aiosqlite://",
+        ai_provider="openai",
+        openai_api_key=SecretStr("provider-key-not-a-salt"),
+    )
+    assert build_safety_identifier("owner-id", settings) is None
+
+
+@pytest.mark.asyncio
+async def test_openai_request_omits_safety_identifier_without_dedicated_salt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _OpenAICapture()
+    _install_fake_openai(monkeypatch, capture)
+    context = CareerPathProviderContext(
+        locale="en",
+        confirmed_facts=(),
+        messages=(CareerPathContextMessage(role="user", content="hello"),),
+        safety_identifier=None,
+    )
+    provider = OpenAICareerPathProvider(api_key="test-provider-key", model="test-model")
+
+    result = await provider.generate(context)
+
+    assert result.message == "Which kind of work gives you the most energy?"
+    assert "safety_identifier" not in capture.parse_calls[0]
+
+
 @pytest.mark.asyncio
 async def test_openai_request_is_stateless_bounded_and_privacy_preserving(
     monkeypatch: pytest.MonkeyPatch,

@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from career_agent_api.models.domain import SourcePolicy
@@ -53,19 +54,26 @@ def source_key_for_url(source_url: str | None, requested_key: str) -> str:
 async def seed_source_policies(session: AsyncSession) -> None:
     existing = set((await session.scalars(select(SourcePolicy.source_key))).all())
     for key, policy in DEFAULT_POLICIES.items():
-        if key not in existing:
-            session.add(
-                SourcePolicy(
-                    source_key=key,
-                    display_name=str(policy["display_name"]),
-                    intake_method=IntakeMethod.MANUAL,
-                    permission_basis=str(policy["permission_basis"]),
-                    terms_reviewed_at=date(2026, 8, 6),
-                    can_search_automatically=False,
-                    can_fetch_details=False,
-                    can_apply_automatically=False,
+        if key in existing:
+            continue
+        # Another worker starting at the same time may insert the same key; the
+        # unique constraint decides, and losing the race is not an error.
+        try:
+            async with session.begin_nested():
+                session.add(
+                    SourcePolicy(
+                        source_key=key,
+                        display_name=str(policy["display_name"]),
+                        intake_method=IntakeMethod.MANUAL,
+                        permission_basis=str(policy["permission_basis"]),
+                        terms_reviewed_at=date(2026, 8, 6),
+                        can_search_automatically=False,
+                        can_fetch_details=False,
+                        can_apply_automatically=False,
+                    )
                 )
-            )
+        except IntegrityError:
+            continue
     await session.flush()
 
 

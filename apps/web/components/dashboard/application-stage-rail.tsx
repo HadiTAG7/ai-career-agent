@@ -3,9 +3,10 @@
 import { useLocale } from "@/lib/i18n";
 import type { DashboardStageCounts } from "@/lib/types";
 
-const demoCounts: DashboardStageCounts = { saved: 12, ready: 6, applied: 4, interviews: 2 };
+// Without real data the rail shows an honest empty state, never fabricated pipeline numbers.
+const emptyCounts: DashboardStageCounts = { saved: 0, ready: 0, applied: 0, interviews: 0 };
 
-export function ApplicationStageRail({ counts = demoCounts }: { counts?: DashboardStageCounts }) {
+export function ApplicationStageRail({ counts = emptyCounts }: { counts?: DashboardStageCounts }) {
   const { locale } = useLocale();
   const stages = [
     { ar: "محفوظة", en: "Saved", count: counts.saved },
@@ -21,7 +22,7 @@ export function ApplicationStageRail({ counts = demoCounts }: { counts?: Dashboa
       {stages.map((stage) => {
         return (
           <div className="min-w-0 px-1 text-center" key={stage.en}>
-            <span className="mx-auto block h-[15px] w-[15px] rounded-full border border-border bg-muted" aria-hidden="true" />
+            <span className={`mx-auto block h-[15px] w-[15px] rounded-full border ${stage.count > 0 ? "border-primary bg-primary" : "border-border bg-transparent"}`} aria-hidden="true" />
             <span className="mt-3 block truncate text-xs text-muted sm:text-sm">{locale === "ar" ? stage.ar : stage.en}</span>
             <strong className="mt-1 block text-lg font-medium text-foreground">{stage.count}</strong>
           </div>

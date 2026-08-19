@@ -26,13 +26,6 @@ const config: Config = {
           foreground: "rgb(var(--primary-foreground-rgb) / <alpha-value>)",
           text: "rgb(var(--primary-text-rgb) / <alpha-value>)",
         },
-        gold: {
-          DEFAULT: "rgb(var(--primary-rgb) / <alpha-value>)",
-          hover: "rgb(var(--primary-hover-rgb) / <alpha-value>)",
-          soft: "rgb(var(--primary-soft-rgb) / <alpha-value>)",
-          foreground: "rgb(var(--primary-foreground-rgb) / <alpha-value>)",
-          text: "rgb(var(--primary-text-rgb) / <alpha-value>)",
-        },
         emerald: {
           DEFAULT: "rgb(var(--emerald-rgb) / <alpha-value>)",
           dark: "rgb(var(--emerald-dark-rgb) / <alpha-value>)",

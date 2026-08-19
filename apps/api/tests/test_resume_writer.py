@@ -5225,8 +5225,9 @@ async def test_translation_verification_pipeline_has_one_total_wall_clock_budget
     assert len(provider.responses) == 1
 
 
-def test_provider_uses_dedicated_interview_and_writer_models_with_one_key() -> None:
-    provider = get_resume_writer_provider(
+@pytest.mark.asyncio
+async def test_provider_uses_dedicated_interview_and_writer_models_with_one_key() -> None:
+    provider = await get_resume_writer_provider(
         Settings(
             _env_file=None,
             environment="test",
@@ -5483,7 +5484,7 @@ async def test_mistral_provider_reuses_client_and_bounds_interactive_failures(
 
 
 @pytest.mark.asyncio
-async def test_provider_cache_closes_every_settings_scoped_provider(
+async def test_provider_cache_reuses_by_value_and_closes_replaced_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeProvider:
@@ -5505,13 +5506,28 @@ async def test_provider_cache_closes_every_settings_scoped_provider(
 
     monkeypatch.setattr(resume_writer_module, "_build_resume_writer_provider", build)
     first_settings = Settings(_env_file=None, environment="test")
-    second_settings = Settings(_env_file=None, environment="test")
+    equivalent_settings = Settings(_env_file=None, environment="test")
+    changed_settings = Settings(
+        _env_file=None, environment="test", ai_model="another-writer-model"
+    )
 
-    first = resume_writer_module.get_resume_writer_provider(first_settings)
-    assert resume_writer_module.get_resume_writer_provider(first_settings) is first
-    second = resume_writer_module.get_resume_writer_provider(second_settings)
+    # Two concurrent cold requests must share one construction, not build two clients.
+    first, concurrent = await asyncio.gather(
+        resume_writer_module.get_resume_writer_provider(first_settings),
+        resume_writer_module.get_resume_writer_provider(first_settings),
+    )
+    assert concurrent is first
+    assert len(created) == 1
+    assert await resume_writer_module.get_resume_writer_provider(first_settings) is first
+    # Equivalent settings values reuse the warm provider even from a different instance.
+    assert await resume_writer_module.get_resume_writer_provider(equivalent_settings) is first
+
+    second = await resume_writer_module.get_resume_writer_provider(changed_settings)
     assert second is not first
     assert len(created) == 2
+    # The replaced provider was closed when the cache key changed; the live one stays open.
+    assert first.close_count == 1
+    assert second.close_count == 0
 
     await resume_writer_module.close_resume_writer_provider()
     assert [provider.close_count for provider in created] == [1, 1]

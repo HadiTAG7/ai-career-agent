@@ -84,7 +84,7 @@ async def get_current_user(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Auth unavailable",
         )
-    if settings.environment in {"development", "test"}:
+    if settings.dev_auth_bypass and settings.environment in {"development", "test"}:
         return AuthenticatedUser(id=x_user_id or "demo-user")
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bearer token required")
 

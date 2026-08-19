@@ -27,6 +27,7 @@ import {
   Paperclip,
   Pencil,
   PencilLine,
+  RotateCcw,
   ScanSearch,
   Send,
   Sparkles,
@@ -35,7 +36,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { ResumeCanvasSelection } from "@/components/resume/resume-document-canvas";
+import type { ResumeCanvasSelection } from "@/lib/resume-presentation";
 import { ResumeProofingPaper } from "@/components/resume/resume-proofing-paper";
 import {
   ProofingEvidenceRail,
@@ -74,7 +75,15 @@ import { cn } from "@/lib/utils";
 
 type SaveState = "saved" | "saving" | "error";
 type MobilePanel = "conversation" | "resume";
-type QueuedDraftSave = { draft: ApiResumeDraftContent; generation: number; operationEpoch: number };
+type QueuedDraftSave = {
+  draft: ApiResumeDraftContent;
+  generation: number;
+  operationEpoch: number;
+  // Marks a payload restored after a failed request: it waits for an explicit
+  // retry (or a newer edit) instead of re-flushing in a loop, and it does not
+  // count as "actively pending" persistence.
+  failed?: boolean;
+};
 type ResumeQuickAction =
   | "additions_yes"
   | "additions_no"
@@ -373,13 +382,15 @@ function supportsResume(file: File) {
 }
 
 function latestUnderstandingId(workspace: ApiResumeWorkspace) {
-  if (workspace.pending_understanding?.id) return workspace.pending_understanding.id;
-  return [...workspace.messages].reverse().find((message) => message.kind === "understanding" && message.status === "pending")?.id ?? null;
+  // Never fall back to a message id: the understanding API only accepts
+  // understanding ids and 404s on anything else. Callers skip the call on null.
+  return workspace.pending_understanding?.id ?? null;
 }
 
 function latestSuggestionId(workspace: ApiResumeWorkspace) {
-  if (workspace.pending_suggestion?.suggestion_id) return workspace.pending_suggestion.suggestion_id;
-  return [...workspace.messages].reverse().find((message) => message.kind === "suggestion" && message.status === "pending")?.id ?? null;
+  // Never fall back to a message id: the suggestion API only accepts
+  // suggestion ids and 404s on anything else. Callers skip the call on null.
+  return workspace.pending_suggestion?.suggestion_id ?? null;
 }
 
 function saveBlob(blob: Blob, filename: string) {
@@ -476,7 +487,7 @@ function MessageBubble({ message, locale }: { message: ApiResumeMessage; locale:
           </span>
         ) : null}
         <span className="mt-1 block text-[10px] leading-none text-muted" dir="auto">
-          {new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(message.created_at))}
+          {new Intl.DateTimeFormat(locale === "ar" ? "ar-SA" : "en", { hour: "2-digit", minute: "2-digit" }).format(new Date(message.created_at))}
         </span>
       </div>
     </div>
@@ -879,7 +890,7 @@ function CoverageStrip({ workspace, locale }: { workspace: ApiResumeWorkspace; l
   const entries = Object.entries(workspace.section_coverage).slice(0, 4);
   if (!entries.length) return null;
   return (
-    <div className="grid grid-cols-2 divide-x divide-x-reverse divide-border border-y border-border py-2 text-[10px] sm:grid-cols-4">
+    <div className="grid grid-cols-2 divide-x rtl:divide-x-reverse divide-border border-y border-border py-2 text-[10px] sm:grid-cols-4">
       {entries.map(([key, complete]) => (
         <div className="flex items-center justify-center gap-1.5 px-2" key={key}>
           {complete ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald" /> : <span className="h-3.5 w-3.5 shrink-0 rounded-full bg-amber" />}
@@ -979,6 +990,9 @@ function AtsAssessmentCard({
   const found = assessment.found_sections ?? [];
   const missing = assessment.missing_sections ?? [];
   const counts = assessment.section_counts ?? {};
+  const assessedChecks = (assessment.ats_checks ?? []).filter((check) => check.status !== "not_assessed");
+  const passedChecks = assessedChecks.filter((check) => check.status === "pass").length;
+  const noUsableFacts = result.confirmedCount === 0 && result.extractedCount === 0;
   return (
     <section className="ms-2 border border-border bg-surface/35 p-4 sm:ms-10" aria-labelledby="resume-ats-assessment-title">
       <div className="flex items-start justify-between gap-4 border-b border-border pb-4">
@@ -1015,6 +1029,16 @@ function AtsAssessmentCard({
           </div>
         </div>
       </div>
+      {assessedChecks.length ? (
+        <div className="mt-4 flex items-center justify-between gap-3 border border-border/70 px-3 py-2 text-xs">
+          <span className="font-bold text-foreground">{locale === "ar" ? "فحوصات ATS البنيوية" : "ATS structural checks"}</span>
+          <span className="text-muted">
+            {locale === "ar"
+              ? `نجح ${passedChecks} من ${assessedChecks.length}`
+              : `${passedChecks} of ${assessedChecks.length} passed`}
+          </span>
+        </div>
+      ) : null}
       <div className="mt-4 flex items-center justify-between gap-3 border-y border-border py-3 text-xs">
         <span className="inline-flex items-center gap-2 text-foreground"><FileText className="h-4 w-4 text-primary-text" />{locale === "ar" ? "الهدف: صفحة واحدة بتخطيط أحادي العمود" : "Target: one-page, single-column layout"}</span>
         <span className="text-muted">{locale === "ar" ? `${result.extractedCount} للمراجعة` : `${result.extractedCount} to review`}</span>
@@ -1025,12 +1049,23 @@ function AtsAssessmentCard({
           {locale === "ar" ? "راجع المعلومات المستخرجة أدناه، ثم اعتمد التحليل." : "Review the extracted facts below, then confirm the assessment."}
         </p>
       ) : (
-        <Button className="mt-4 w-full" disabled={continuing || result.confirmedCount === 0} onClick={onContinue}>
-          {continuing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" />}
-          {continuing
-            ? (locale === "ar" ? "جارٍ تجهيز الخطوة التالية…" : "Preparing next step…")
-            : (locale === "ar" ? "اعتماد التحليل والمتابعة" : "Confirm assessment and continue")}
-        </Button>
+        <>
+          {noUsableFacts ? (
+            <p className="mt-4 border-s-2 border-amber ps-3 text-xs leading-6 text-muted">
+              {locale === "ar"
+                ? "لم نستخرج معلومات قابلة للاستخدام من هذا الملف. يمكنك المتابعة إلى المقابلة الموجهة وسنبني سيرتك من إجاباتك سؤالًا بسؤال."
+                : "We could not extract usable facts from this file. Continue to the guided interview and we will build your resume from your answers, one question at a time."}
+            </p>
+          ) : null}
+          <Button className="mt-4 w-full" disabled={continuing} onClick={onContinue}>
+            {continuing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ArrowLeft className="h-4 w-4 rtl:rotate-0 ltr:rotate-180" />}
+            {continuing
+              ? (locale === "ar" ? "جارٍ تجهيز الخطوة التالية…" : "Preparing next step…")
+              : noUsableFacts
+                ? (locale === "ar" ? "تابع إلى المقابلة الموجهة" : "Continue to the guided interview")
+                : (locale === "ar" ? "اعتماد التحليل والمتابعة" : "Confirm assessment and continue")}
+          </Button>
+        </>
       )}
     </section>
   );
@@ -1286,8 +1321,15 @@ function ConversationPanel({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationEndRef = useRef<HTMLDivElement>(null);
   const importFlow = importFlowFromWorkspace(workspace);
+  // Prefer the server's real assessment (gaps, ats_checks, section_counts) when the
+  // prepared import flow covers this upload; the local fact-count heuristic is only
+  // a fallback for imports the server has not assessed yet.
+  const serverAssessment = importFlow && recentImport && importFlow.source_id === recentImport.sourceId
+    ? importFlow.assessment ?? null
+    : null;
   const assessment = recentImport
-    ? preliminaryAssessment(profileFacts.filter((fact) => fact.source_id === recentImport.sourceId))
+    ? serverAssessment
+      ?? preliminaryAssessment(profileFacts.filter((fact) => fact.source_id === recentImport.sourceId))
     : null;
   const canGenerate = !importFlow || importFlow.can_generate === true || importFlow.phase === "ready_to_generate";
   const processedGapKeys = new Set([
@@ -1351,7 +1393,7 @@ function ConversationPanel({
       </header>
       {showContact ? <ContactPopover locale={locale} contact={workspace.contact} disabled={contactLocked} onChange={onContactChange} onClose={() => onShowContact(false)} /> : null}
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5" aria-live="polite">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5" role="log">
         {!workspace.messages.length ? (
           <AssistantBubble>
             <p dir={conversationLanguage === "ar" ? "rtl" : "ltr"}>{conversationLanguage === "ar" ? "جميل، خلّنا نبني سيرتك من قصتك الحقيقية. أرفق سيرة موجودة هنا، أو اكتب نبذة قصيرة عن آخر تجربة دراسية أو مهنية لك." : "Great—let's build your resume from your real story. Attach an existing resume here, or tell me briefly about your latest study or work experience."}</p>
@@ -1437,7 +1479,7 @@ function ConversationPanel({
           {locale === "ar" ? "اختر أحد الخيارين أعلاه لنبدأ المقابلة الذكية." : "Choose one option above to start the focused interview."}
         </footer>
       ) : <footer className="space-y-3 border-t border-border p-3 sm:p-4">
-        <div className="grid grid-cols-2 divide-x divide-x-reverse divide-border border-y border-border sm:grid-cols-4">
+        <div className="grid grid-cols-2 divide-x rtl:divide-x-reverse divide-border border-y border-border sm:grid-cols-4">
           {canGenerate ? (
             <button type="button" className="inline-flex min-h-11 items-center justify-center gap-1.5 px-2 text-[11px] font-semibold text-primary-text hover:bg-primary hover:text-primary-foreground" disabled={conversationControlsLocked || Boolean(workspace.pending_understanding)} onClick={() => onQuickAction(conversationLanguage === "ar" ? "اكتب سيرتي الجديدة بصياغة احترافية متوافقة مع ATS، اعتمادًا على المعلومات التي أكّدتها فقط، واستهدف صفحة واحدة من دون حذف إنجاز مهم." : "Write my new ATS-friendly resume using only my confirmed information, targeting one page without dropping important achievements.", "generate")}><PencilLine className="h-4 w-4" />{importFlow ? (locale === "ar" ? "أنشئ مسودة ATS" : "Create ATS draft") : (locale === "ar" ? "اكتب السيرة الآن" : "Write resume now")}</button>
           ) : null}
@@ -1475,6 +1517,10 @@ function ReviewPanel({
   selection,
   busy,
   rewriting,
+  showContact,
+  contactDisabled,
+  onShowContact,
+  onContactChange,
   onRewrite,
   onDecision,
 }: {
@@ -1483,6 +1529,10 @@ function ReviewPanel({
   selection: ResumeCanvasSelection | null;
   busy: boolean;
   rewriting: boolean;
+  showContact: boolean;
+  contactDisabled: boolean;
+  onShowContact: (show: boolean) => void;
+  onContactChange: (contact: ApiResumeWorkspace["contact"]) => void;
   onRewrite: (selection: ResumeCanvasSelection, mode: ResumeRewriteMode, instruction?: string) => void;
   onDecision: (decision: "accept" | "reject") => void;
 }) {
@@ -1497,14 +1547,18 @@ function ReviewPanel({
   }
 
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden border-y border-border xl:border-y-0" aria-label={locale === "ar" ? "مراجعة السيرة" : "Resume review"}>
-      <header className="border-b border-border px-4 py-4 xl:px-5">
-        <div className="flex items-center gap-2 text-primary-text">
-          <Pencil className="h-4 w-4" aria-hidden="true" />
-          <h2 className="text-sm font-bold">{locale === "ar" ? "ملاحظات التحرير الذكي" : "Editorial notes"}</h2>
+    <section className="relative flex min-h-0 flex-col overflow-hidden border-y border-border xl:border-y-0" aria-label={locale === "ar" ? "مراجعة السيرة" : "Resume review"}>
+      <header className="flex min-h-[62px] items-center justify-between gap-3 border-b border-border px-4 xl:px-5">
+        <div>
+          <div className="flex items-center gap-2 text-primary-text">
+            <Pencil className="h-4 w-4" aria-hidden="true" />
+            <h2 className="text-sm font-bold">{locale === "ar" ? "ملاحظات التحرير الذكي" : "Editorial notes"}</h2>
+          </div>
+          <p className="mt-1 text-[11px] text-muted">{locale === "ar" ? "ملاحظات مبنية في الهامش مرتبطة بالنص" : "Margin notes connected to the text"}</p>
         </div>
-        <p className="mt-1 text-[11px] text-muted">{locale === "ar" ? "ملاحظات مبنية في الهامش مرتبطة بالنص" : "Margin notes connected to the text"}</p>
+        <button type="button" className={cn("inline-flex min-h-10 shrink-0 items-center gap-2 border px-3 text-xs font-semibold", showContact ? "border-primary text-primary-text" : "border-border text-foreground hover:border-primary hover:text-primary-text")} aria-expanded={showContact} disabled={contactDisabled} onClick={() => onShowContact(!showContact)}><Mail className="h-4 w-4" />{locale === "ar" ? "التواصل" : "Contact"}</button>
       </header>
+      {showContact ? <ContactPopover locale={locale} contact={workspace.contact} disabled={contactDisabled} onChange={onContactChange} onClose={() => onShowContact(false)} /> : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 xl:px-5">
         {suggestion ? (
@@ -1513,7 +1567,7 @@ function ReviewPanel({
             <h3 id="resume-suggestion-title" className="text-sm font-bold leading-6 text-primary-text">{locale === "ar" ? "اقتراح تحرير بالذكاء الاصطناعي" : "AI editing suggestion"}</h3>
             <p className="mt-1 inline-flex items-center gap-1.5 text-[11px] text-muted"><Bookmark className="h-3 w-3" aria-hidden="true" />{locale === "ar" ? "مرتبطة بفقرة النص" : "Linked to the selected passage"}</p>
 
-            <div className="mt-5 grid grid-cols-2 divide-x divide-x-reverse divide-border text-xs leading-6">
+            <div className="mt-5 grid grid-cols-2 divide-x rtl:divide-x-reverse divide-border text-xs leading-6">
               <div className="pe-3">
                 <p className="mb-2 text-muted">{locale === "ar" ? "قبل التحرير" : "Before"}</p>
                 <p className="text-muted" dir={workspace.language === "ar" ? "rtl" : "ltr"}>{suggestion.before_text}</p>
@@ -1529,7 +1583,7 @@ function ReviewPanel({
               <p className="mt-1 text-xs leading-6 text-foreground">{locale === "ar" ? "صياغة بديلة مدعومة بنفس الأدلة. راجعها قبل الاعتماد." : "Alternative wording grounded in the same evidence. Review it before applying."}</p>
             </div>
 
-            <div className="mt-5 grid grid-cols-2 divide-x divide-x-reverse divide-border border-t border-border">
+            <div className="mt-5 grid grid-cols-2 divide-x rtl:divide-x-reverse divide-border border-t border-border">
               <button type="button" className="inline-flex min-h-12 items-center justify-center gap-2 font-semibold text-emerald hover:bg-emerald/5 disabled:opacity-45" disabled={busy} onClick={() => onDecision("accept")}><CheckCircle2 className="h-5 w-5" />{locale === "ar" ? "اعتمد التحسين" : "Accept improvement"}</button>
               <button type="button" className="inline-flex min-h-12 items-center justify-center gap-2 font-semibold text-danger hover:bg-danger/5 disabled:opacity-45" disabled={busy} onClick={() => onDecision("reject")}><X className="h-5 w-5" />{locale === "ar" ? "احتفظ بالأصل" : "Keep original"}</button>
             </div>
@@ -1577,7 +1631,7 @@ export function ResumeWorkspaceV2({
   const [workspace, setWorkspace] = useState<ApiResumeWorkspace | null>(initialWorkspace);
   const [facts, setFacts] = useState(initialFacts);
   const [conversationLanguage, setConversationLanguage] = useState<"ar" | "en">(
-    initialWorkspace ? workspaceConversationLanguage(initialWorkspace) : "ar",
+    initialWorkspace ? workspaceConversationLanguage(initialWorkspace) : locale,
   );
   const [outputLanguage, setOutputLanguage] = useState<"ar" | "en">(
     initialWorkspace?.language ?? "en",
@@ -1656,6 +1710,7 @@ export function ResumeWorkspaceV2({
   const reviewAcknowledgementGenerationRef = useRef(0);
   const revokedDownloadUrlRef = useRef<string | null>(null);
   const queuedDraftSaveRef = useRef<QueuedDraftSave | null>(null);
+  const failedContactSaveRef = useRef<ApiResumeWorkspace["contact"] | null>(null);
   const draftEditGenerationRef = useRef(0);
   const operationEpochRef = useRef(0);
   const resetRequestInFlightRef = useRef(false);
@@ -1755,9 +1810,12 @@ export function ResumeWorkspaceV2({
   }
 
   function persistenceIsPending() {
+    // A payload restored after a failed save waits for an explicit retry; it is
+    // not "actively pending" and must not keep the conversation frozen.
+    const activeQueuedDraftSave = queuedDraftSaveRef.current && !queuedDraftSaveRef.current.failed;
     return Boolean(
       draftSaveInFlightRef.current
-      || queuedDraftSaveRef.current
+      || activeQueuedDraftSave
       || saveTimerRef.current
       || contactSaveInFlightRef.current
       || contactTimerRef.current,
@@ -1869,7 +1927,9 @@ export function ResumeWorkspaceV2({
     if (
       !current
       || (!normalizedContent && !quickAction)
-      || saveState !== "saved"
+      // Block chat only while a save is actively running or queued; a FAILED
+      // save must not freeze the conversation (the header offers "Retry save").
+      || saveState === "saving"
       || persistenceIsPending()
     ) return;
     const operationEpoch = operationEpochRef.current;
@@ -2291,17 +2351,24 @@ export function ResumeWorkspaceV2({
       succeeded = true;
     } catch (nextError) {
       if (operationIsCurrent(queuedSave.operationEpoch)) {
+        // Restore the failed payload (unless a newer edit superseded it while the
+        // request was in flight) so "Retry save" has something to flush.
+        if (!queuedDraftSaveRef.current) {
+          queuedDraftSaveRef.current = { ...queuedSave, failed: true };
+        }
         setSaveState("error");
         setError(nextError);
       }
     } finally {
       if (!operationIsCurrent(queuedSave.operationEpoch)) return;
       draftSaveInFlightRef.current = false;
-      if (queuedDraftSaveRef.current) {
+      if (queuedDraftSaveRef.current && !queuedDraftSaveRef.current.failed) {
         setSaveState("saving");
         if (!saveTimerRef.current) void flushDraftSave();
       } else if (succeeded) {
-        setSaveState(persistenceIsPending() ? "saving" : "saved");
+        setSaveState(persistenceIsPending()
+          ? "saving"
+          : failedContactSaveRef.current ? "error" : "saved");
       }
     }
   }
@@ -2332,52 +2399,96 @@ export function ResumeWorkspaceV2({
     scheduleDraftSave(nextDraft);
   }
 
+  async function performContactSave(
+    contact: ApiResumeWorkspace["contact"],
+    operationEpoch: number,
+  ) {
+    if (!operationIsCurrent(operationEpoch)) return;
+    const latest = workspaceRef.current;
+    if (!latest) return;
+    contactSaveInFlightRef.current = true;
+    let succeeded = false;
+    try {
+      const saved = await startResumeWorkspace(profile.id, {
+        conversationLanguage: workspaceConversationLanguage(latest),
+        language: latest.language,
+        contact: {
+          email: contact.email ?? undefined,
+          phone: contact.phone ?? undefined,
+          linkedin: contact.linkedin ?? undefined,
+        },
+        dataSharingAcknowledged: false,
+      });
+      if (!operationIsCurrent(operationEpoch)) return;
+      const newest = workspaceRef.current;
+      if (newest) {
+        commitWorkspace({
+          ...newest,
+          updated_at: saved.updated_at,
+        });
+      }
+      failedContactSaveRef.current = null;
+      succeeded = true;
+    } catch (nextError) {
+      if (operationIsCurrent(operationEpoch)) {
+        // Keep the failed payload so "Retry save" can re-send it.
+        failedContactSaveRef.current = contact;
+        setSaveState("error");
+        setError(nextError);
+      }
+    } finally {
+      if (!operationIsCurrent(operationEpoch)) return;
+      contactSaveInFlightRef.current = false;
+      if (succeeded) {
+        setSaveState(persistenceIsPending()
+          ? "saving"
+          : queuedDraftSaveRef.current?.failed ? "error" : "saved");
+      }
+    }
+  }
+
   function handleContactChange(contact: ApiResumeWorkspace["contact"]) {
     const current = workspaceRef.current;
     if (!current) return;
     const operationEpoch = operationEpochRef.current;
     invalidateReviewAcknowledgement();
     commitWorkspace({ ...current, contact });
+    // A newer edit supersedes any previously failed payload: the scheduled save
+    // sends the full latest contact object.
+    failedContactSaveRef.current = null;
     setSaveState("saving");
     if (contactTimerRef.current) window.clearTimeout(contactTimerRef.current);
-    contactTimerRef.current = window.setTimeout(async () => {
+    contactTimerRef.current = window.setTimeout(() => {
       contactTimerRef.current = null;
-      if (!operationIsCurrent(operationEpoch)) return;
-      const latest = workspaceRef.current;
-      if (!latest) return;
-      contactSaveInFlightRef.current = true;
-      let succeeded = false;
-      try {
-        const saved = await startResumeWorkspace(profile.id, {
-          conversationLanguage: workspaceConversationLanguage(latest),
-          language: latest.language,
-          contact: {
-            email: contact.email ?? undefined,
-            phone: contact.phone ?? undefined,
-            linkedin: contact.linkedin ?? undefined,
-          },
-          dataSharingAcknowledged: false,
-        });
-        if (!operationIsCurrent(operationEpoch)) return;
-        const newest = workspaceRef.current;
-        if (newest) {
-          commitWorkspace({
-            ...newest,
-            updated_at: saved.updated_at,
-          });
-        }
-        succeeded = true;
-      } catch (nextError) {
-        if (operationIsCurrent(operationEpoch)) {
-          setSaveState("error");
-          setError(nextError);
-        }
-      } finally {
-        if (!operationIsCurrent(operationEpoch)) return;
-        contactSaveInFlightRef.current = false;
-        if (succeeded) setSaveState(persistenceIsPending() ? "saving" : "saved");
-      }
+      void performContactSave(contact, operationEpoch);
     }, 700);
+  }
+
+  function retryPendingSaves() {
+    const failedContact = failedContactSaveRef.current;
+    const hasDraftRetry = Boolean(queuedDraftSaveRef.current) && !draftSaveInFlightRef.current;
+    const hasContactRetry = Boolean(failedContact)
+      && !contactSaveInFlightRef.current
+      && !contactTimerRef.current;
+    if (!hasDraftRetry && !hasContactRetry) {
+      // Nothing left to retry (the failed payloads were superseded); reflect the
+      // actual persistence state instead of staying stuck on "error".
+      setSaveState(persistenceIsPending() ? "saving" : "saved");
+      return;
+    }
+    setError(null);
+    setSaveState("saving");
+    if (hasDraftRetry) {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      void flushDraftSave();
+    }
+    if (hasContactRetry && failedContact) {
+      failedContactSaveRef.current = null;
+      void performContactSave(failedContact, operationEpochRef.current);
+    }
   }
 
   async function handleRewrite(
@@ -2561,6 +2672,7 @@ export function ResumeWorkspaceV2({
     saveTimerRef.current = null;
     contactTimerRef.current = null;
     queuedDraftSaveRef.current = null;
+    failedContactSaveRef.current = null;
     draftSaveInFlightRef.current = false;
     contactSaveInFlightRef.current = false;
     reviewAcknowledgementInvalidatedRef.current = false;
@@ -2682,50 +2794,39 @@ export function ResumeWorkspaceV2({
     <div className="min-h-[calc(100vh-86px)] bg-background px-3 pb-44 pt-4 text-foreground sm:px-5 xl:h-[calc(100vh-80px)] xl:min-h-[720px] xl:px-6 xl:pb-4 xl:pt-3" dir={locale === "ar" ? "rtl" : "ltr"}>
       <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col">
         <header className="shrink-0 pb-3 xl:pb-4">
-          <div className="grid items-end gap-3 xl:grid-cols-[minmax(220px,1fr)_minmax(300px,1fr)_minmax(220px,1fr)]">
-            <div className="order-2 flex items-center justify-center xl:order-1 xl:justify-start">
-              <div>
-                <ReadinessBar score={workspace?.readiness_score ?? 0} locale={locale} />
-                <p className="mt-1 text-[11px] text-muted">
-                  {hasDraft
-                    ? (locale === "ar" ? "الحقائق المؤكدة مرتبطة بالمسودة" : "Confirmed facts are linked to the draft")
-                    : activeImportFlow
-                      ? (locale === "ar" ? "نراجع الأدلة قبل كتابة المسودة" : "Reviewing evidence before drafting")
-                      : workspace
-                        ? (locale === "ar" ? "إجاباتك المؤكدة تحفظ تقدمك" : "Confirmed answers preserve your progress")
-                        : (locale === "ar" ? "ابدأ من قصتك المهنية" : "Start with your professional story")}
-                </p>
-              </div>
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <div className="min-w-0">
+              <h1 className="truncate text-xl font-bold leading-tight tracking-[-0.02em] text-foreground sm:text-2xl">
+                {hasDraft
+                  ? (locale === "ar" ? "مختبر تحرير السيرة" : "Resume Proofing Studio")
+                  : (locale === "ar" ? "خلّنا نبني قصتك المهنية" : "Let’s build your professional story")}
+              </h1>
             </div>
 
-            <div className="order-1 text-center xl:order-2">
-              <div className="inline-flex items-center justify-center gap-3">
-                <Pencil className="hidden h-8 w-8 text-primary-text sm:block" strokeWidth={1.25} aria-hidden="true" />
-                <div>
-                  <h1 className="text-[28px] font-bold leading-tight tracking-[-0.025em] text-foreground sm:text-[31px]">
-                    {hasDraft
-                      ? (locale === "ar" ? "مختبر تحرير السيرة" : "Resume Proofing Studio")
-                      : (locale === "ar" ? "خلّنا نبني قصتك المهنية" : "Let’s build your professional story")}
-                  </h1>
-                  <p className="mt-1 text-xs text-muted">{locale === "ar" ? "استوديو التحرير والتحقق قبل الاعتماد" : "Edit and verify before approval"}</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="order-3 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 xl:justify-end">
-              <div className={cn("inline-flex items-center gap-2 text-xs font-semibold", saveState === "error" ? "text-danger" : saveState === "saving" ? "text-primary-text" : "text-emerald")} role="status">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div className="hidden sm:block"><ReadinessBar score={workspace?.readiness_score ?? 0} locale={locale} /></div>
+              <div className={cn("inline-flex items-center gap-1.5 text-xs font-semibold", saveState === "error" ? "text-danger" : saveState === "saving" ? "text-primary-text" : "text-emerald")} role="status">
                 {saveState === "saving" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : saveState === "error" ? <AlertCircle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
-                {saveState === "saving" ? (locale === "ar" ? "جارٍ الحفظ…" : "Saving…") : saveState === "error" ? (locale === "ar" ? "تعذر الحفظ" : "Save failed") : (locale === "ar" ? "تم الحفظ تلقائيًا" : "Autosaved")}
+                {saveState === "saving" ? (locale === "ar" ? "جارٍ الحفظ…" : "Saving…") : saveState === "error" ? (locale === "ar" ? "تعذر الحفظ" : "Save failed") : (locale === "ar" ? "محفوظ" : "Saved")}
               </div>
+              {saveState === "error" ? (
+                <button
+                  type="button"
+                  className="inline-flex min-h-9 items-center gap-1.5 border border-danger px-3 text-xs font-semibold text-danger hover:bg-danger hover:text-white"
+                  onClick={retryPendingSaves}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  {locale === "ar" ? "أعد محاولة الحفظ" : "Retry save"}
+                </button>
+              ) : null}
               {workspace ? (
                 <>
-                  <span className="hidden h-5 w-px bg-border sm:block" aria-hidden="true" />
-                  <span className="text-xs font-semibold text-primary-text">
+                  <span className="hidden text-xs text-muted sm:inline">
                     {locale === "ar" ? "الحوار" : "Chat"} {activeConversationLanguage.toUpperCase()} · {locale === "ar" ? "السيرة" : "Resume"} {activeOutputLanguage.toUpperCase()}
                   </span>
                   <button
                     type="button"
-                    className="inline-flex min-h-9 items-center gap-1.5 border-s border-danger ps-3 text-xs font-semibold text-danger hover:text-danger/80 disabled:cursor-not-allowed disabled:opacity-45"
+                    className="inline-flex min-h-9 items-center gap-1.5 text-xs font-semibold text-muted hover:text-danger disabled:cursor-not-allowed disabled:opacity-45"
                     disabled={resetBlocked}
                     onClick={() => { setResetError(null); setResetDialogOpen(true); }}
                   >
@@ -2736,7 +2837,9 @@ export function ResumeWorkspaceV2({
               ) : null}
             </div>
           </div>
-          <div className={cn("mx-auto mt-3 max-w-xl", hasDraft && "hidden xl:block")}><StageRail current={stageIndex} locale={locale} /></div>
+          {/* The stage rail guides the interview; once a draft exists every step is done
+              and the studio's own controls carry the state, so it retires. */}
+          {!hasDraft ? <div className="mx-auto mt-3 max-w-xl"><StageRail current={stageIndex} locale={locale} /></div> : null}
         </header>
 
         {generationWarning ? (
@@ -2804,7 +2907,7 @@ export function ResumeWorkspaceV2({
 
           <div className={cn(
             "order-2 min-h-0 xl:order-none xl:block xl:[direction:rtl]",
-            !isReview && mobilePanel !== "conversation" && "hidden xl:block",
+            mobilePanel !== "conversation" && "hidden xl:block",
           )} dir={locale === "ar" ? "rtl" : "ltr"}>
             {!workspace ? (
               <SetupConversation
@@ -2835,6 +2938,12 @@ export function ResumeWorkspaceV2({
                 selection={selection}
                 busy={busy || resetting || saveState !== "saved" || persistenceIsPending()}
                 rewriting={rewriteLocked}
+                showContact={showContact}
+                // Contact autosave makes saveState="saving" while the user is still
+                // typing; do not let that state disable its own input.
+                contactDisabled={busy || resetting}
+                onShowContact={setShowContact}
+                onContactChange={handleContactChange}
                 onRewrite={(target, mode, instruction) => void handleRewrite(target, mode, instruction)}
                 onDecision={(decision) => void handleSuggestionDecision(decision)}
               />
@@ -2847,7 +2956,7 @@ export function ResumeWorkspaceV2({
                 optimisticMessage={optimisticMessage}
                 error={error}
                 busy={busy || resetting}
-                interactionLocked={saveState !== "saved" || persistenceIsPending()}
+                interactionLocked={saveState === "saving" || persistenceIsPending()}
                 importing={importing}
                 correcting={correcting}
                 correction={correction}
@@ -2892,7 +3001,7 @@ export function ResumeWorkspaceV2({
         {workspace?.current_draft ? (
           <footer className="fixed inset-x-0 bottom-[72px] z-30 grid grid-cols-[0.9fr_1fr_1.35fr] border-y border-border bg-background/95 backdrop-blur-sm xl:relative xl:bottom-auto xl:z-50 xl:mt-3 xl:grid-cols-4 xl:bg-background xl:backdrop-blur-none" aria-label={locale === "ar" ? "إجراءات اعتماد السيرة" : "Resume approval actions"}>
             <label className="col-span-3 flex min-h-10 cursor-pointer items-center justify-center gap-2 border-b border-border px-3 text-xs font-semibold text-foreground xl:order-2 xl:col-span-1 xl:min-h-14 xl:border-b-0 xl:border-s">
-              <input type="checkbox" className="h-5 w-5 accent-primary" checked={reviewAcknowledged} disabled={reviewing || resetting || saveState === "saving"} onChange={(event) => void handleReviewChange(event.target.checked)} />
+              <input type="checkbox" className="h-5 w-5 accent-primary" checked={reviewAcknowledged} disabled={reviewing || resetting || saveState !== "saved"} onChange={(event) => void handleReviewChange(event.target.checked)} />
               {reviewing ? (locale === "ar" ? "جارٍ اعتماد المراجعة…" : "Confirming review…") : (locale === "ar" ? "راجعت المعلومات" : "I reviewed the information")}
             </label>
             <button type="button" className="inline-flex min-h-14 items-center justify-center gap-2 border-s border-border px-2 text-sm font-semibold text-foreground hover:text-primary-text xl:order-1" onClick={() => setMobilePanel("conversation")}><Pencil className="h-5 w-5" />{locale === "ar" ? "ملاحظات" : "Notes"}</button>

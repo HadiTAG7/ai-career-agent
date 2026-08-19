@@ -31,7 +31,7 @@ export function JobRow({ job }: { job: Job }) {
         </div>
         <p className="hidden text-sm text-muted md:block">{text(job.company)}</p>
         <p className="hidden text-sm text-muted md:block">{text(job.location)}</p>
-        <p className="hidden text-sm text-muted md:block">{text(job.employmentType)}</p>
+        <p className="hidden text-sm text-muted md:block">{job.employmentType ? text(job.employmentType) : "—"}</p>
         <Link
           href={`/jobs/${job.id}`}
           className={cn("inline-flex min-h-11 items-center gap-2 justify-self-start text-sm font-semibold md:justify-self-auto", positive ? "text-emerald" : "text-primary-text")}

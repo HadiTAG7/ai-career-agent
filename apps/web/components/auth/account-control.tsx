@@ -18,10 +18,11 @@ function ClerkAccount() {
 export function AccountControl({ sidebar = false }: { sidebar?: boolean }) {
   const { locale } = useLocale();
   if (authConfiguration.clerkEnabled) return <ClerkAccount />;
+  // No fabricated identity: without authentication the account slot states the mode.
   return (
     <div className="flex min-w-0 items-center gap-3">
-      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ink text-sm font-bold text-white">م</span>
-      {sidebar ? <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{locale === "ar" ? "محمد العتيبي" : "Mohammed Alotaibi"}</span><span className="block text-xs text-muted">{locale === "ar" ? "وضع تطوير" : "Development mode"}</span></span> : <span className="text-sm font-semibold">{locale === "ar" ? "محمد العتيبي" : "Mohammed Alotaibi"}</span>}
+      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ink text-sm font-bold text-white" aria-hidden="true">؟</span>
+      {sidebar ? <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{locale === "ar" ? "مستخدم التطوير المحلي" : "Local development user"}</span><span className="block text-xs text-muted">{locale === "ar" ? "بلا مصادقة" : "No authentication"}</span></span> : <span className="text-sm font-semibold">{locale === "ar" ? "مستخدم التطوير المحلي" : "Local development user"}</span>}
       {sidebar ? <ChevronDown className="h-4 w-4" aria-hidden="true" /> : null}
     </div>
   );

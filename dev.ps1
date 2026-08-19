@@ -43,6 +43,7 @@ function Ensure-LocalConfiguration {
     if (-not (Test-Path -LiteralPath $apiEnvironment)) {
         Write-Utf8File -Path $apiEnvironment -Content @'
 ENVIRONMENT=development
+DEV_AUTH_BYPASS=true
 DATABASE_URL=sqlite+aiosqlite:///./career_agent.db
 AUTO_CREATE_SCHEMA=true
 CORS_ORIGINS=http://localhost:3000
@@ -62,6 +63,7 @@ MAX_IMPORT_BYTES=10000000
         Write-Utf8File -Path $webEnvironment -Content @'
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
+NEXT_PUBLIC_DEV_AUTH_BYPASS=true
 '@
         Write-Step "Created apps/web/.env.local for the local API."
     }

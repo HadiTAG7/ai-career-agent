@@ -563,7 +563,25 @@ def deterministic_gap_question(
             ),
         },
     }
-    question, why, placeholder = prompts[language][normalized.category]
+    # Stored gaps can round-trip through provider_metadata JSON with categories outside
+    # SECTION_ORDER (identity/preference/eligibility). Fall back to a safe generic prompt
+    # instead of raising KeyError.
+    generic_prompts = {
+        PreferredLanguage.AR: (
+            "ما التفاصيل الصحيحة التي يمكنك تأكيدها لإكمال هذه المعلومة؟",
+            "التفاصيل المؤكدة تجعل السيرة أدق وأكثر مصداقية.",
+            "اذكر فقط التفاصيل الصحيحة التي تعرفها من دون تخمين.",
+        ),
+        PreferredLanguage.EN: (
+            "What accurate details can you confirm to complete this item?",
+            "Confirmed details make the resume more accurate and credible.",
+            "Share only the details you can confirm without guessing.",
+        ),
+    }
+    question, why, placeholder = prompts[language].get(
+        normalized.category,
+        generic_prompts[language],
+    )
     if normalized.record_label:
         question = (
             f"بالنسبة إلى «{normalized.record_label}»: {question}"

@@ -10,7 +10,7 @@ import career_agent_api.models  # noqa: F401
 from career_agent_api.api.router import router
 from career_agent_api.core.config import Settings, get_settings
 from career_agent_api.db.base import Base
-from career_agent_api.db.session import get_db
+from career_agent_api.db.session import enable_sqlite_foreign_keys, get_db
 from career_agent_api.services.policies import seed_source_policies
 
 
@@ -21,6 +21,7 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    enable_sqlite_foreign_keys(engine)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -48,6 +49,7 @@ async def client(
         return Settings(
             _env_file=None,
             environment="test",
+            dev_auth_bypass=True,
             database_url="sqlite+aiosqlite://",
             auto_create_schema=True,
             ai_provider="deterministic",

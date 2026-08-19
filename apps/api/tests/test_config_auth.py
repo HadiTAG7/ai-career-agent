@@ -45,6 +45,41 @@ async def test_dev_header_bypass_is_rejected_in_production() -> None:
 
 
 @pytest.mark.asyncio
+async def test_header_identity_is_rejected_without_explicit_dev_bypass() -> None:
+    settings = Settings(_env_file=None, ai_provider="deterministic", environment="development")
+    with pytest.raises(HTTPException) as exc_info:
+        await get_current_user(credentials=None, settings=settings, x_user_id="anyone")
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_header_identity_requires_opt_in_flag() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_provider="deterministic",
+        environment="development",
+        dev_auth_bypass=True,
+    )
+    user = await get_current_user(credentials=None, settings=settings, x_user_id="local-dev")
+    assert user.id == "local-dev"
+
+
+def test_production_refuses_dev_auth_bypass() -> None:
+    with pytest.raises(ValidationError, match="DEV_AUTH_BYPASS"):
+        Settings(
+            _env_file=None,
+            ai_provider="deterministic",
+            environment="production",
+            dev_auth_bypass=True,
+            database_url="postgresql://user:pass@db.example/career",
+            auto_create_schema=False,
+            clerk_jwks_url="https://clerk.example/.well-known/jwks.json",
+            clerk_issuer="https://clerk.example",
+            clerk_authorized_parties=["https://career.example"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_configured_clerk_requires_bearer_even_in_development() -> None:
     settings = Settings(
         _env_file=None,
@@ -194,3 +229,34 @@ def test_production_accepts_complete_mistral_configuration() -> None:
 
     assert settings.ai_provider == "mistral"
     assert settings.ai_model == "mistral-small-2603"
+
+
+def test_declared_but_empty_environment_values_are_treated_as_unset() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_provider="deterministic",
+        clerk_jwks_url="",
+        clerk_issuer=" ",
+        openai_api_key="",
+        mistral_api_key="",
+        ai_safety_salt="",
+        resume_interview_model="",
+        resume_writer_model="",
+    )
+    assert settings.clerk_jwks_url is None
+    assert settings.clerk_issuer is None
+    assert settings.openai_api_key is None
+    assert settings.mistral_api_key is None
+    assert settings.ai_safety_salt is None
+    assert settings.resume_interview_model is None
+    assert settings.resume_writer_model is None
+
+
+def test_production_rejects_an_empty_provider_key_and_salt() -> None:
+    with pytest.raises(ValidationError, match="MISTRAL_API_KEY"):
+        Settings(
+            **_external_provider_production_settings(
+                mistral_api_key="",
+                ai_safety_salt="",
+            )
+        )

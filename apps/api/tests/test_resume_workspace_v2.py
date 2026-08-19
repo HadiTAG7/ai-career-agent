@@ -191,7 +191,11 @@ class StubWorkspaceProvider(ResumeWriterProvider):
 @pytest.fixture
 def stub_provider(monkeypatch: pytest.MonkeyPatch) -> StubWorkspaceProvider:
     provider = StubWorkspaceProvider()
-    monkeypatch.setattr(workspace_api, "get_resume_writer_provider", lambda _settings: provider)
+
+    async def get_stub_provider(_settings) -> StubWorkspaceProvider:
+        return provider
+
+    monkeypatch.setattr(workspace_api, "get_resume_writer_provider", get_stub_provider)
     return provider
 
 
@@ -335,7 +339,7 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
         f"{base}/messages",
         headers=headers,
         json={
-            "content": "حللت المبيعات باستخدام Power BI",
+            "content": "عملت محلل بيانات في شركة تجريبية وحللت المبيعات باستخدام Power BI",
             "client_turn_id": client_turn_id,
             "expected_revision": 0,
         },
@@ -2864,7 +2868,10 @@ async def test_confirmed_import_answer_filters_only_resolved_remaining_gaps(
         f"/v1/profiles/{profile['id']}/resume-workspace/messages",
         headers=headers,
         json={
-            "content": "I work as a finance analyst and speak English fluently.",
+            "content": (
+                "I work as a Finance Analyst at Harbor Company, 2025 - Present, "
+                "and speak English fluently."
+            ),
             "client_turn_id": str(uuid4()),
             "expected_revision": workspace["revision"],
         },
@@ -3671,20 +3678,21 @@ async def test_import_ai_generation_sets_draft_review_before_patch_and_review(
     assert reviewed.json()["export_allowed"] is True
 
 
-async def test_import_gap_question_provider_failure_returns_503_without_canned_fallback_and_preserves_phase(  # noqa: E501
+async def test_import_gap_question_provider_failure_falls_back_to_deterministic_question(
     client,
     stub_provider: StubWorkspaceProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     profile, _source, _facts, headers, prepared = await _prepare_guided_import(client)
     flow_before = deepcopy(prepared["provider_metadata"]["import_flow"])
+    first_gap = flow_before["gap_queue"][0]
 
     async def fail_questions(**kwargs: object) -> list[ResumeQuestionRead]:
         stub_provider.question_calls.append(kwargs)
         raise ResumeWriterTransportError("question provider unavailable", transient=True)
 
     monkeypatch.setattr(stub_provider, "generate_questions", fail_questions)
-    failed = await client.post(
+    advanced = await client.post(
         f"/v1/profiles/{profile['id']}/resume-workspace/messages",
         headers=headers,
         json={
@@ -3695,20 +3703,22 @@ async def test_import_gap_question_provider_failure_returns_503_without_canned_f
         },
     )
 
-    assert failed.status_code == 503, failed.text
-    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
-    restored = await client.get(
-        f"/v1/profiles/{profile['id']}/resume-workspace",
-        headers=headers,
-    )
-    assert restored.status_code == 200, restored.text
-    assert restored.json()["provider_metadata"]["import_flow"] == flow_before
-    assert restored.json()["provider_metadata"].get("current_question") is None
-    assert restored.json()["revision"] == prepared["revision"]
-    assert restored.json()["current_draft"] is None
+    assert advanced.status_code == 200, advanced.text
+    workspace = advanced.json()
+    question = workspace["provider_metadata"]["current_question"]
+    assert question["generation_source"] == "deterministic_fallback"
+    assert question["gap_key"] == first_gap["key"]
+    assert question["category"] == first_gap["category"]
+    assert question["question"]
+    assert "question provider unavailable" not in advanced.text
+    flow_after = workspace["provider_metadata"]["import_flow"]
+    assert flow_after["phase"] == "gap_interview"
+    assert flow_after["active_gap_key"] == first_gap["key"]
+    assert workspace["revision"] == prepared["revision"] + 1
+    assert workspace["current_draft"] is None
 
 
-async def test_import_gap_skip_provider_failure_keeps_active_gap_and_does_not_record_skip(
+async def test_import_gap_skip_provider_failure_records_skip_with_deterministic_question(
     client,
     stub_provider: StubWorkspaceProvider,
     monkeypatch: pytest.MonkeyPatch,
@@ -3727,8 +3737,8 @@ async def test_import_gap_skip_provider_failure_keeps_active_gap_and_does_not_re
     assert started.status_code == 200, started.text
     workspace = started.json()
     flow_before = deepcopy(workspace["provider_metadata"]["import_flow"])
-    question_before = deepcopy(workspace["provider_metadata"]["current_question"])
     active_gap = flow_before["active_gap_key"]
+    next_gap = flow_before["gap_queue"][0]
     assert active_gap
     assert flow_before["gap_queue"]
 
@@ -3737,7 +3747,7 @@ async def test_import_gap_skip_provider_failure_keeps_active_gap_and_does_not_re
         raise ResumeWriterTransportError("question provider unavailable", transient=True)
 
     monkeypatch.setattr(stub_provider, "generate_questions", fail_questions)
-    failed = await client.post(
+    skipped = await client.post(
         f"/v1/profiles/{profile['id']}/resume-workspace/messages",
         headers=headers,
         json={
@@ -3748,22 +3758,20 @@ async def test_import_gap_skip_provider_failure_keeps_active_gap_and_does_not_re
         },
     )
 
-    assert failed.status_code == 503, failed.text
-    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
-    restored = await client.get(
-        f"/v1/profiles/{profile['id']}/resume-workspace",
-        headers=headers,
-    )
-    assert restored.status_code == 200, restored.text
-    restored_workspace = restored.json()
-    restored_flow = restored_workspace["provider_metadata"]["import_flow"]
-    assert restored_flow == flow_before
-    assert active_gap not in restored_flow["skipped_gap_keys"]
-    assert restored_workspace["provider_metadata"]["current_question"] == question_before
-    assert restored_workspace["revision"] == workspace["revision"]
+    assert skipped.status_code == 200, skipped.text
+    skipped_workspace = skipped.json()
+    skipped_flow = skipped_workspace["provider_metadata"]["import_flow"]
+    # The skip is recorded and the interview advances on the deterministic fallback question.
+    assert active_gap in skipped_flow["skipped_gap_keys"]
+    assert skipped_flow["phase"] == "gap_interview"
+    assert skipped_flow["active_gap_key"] == next_gap["key"]
+    question = skipped_workspace["provider_metadata"]["current_question"]
+    assert question["generation_source"] == "deterministic_fallback"
+    assert question["gap_key"] == next_gap["key"]
+    assert skipped_workspace["revision"] == workspace["revision"] + 1
 
 
-async def test_import_confirmed_answer_question_failure_keeps_pending_understanding_and_rolls_back_fact(  # noqa: E501
+async def test_import_confirmed_answer_question_failure_saves_fact_with_deterministic_question(
     client,
     stub_provider: StubWorkspaceProvider,
     monkeypatch: pytest.MonkeyPatch,
@@ -3793,16 +3801,14 @@ async def test_import_confirmed_answer_question_failure_keeps_pending_understand
     assert answered.status_code == 200, answered.text
     answered_workspace = answered.json()
     pending_before = deepcopy(answered_workspace["pending_understanding"])
-    flow_before = deepcopy(answered_workspace["provider_metadata"]["import_flow"])
     facts_before = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
-    evidence_revision_before = answered_workspace["evidence_revision"]
 
     async def fail_questions(**kwargs: object) -> list[ResumeQuestionRead]:
         stub_provider.question_calls.append(kwargs)
         raise ResumeWriterTransportError("question provider unavailable", transient=True)
 
     monkeypatch.setattr(stub_provider, "generate_questions", fail_questions)
-    failed = await client.post(
+    confirmed = await client.post(
         (
             f"/v1/profiles/{profile['id']}/resume-workspace/understandings/"
             f"{pending_before['id']}/confirm"
@@ -3811,20 +3817,21 @@ async def test_import_confirmed_answer_question_failure_keeps_pending_understand
         json={"expected_revision": answered_workspace["revision"]},
     )
 
-    assert failed.status_code == 503, failed.text
-    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
-    restored = await client.get(
-        f"/v1/profiles/{profile['id']}/resume-workspace",
-        headers=headers,
-    )
-    assert restored.status_code == 200, restored.text
-    restored_workspace = restored.json()
+    # A failing question writer no longer discards the confirmed answer: the fact is saved
+    # and the interview continues on the deterministic fallback question.
+    assert confirmed.status_code == 200, confirmed.text
+    confirmed_workspace = confirmed.json()
     facts_after = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
-    assert restored_workspace["pending_understanding"] == pending_before
-    assert restored_workspace["provider_metadata"]["import_flow"] == flow_before
-    assert restored_workspace["evidence_revision"] == evidence_revision_before
-    assert restored_workspace["revision"] == answered_workspace["revision"]
-    assert {fact["id"] for fact in facts_after} == {fact["id"] for fact in facts_before}
+    assert confirmed_workspace["pending_understanding"] is None
+    assert {fact["id"] for fact in facts_before} < {fact["id"] for fact in facts_after}
+    flow_after = confirmed_workspace["provider_metadata"]["import_flow"]
+    if flow_after["phase"] == "gap_interview":
+        question = confirmed_workspace["provider_metadata"]["current_question"]
+        assert question["generation_source"] == "deterministic_fallback"
+        assert question["gap_key"] == flow_after["active_gap_key"]
+    else:
+        assert flow_after["phase"] == "ready_to_generate"
+        assert flow_after["can_generate"] is True
 
 
 async def test_import_quick_action_rejected_while_understanding_is_pending(
@@ -4281,3 +4288,179 @@ async def test_restore_recovers_version_bound_translation_and_patch_cannot_forge
         restored.json()["provider_metadata"]["verified_supplemental_translations"]
         == original_bundle
     )
+
+
+async def test_ungrounded_provider_records_are_not_auto_confirmed(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def inventive_turn(**kwargs: object) -> SimpleNamespace:
+        stub_provider.adaptive_calls.append(kwargs)
+        return SimpleNamespace(
+            understanding="فهمت إجابتك.",
+            proposed_records=[
+                {
+                    "record_type": "experience",
+                    "title": "Senior Growth Director",
+                    "organization": "Invented Global Corp",
+                    "profile_field": "full_name",
+                    "_internal": "escalate",
+                }
+            ],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(stub_provider, "generate_adaptive_turn", inventive_turn)
+    profile, _ = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "ar", "data_sharing_acknowledged": True},
+    )
+    answered = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "عملت في خدمة العملاء لمدة سنة",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    pending = answered.json()["pending_understanding"]
+    confirmed = await client.post(
+        f"{base}/understandings/{pending['id']}/confirm",
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    facts = (await client.get(f"/v1/profiles/{profile['id']}/facts", headers=headers)).json()
+    created = next(fact for fact in facts if fact["label"] == "Senior Growth Director")
+    # The user confirmed only a prose summary; invented structure must pass profile review
+    # before it can feed matching, generation, or export.
+    assert created["verification_status"] == "extracted"
+    assert created["extraction_confidence"] is None
+    assert created["confirmed_at"] is None
+    assert "profile_field" not in created["structured_value"]
+    assert "_internal" not in created["structured_value"]
+    assert created["structured_value"]["source"] == "provider"
+
+
+async def test_delete_my_data_removes_resume_workspace_rows(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    profile, _ = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "ar", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+    answered = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "عملت محلل بيانات في شركة تجريبية وحللت المبيعات باستخدام Power BI",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": started.json()["revision"],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    pending = answered.json()["pending_understanding"]
+    confirmed = await client.post(
+        f"{base}/understandings/{pending['id']}/confirm",
+        headers=headers,
+        json={"expected_revision": answered.json()["revision"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["messages"]
+
+    deleted = await client.delete("/v1/me/data", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    counts = deleted.json()["deleted_counts"]
+    assert counts["resume_workspaces"] == 1
+    assert counts["resume_messages"] > 0
+
+    missing = await client.get(base, headers=headers)
+    assert missing.status_code == 404
+
+
+async def test_concurrent_mutation_during_provider_call_conflicts_cleanly(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The workspace row lock is released during provider round trips; a request whose
+    state changed while the provider was thinking must fail with the existing 409 code
+    instead of applying stale results."""
+
+    gate = asyncio.Event()
+    calls = {"count": 0}
+
+    async def parked_turn(**kwargs: object) -> SimpleNamespace:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            await gate.wait()
+        return SimpleNamespace(
+            understanding="فهمت إجابتك.",
+            proposed_records=[],
+            next_question=None,
+            draft_patch=None,
+            ready_to_generate=False,
+        )
+
+    monkeypatch.setattr(stub_provider, "generate_adaptive_turn", parked_turn)
+    profile, _ = await create_profile_and_source(client)
+    headers = {"X-User-Id": "demo-user"}
+    base = f"/v1/profiles/{profile['id']}/resume-workspace"
+    started = await client.post(
+        base,
+        headers=headers,
+        json={"language": "ar", "data_sharing_acknowledged": True},
+    )
+    assert started.status_code == 201, started.text
+    revision = started.json()["revision"]
+
+    first = asyncio.create_task(
+        client.post(
+            f"{base}/messages",
+            headers=headers,
+            json={
+                "content": "الإجابة الأولى",
+                "client_turn_id": str(uuid4()),
+                "expected_revision": revision,
+            },
+        )
+    )
+    for _ in range(200):
+        if calls["count"] >= 1:
+            break
+        await asyncio.sleep(0.01)
+    assert calls["count"] >= 1
+
+    second = await client.post(
+        f"{base}/messages",
+        headers=headers,
+        json={
+            "content": "الإجابة الثانية",
+            "client_turn_id": str(uuid4()),
+            "expected_revision": revision,
+        },
+    )
+    # The second request completed while the first was still waiting on the provider.
+    assert second.status_code == 200, second.text
+    assert second.json()["revision"] == revision + 1
+
+    gate.set()
+    first_response = await first
+    assert first_response.status_code == 409, first_response.text
+    assert first_response.json()["detail"]["code"] == "resume_workspace_revision_conflict"

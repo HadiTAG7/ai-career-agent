@@ -1,6 +1,6 @@
 import { demoJobs } from "@/lib/demo-data";
 import { localized } from "@/lib/i18n";
-import { normalizeApiDate } from "@/lib/utils";
+import { formatDisplayDate, normalizeApiDate } from "@/lib/utils";
 import type { ApiResult, Application, CareerPathMessageInput, CareerPathWorkspace, DashboardData, Job, JobRequirement, JobRequirementCategory, ManualJobInput, RequirementStatus } from "@/lib/types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "");
@@ -37,44 +37,68 @@ function canUseDemoFallback(error: unknown) {
   return !API_BASE_URL && error instanceof ApiUnavailableError;
 }
 
+const API_ERROR_MESSAGES: Record<string, { ar: string; en: string }> = {
+  ai_provider_not_configured: { ar: "المستشار الذكي غير مفعّل على الخادم بعد.", en: "The AI adviser is not enabled on the server yet." },
+  ai_provider_unavailable: { ar: "المستشار الذكي غير متاح مؤقتًا. رسالتك محفوظة ويمكنك المحاولة مرة أخرى.", en: "The AI adviser is temporarily unavailable. Your message is preserved so you can try again." },
+  career_path_rate_limited: { ar: "وصلت إلى حد المحادثة المؤقت. حاول لاحقًا.", en: "You have reached the temporary conversation limit. Please try again later." },
+  career_path_revision_conflict: { ar: "تغيّرت المحادثة أو حقائق الملف. حدّثنا السجل؛ راجع الرسالة ثم أعد الإرسال.", en: "The conversation or profile facts changed. We refreshed the transcript; review it and send again." },
+  career_path_context_changed: { ar: "تغيّرت المحادثة أو حقائق الملف. حدّثنا السجل؛ راجع الرسالة ثم أعد الإرسال.", en: "The conversation or profile facts changed. We refreshed the transcript; review it and send again." },
+  career_path_save_conflict: { ar: "تغيّرت المحادثة أثناء الحفظ. حدّثنا السجل؛ راجعه ثم أعد المحاولة.", en: "The conversation changed while saving. We refreshed it; review and try again." },
+  career_profile_evidence_required: { ar: "جهّز سيرتك وراجع حقيقة مهنية واحدة على الأقل قبل تحديد المسار.", en: "Prepare your resume and confirm at least one career fact before discovering your path." },
+  profile_required: { ar: "أنشئ ملفك المهني من صفحة السيرة أولًا قبل تحليل الوظائف أو حفظ التقديمات.", en: "Create your career profile from the resume page before analyzing jobs or saving applications." },
+  data_sharing_acknowledgement_required: { ar: "وافق على إشعار مشاركة البيانات قبل بدء المحادثة.", en: "Acknowledge the data-sharing notice before starting the conversation." },
+  profile_deletion_in_progress: { ar: "جارٍ حذف بياناتك حاليًا. انتظر اكتمال الحذف قبل أي إجراء جديد.", en: "Your data deletion is in progress. Wait for it to finish before starting new actions." },
+  internal_error: { ar: "حدث خطأ داخلي في الخادم. حاول مرة أخرى.", en: "An internal server error occurred. Please try again." },
+  unsupported_claims: { ar: "بعض العبارات غير مدعومة بأدلة مؤكدة، لذا لم يُنشأ المستند.", en: "Some claims are not backed by confirmed evidence, so the document was not created." },
+  resume_ai_consent_required: { ar: "وافق على إرسال محتوى السيرة إلى مزود الذكاء الاصطناعي قبل المتابعة.", en: "Acknowledge sending the resume content to the AI provider before continuing." },
+  resume_ai_not_configured: { ar: "مساعد السيرة الذكي غير مفعّل على الخادم.", en: "The AI resume assistant is not enabled on the server." },
+  resume_ai_unavailable: { ar: "تعذر تحليل السيرة مؤقتًا. احتفظنا بمدخلاتك ويمكنك إعادة المحاولة.", en: "Resume analysis is temporarily unavailable. Your input is preserved so you can retry." },
+  resume_text_unreadable: { ar: "لم نجد نصًا مقروءًا في الملف. استخدم PDF نصيًا أو ملف DOCX؛ صور السيرة الممسوحة تحتاج دعم OCR لاحقًا.", en: "No readable text was found. Use a text-based PDF or DOCX; scanned resumes require OCR support later." },
+  resume_content_duplicate: { ar: "سبق استيراد الملف ولم يُحلل بالذكاء بعد.", en: "This file was imported before but has not been analyzed by AI yet." },
+  resume_writer_consent_required: { ar: "وافق على استخدام الحقائق المهنية مع كاتب السيرة الذكي قبل المتابعة.", en: "Acknowledge sharing professional evidence with the AI resume writer before continuing." },
+  resume_writer_not_configured: { ar: "كاتب السيرة الذكي غير مفعّل على الخادم.", en: "The AI resume writer is not enabled on the server." },
+  resume_writer_unavailable: { ar: "تعذر تشغيل كاتب السيرة مؤقتًا. إجاباتك محفوظة في الصفحة ويمكنك إعادة المحاولة.", en: "The AI resume writer is temporarily unavailable. Your answers remain on the page so you can retry." },
+  resume_writer_evidence_required: { ar: "حلّل سيرتك أو أكمل المقابلة المنظمة أولًا، ثم ابدأ الأسئلة الذكية.", en: "Analyze a resume or complete the guided interview before starting smart questions." },
+  resume_review_required: { ar: "راجع نص السيرة ووافق عليه قبل تنزيل PDF.", en: "Review and approve the resume text before downloading the PDF." },
+  resume_review_stale: { ar: "تغيّر محتوى السيرة بعد موافقتك. راجع النسخة الأخيرة ثم أكّد مجددًا قبل التنزيل.", en: "The resume changed after your approval. Review the latest version and re-acknowledge before downloading." },
+  resume_review_blocked: { ar: "توجد عبارات غير مدعومة بأدلة مؤكدة. عالج الملاحظات الظاهرة قبل التصدير.", en: "Some content is not backed by confirmed evidence. Resolve the flagged items before exporting." },
+  resume_export_failed: { ar: "تعذر إنشاء ملف PDF مؤقتًا. حاول مرة أخرى.", en: "The PDF could not be generated. Please try again." },
+  resume_workspace_revision_conflict: { ar: "تغيّرت مساحة السيرة في تبويب آخر. حدّثنا آخر نسخة؛ راجعها ثم أعد المحاولة.", en: "The resume workspace changed in another tab. We loaded the latest version; review it and try again." },
+  resume_draft_revision_conflict: { ar: "تغيّرت مسودة السيرة في مكان آخر. حمّلنا أحدث نسخة؛ راجعها ثم أعد المحاولة.", en: "The resume draft changed elsewhere. We loaded the latest version; review it and try again." },
+  resume_evidence_revision_conflict: { ar: "تغيّرت معلومات السيرة أثناء المراجعة. حدّثنا القائمة؛ راجعها ثم أعد المحاولة.", en: "Resume facts changed during review. We refreshed the list; review it and try again." },
+  resume_import_draft_exists: { ar: "توجد مسودة حالية. امسحها أولًا إذا أردت إنشاء مسودة من ملف آخر.", en: "A draft already exists. Clear it before creating one from another file." },
+  resume_import_confirmed_evidence_required: { ar: "حدد معلومة صحيحة واحدة على الأقل من الملف قبل إنشاء المسودة.", en: "Select at least one accurate fact from the file before creating the draft." },
+  resume_import_fact_mismatch: { ar: "بعض المعلومات المحددة لا تنتمي إلى هذا الملف. حدّثنا المراجعة؛ اختر معلومات الملف نفسه فقط.", en: "Some selected facts do not belong to this file. We refreshed the review; select facts from this file only." },
+  resume_import_fact_rejected: { ar: "إحدى المعلومات المحددة سبق استبعادها. راجع القائمة واختر المعلومات غير المستبعدة فقط.", en: "One selected fact was previously rejected. Review the list and select only active facts." },
+  resume_import_review_incomplete: { ar: "راجع كل معلومات الملف وحدد الصحيح منها قبل الانتقال إلى التقييم والأسئلة.", en: "Review every extracted fact before moving to the assessment and questions." },
+  resume_import_review_idempotency_conflict: { ar: "استُخدم معرف المراجعة نفسه لطلب مختلف. حدّث الصفحة ثم أعد المحاولة.", en: "The same review request id was reused for different content. Refresh the page and try again." },
+  resume_import_phase_conflict: { ar: "تغيّرت مرحلة بناء السيرة. حدّثنا الصفحة؛ راجع الخطوة الظاهرة ثم حاول مجددًا.", en: "The resume flow changed. We refreshed it; review the current step and try again." },
+  resume_import_guided_flow_required: { ar: "هذا الملف يمر عبر المسار الموجّه. تابع خطوات الاستيراد الظاهرة.", en: "This file goes through the guided flow. Continue with the shown import steps." },
+  resume_import_questions_incomplete: { ar: "أكمل أسئلة النقص المتبقية أو تخطَّها قبل إنشاء المسودة.", en: "Complete or skip the remaining gap questions before generating the draft." },
+  resume_understanding_pending: { ar: "أكد ما فهمه المساعد أو عدّله قبل الانتقال للخطوة التالية.", en: "Confirm or correct the current understanding before continuing." },
+  resume_correction_required: { ar: "اكتب النص المصحح قبل الحفظ.", en: "Enter the corrected text before saving." },
+  resume_gap_interview: { ar: "أجب عن سؤال النقص الحالي أو تخطَّه قبل المتابعة.", en: "Answer or skip the current gap question before continuing." },
+  resume_draft_required: { ar: "أنشئ مسودة السيرة أولًا قبل محاولة تعديلها.", en: "Generate the resume draft before editing it." },
+  resume_suggestion_stale: { ar: "انتهت صلاحية التحسين المقترح لأن المسودة تغيّرت. اطلب تحسينًا جديدًا.", en: "The suggested improvement expired because the draft changed. Request a new one." },
+  resume_rewrite_not_supported: { ar: "مزوّد الكتابة الحالي لا يدعم إعادة صياغة المقاطع.", en: "The configured writer does not support section rewrites." },
+  resume_quick_action_invalid: { ar: "هذا الأمر غير مدعوم في هذه المرحلة.", en: "That command is not supported at this step." },
+  resume_language_change_requires_new_version: { ar: "تغيير لغة السيرة يتطلب إنشاء نسخة جديدة بدل تعديل النسخة الحالية.", en: "Changing the resume language requires creating a new version instead of editing this one." },
+  resume_conversation_language_change_not_allowed: { ar: "لا يمكن تغيير لغة المحادثة بعد بدايتها. أنشئ مساحة جديدة لتغييرها.", en: "The conversation language cannot change after it starts. Start a new workspace to change it." },
+  resume_verified_translation_invalid: { ar: "تعذر التحقق من الترجمة المعتمدة. أعد إنشاء المسودة.", en: "The verified translation could not be validated. Regenerate the draft." },
+};
+
 export function apiErrorMessage(error: unknown, locale: "ar" | "en") {
   if (error instanceof ApiHttpError) {
-    if (error.code === "ai_provider_not_configured") return locale === "ar" ? "المستشار الذكي غير مفعّل على الخادم بعد." : "The AI adviser is not enabled on the server yet.";
-    if (error.code === "ai_provider_unavailable") return locale === "ar" ? "المستشار الذكي غير متاح مؤقتًا. رسالتك محفوظة ويمكنك المحاولة مرة أخرى." : "The AI adviser is temporarily unavailable. Your message is preserved so you can try again.";
-    if (error.code === "career_path_rate_limited") return locale === "ar" ? "وصلت إلى حد المحادثة المؤقت. حاول لاحقًا." : "You have reached the temporary conversation limit. Please try again later.";
-    if (error.code === "career_path_revision_conflict" || error.code === "career_path_context_changed") return locale === "ar" ? "تغيّرت المحادثة أو حقائق الملف. حدّثنا السجل؛ راجع الرسالة ثم أعد الإرسال." : "The conversation or profile facts changed. We refreshed the transcript; review it and send again.";
-    if (error.code === "data_sharing_acknowledgement_required") return locale === "ar" ? "وافق على إشعار مشاركة البيانات قبل بدء المحادثة." : "Acknowledge the data-sharing notice before starting the conversation.";
-    if (error.code === "resume_ai_consent_required") return locale === "ar" ? "وافق على إرسال محتوى السيرة إلى مزود الذكاء الاصطناعي قبل المتابعة." : "Acknowledge sending the resume content to the AI provider before continuing.";
-    if (error.code === "resume_ai_not_configured") return locale === "ar" ? "مساعد السيرة الذكي غير مفعّل على الخادم." : "The AI resume assistant is not enabled on the server.";
-    if (error.code === "resume_ai_unavailable") return locale === "ar" ? "تعذر تحليل السيرة مؤقتًا. احتفظنا بمدخلاتك ويمكنك إعادة المحاولة." : "Resume analysis is temporarily unavailable. Your input is preserved so you can retry.";
-    if (error.code === "resume_text_unreadable") return locale === "ar" ? "لم نجد نصًا مقروءًا في الملف. استخدم PDF نصيًا أو ملف DOCX؛ صور السيرة الممسوحة تحتاج دعم OCR لاحقًا." : "No readable text was found. Use a text-based PDF or DOCX; scanned resumes require OCR support later.";
-    if (error.code === "resume_content_duplicate") return locale === "ar" ? "سبق استيراد الملف ولم يُحلل بالذكاء بعد." : "This file was imported before but has not been analyzed by AI yet.";
-    if (error.code === "resume_writer_consent_required") return locale === "ar" ? "وافق على استخدام الحقائق المهنية مع كاتب السيرة الذكي قبل المتابعة." : "Acknowledge sharing professional evidence with the AI resume writer before continuing.";
-    if (error.code === "resume_writer_not_configured") return locale === "ar" ? "كاتب السيرة الذكي غير مفعّل على الخادم." : "The AI resume writer is not enabled on the server.";
-    if (error.code === "resume_writer_unavailable") return locale === "ar" ? "تعذر تشغيل كاتب السيرة مؤقتًا. إجاباتك محفوظة في الصفحة ويمكنك إعادة المحاولة." : "The AI resume writer is temporarily unavailable. Your answers remain on the page so you can retry.";
-    if (error.code === "resume_writer_evidence_required") return locale === "ar" ? "حلّل سيرتك أو أكمل المقابلة المنظمة أولًا، ثم ابدأ الأسئلة الذكية." : "Analyze a resume or complete the guided interview before starting smart questions.";
-    if (error.code === "resume_review_required") return locale === "ar" ? "راجع نص السيرة ووافق عليه قبل تنزيل PDF." : "Review and approve the resume text before downloading the PDF.";
-    if (error.code === "resume_export_failed") return locale === "ar" ? "تعذر إنشاء ملف PDF مؤقتًا. حاول مرة أخرى." : "The PDF could not be generated. Please try again.";
-    if (error.code === "resume_workspace_revision_conflict") return locale === "ar" ? "تغيّرت مساحة السيرة في تبويب آخر. حدّثنا آخر نسخة؛ راجعها ثم أعد المحاولة." : "The resume workspace changed in another tab. We loaded the latest version; review it and try again.";
-    if (error.code === "resume_evidence_revision_conflict") return locale === "ar" ? "تغيّرت معلومات السيرة أثناء المراجعة. حدّثنا القائمة؛ راجعها ثم أعد المحاولة." : "Resume facts changed during review. We refreshed the list; review it and try again.";
-    if (error.code === "resume_import_draft_exists") return locale === "ar" ? "توجد مسودة حالية. امسحها أولًا إذا أردت إنشاء مسودة من ملف آخر." : "A draft already exists. Clear it before creating one from another file.";
-    if (error.code === "resume_import_confirmed_evidence_required") return locale === "ar" ? "حدد معلومة صحيحة واحدة على الأقل من الملف قبل إنشاء المسودة." : "Select at least one accurate fact from the file before creating the draft.";
-    if (error.code === "resume_import_draft_requires_ai") return locale === "ar" ? "لغة الملف تختلف عن لغة السيرة. استخدم المساعد الذكي لترجمة المحتوى وبناء المسودة." : "The file language differs from the resume language. Use the AI assistant to translate and build the draft.";
-    if (error.code === "resume_import_fact_mismatch") return locale === "ar" ? "بعض المعلومات المحددة لا تنتمي إلى هذا الملف. حدّثنا المراجعة؛ اختر معلومات الملف نفسه فقط." : "Some selected facts do not belong to this file. We refreshed the review; select facts from this file only.";
-    if (error.code === "resume_import_fact_rejected") return locale === "ar" ? "إحدى المعلومات المحددة سبق استبعادها. راجع القائمة واختر المعلومات غير المستبعدة فقط." : "One selected fact was previously rejected. Review the list and select only active facts.";
-    if (error.code === "resume_import_review_incomplete") return locale === "ar" ? "راجع كل معلومات الملف وحدد الصحيح منها قبل الانتقال إلى التقييم والأسئلة." : "Review every extracted fact before moving to the assessment and questions.";
-    if (error.code === "resume_import_phase_conflict") return locale === "ar" ? "تغيّرت مرحلة بناء السيرة. حدّثنا الصفحة؛ راجع الخطوة الظاهرة ثم حاول مجددًا." : "The resume flow changed. We refreshed it; review the current step and try again.";
-    if (error.code === "resume_understanding_pending") return locale === "ar" ? "أكد ما فهمه المساعد أو عدّله قبل الانتقال للخطوة التالية." : "Confirm or correct the current understanding before continuing.";
-    if (error.code === "resume_draft_required") return locale === "ar" ? "أنشئ مسودة السيرة أولًا قبل محاولة تعديلها." : "Generate the resume draft before editing it.";
-    if (error.code === "resume_workspace_consent_required") return locale === "ar" ? "وافق على استخدام الذكاء الاصطناعي في مساحة السيرة قبل المتابعة." : "Acknowledge AI use in the resume workspace before continuing.";
-    if (error.code === "resume_workspace_not_configured") return locale === "ar" ? "مساحة السيرة الذكية غير مفعّلة على الخادم." : "The AI resume workspace is not enabled on the server.";
-    if (error.code === "resume_workspace_unavailable") return locale === "ar" ? "تعذر تشغيل مساعد السيرة مؤقتًا. حفظنا ما كتبته ويمكنك إعادة المحاولة." : "The resume assistant is temporarily unavailable. Your input was kept so you can retry.";
-    if (error.code === "resume_understanding_required") return locale === "ar" ? "أكد ما فهمه المساعد أو عدّله قبل الانتقال للسؤال التالي." : "Confirm or correct what the assistant understood before continuing.";
-    if (error.code === "resume_suggestion_not_found") return locale === "ar" ? "انتهت صلاحية التحسين المقترح. اطلب تحسينًا جديدًا." : "That suggestion is no longer available. Request a new improvement.";
-    if (error.code === "career_profile_evidence_required") return locale === "ar" ? "جهّز سيرتك وراجع حقيقة مهنية واحدة على الأقل قبل تحديد المسار." : "Prepare your resume and confirm at least one career fact before discovering your path.";
+    const known = error.code ? API_ERROR_MESSAGES[error.code] : undefined;
+    if (known) return known[locale];
+    // Unknown codes fall through to generic copy; keep the request id visible so a
+    // reported failure can be correlated with server logs.
+    const reference = error.requestId
+      ? (locale === "ar" ? ` (مرجع الطلب: ${error.requestId})` : ` (request ref: ${error.requestId})`)
+      : "";
     if (error.status === 401) return locale === "ar" ? "انتهت جلسة الدخول أو لم تعد صالحة. سجّل الدخول مجددًا." : "Your sign-in session is missing or expired. Please sign in again.";
-    if (error.status === 422) return locale === "ar" ? `تعذر قبول البيانات: ${error.detail}` : `The submitted data was rejected: ${error.detail}`;
-    return locale === "ar" ? `تعذر إكمال الطلب (رمز ${error.status}): ${error.detail}` : `The request could not be completed (${error.status}): ${error.detail}`;
+    if (error.status === 422) return (locale === "ar" ? `تعذر قبول البيانات: ${error.detail}` : `The submitted data was rejected: ${error.detail}`) + reference;
+    return (locale === "ar" ? `تعذر إكمال الطلب (رمز ${error.status}): ${error.detail}` : `The request could not be completed (${error.status}): ${error.detail}`) + reference;
   }
   if (error instanceof TypeError || (error instanceof DOMException && error.name === "AbortError")) {
     return locale === "ar"
@@ -146,6 +170,20 @@ async function apiResponse(path: string, init?: ApiRequestOptions): Promise<Resp
         const payload = await response.json() as { detail?: unknown };
         if (typeof payload.detail === "string") {
           detail = payload.detail;
+        } else if (Array.isArray(payload.detail)) {
+          // FastAPI validation errors arrive as an array of {loc, msg, type} entries;
+          // render them as readable text instead of raw JSON.
+          detail = payload.detail
+            .map((entry) => {
+              if (entry && typeof entry === "object") {
+                const item = entry as { msg?: unknown; loc?: unknown };
+                const location = Array.isArray(item.loc) ? item.loc.slice(1).join(".") : "";
+                const message = typeof item.msg === "string" ? item.msg : String(item.msg ?? "");
+                return location ? `${location}: ${message}` : message;
+              }
+              return String(entry);
+            })
+            .join("; ");
         } else if (payload.detail && typeof payload.detail === "object") {
           const structured = payload.detail as { code?: unknown; message?: unknown; request_id?: unknown };
           code = typeof structured.code === "string" ? structured.code : undefined;
@@ -273,21 +311,6 @@ export type ApiResumeQuestion = {
   required: boolean;
 };
 
-export type ApiResumeQuestionsResult = {
-  provider: string;
-  model: string;
-  questions: ApiResumeQuestion[];
-  covered_categories: ApiResumeFactCategory[];
-};
-
-export type ApiResumeInterviewAnswer = {
-  question_id: string;
-  category: ApiResumeFactCategory;
-  question: string;
-  answer: string;
-  skipped: boolean;
-};
-
 export type ApiResumeDraftItem = {
   id: string;
   title: string;
@@ -309,12 +332,6 @@ export type ApiResumeDraftContent = {
   professional_summary: string;
   summary_evidence_handles: string[];
   sections: ApiResumeDraftSection[];
-};
-
-export type ApiResumeDraft = ApiResumeDraftContent & {
-  provider: string;
-  model: string;
-  fact_count: number;
 };
 
 export type ApiResumeWorkspaceStage = "understanding" | "writing" | "review" | "complete";
@@ -514,9 +531,8 @@ function mapBackendJob(job: BackendJob, analysis?: BackendAnalysis): Job {
     location: localized(job.location || "غير محدد", job.location || "Not specified"),
     source: localized(job.source_policy.display_name, job.source_policy.display_name),
     freshness: createdDate
-      ? localized(`أضيف في ${createdDate}`, `Added ${createdDate}`)
+      ? localized(`أضيف في ${formatDisplayDate(createdDate, "ar")}`, `Added ${formatDisplayDate(createdDate, "en")}`)
       : localized("تاريخ الإضافة غير متاح", "Added date unavailable"),
-    employmentType: localized("غير محدد", "Not specified"),
     coverage: analysis?.coverage_score ?? 0,
     recommendation: analysis?.decision ?? "need_information",
     readiness: analysis?.readiness_band ?? "low",
@@ -558,18 +574,33 @@ export async function getJobs(): Promise<Job[]> {
   return jobs.map((job, index) => mapBackendJob(job, analyses[index]));
 }
 
-export async function getDashboard(): Promise<DashboardData> {
-  const dashboard = await apiRequest<BackendDashboard>("/v1/dashboard");
-  const topOpportunityJobs = await Promise.all(dashboard.top_opportunities.map(async (analysis) => {
+// Deduplicated, concurrency-capped job lookups: several views need one job per row and
+// must not issue an unbounded parallel fan-out of GET /v1/jobs/{id} requests.
+async function fetchJobsByIds(jobIds: string[]): Promise<Map<string, BackendJob>> {
+  const uniqueIds = Array.from(new Set(jobIds));
+  const results = await mapWithConcurrency(uniqueIds, 4, async (jobId) => {
     try {
-      const job = await apiRequest<BackendJob>(`/v1/jobs/${encodeURIComponent(analysis.job_id)}`);
-      return mapBackendJob(job, analysis);
+      return await apiRequest<BackendJob>(`/v1/jobs/${encodeURIComponent(jobId)}`);
     } catch (error) {
       if (error instanceof ApiHttpError && error.status === 404) return null;
       throw error;
     }
-  }));
-  const topOpportunities = topOpportunityJobs.filter((job): job is Job => job !== null);
+  });
+  const jobsById = new Map<string, BackendJob>();
+  uniqueIds.forEach((jobId, index) => {
+    const job = results[index];
+    if (job) jobsById.set(jobId, job);
+  });
+  return jobsById;
+}
+
+export async function getDashboard(): Promise<DashboardData> {
+  const dashboard = await apiRequest<BackendDashboard>("/v1/dashboard");
+  const jobsById = await fetchJobsByIds(dashboard.top_opportunities.map((analysis) => analysis.job_id));
+  const topOpportunities = dashboard.top_opportunities.flatMap((analysis) => {
+    const job = jobsById.get(analysis.job_id);
+    return job ? [mapBackendJob(job, analysis)] : [];
+  });
   const pipeline = dashboard.application_pipeline;
 
   return {
@@ -593,18 +624,11 @@ export async function getDashboard(): Promise<DashboardData> {
 export async function getJob(jobId: string): Promise<ApiResult<Job>> {
   const explicitDemo = demoJobs.find((job) => job.id === jobId);
   if (explicitDemo) return { data: explicitDemo, source: "demo", notice: "Showing an explicit local demo opportunity." };
-  try {
-    const job = await apiRequest<BackendJob>(`/v1/jobs/${encodeURIComponent(jobId)}`);
-    const analysis = await getLatestAnalysis(jobId);
-    return { data: mapBackendJob(job, analysis), source: "api" };
-  } catch (error) {
-    if (!canUseDemoFallback(error)) throw error;
-    return {
-      data: demoJobs[0],
-      source: "demo",
-      notice: "FastAPI is not configured; showing an explicit local demo opportunity.",
-    };
-  }
+  // Never silently substitute a different record: an unknown id must surface as
+  // not-found rather than rendering the wrong job.
+  const job = await apiRequest<BackendJob>(`/v1/jobs/${encodeURIComponent(jobId)}`);
+  const analysis = await getLatestAnalysis(jobId);
+  return { data: mapBackendJob(job, analysis), source: "api" };
 }
 
 export async function correctJobRequirement(
@@ -640,10 +664,22 @@ export async function reviewJobRequirements(jobId: string): Promise<Job> {
   return mapBackendJob(job);
 }
 
+// A user who has not created a profile yet gets a purposeful message instead of a raw 404.
+async function requireProfile(): Promise<BackendProfile> {
+  try {
+    return await apiRequest<BackendProfile>("/v1/profiles");
+  } catch (error) {
+    if (error instanceof ApiHttpError && error.status === 404) {
+      throw new ApiHttpError(404, error.detail, "profile_required", error.requestId);
+    }
+    throw error;
+  }
+}
+
 export async function analyzeJob(jobId: string): Promise<Job> {
   const [job, profile] = await Promise.all([
     apiRequest<BackendJob>(`/v1/jobs/${encodeURIComponent(jobId)}`),
-    apiRequest<BackendProfile>("/v1/profiles"),
+    requireProfile(),
   ]);
   const analysis = await apiRequest<BackendAnalysis>(`/v1/jobs/${encodeURIComponent(jobId)}/analyze`, {
     method: "POST",
@@ -687,14 +723,15 @@ function mapBackendApplication(application: BackendApplication, job: BackendJob)
 
 export async function getApplications(): Promise<Application[]> {
   const applications = await apiRequest<BackendApplication[]>("/v1/applications");
-  return Promise.all(applications.map(async (application) => {
-    const job = await apiRequest<BackendJob>(`/v1/jobs/${encodeURIComponent(application.job_id)}`);
-    return mapBackendApplication(application, job);
-  }));
+  const jobsById = await fetchJobsByIds(applications.map((application) => application.job_id));
+  return applications.flatMap((application) => {
+    const job = jobsById.get(application.job_id);
+    return job ? [mapBackendApplication(application, job)] : [];
+  });
 }
 
 export async function saveApplication(jobId: string, analysisId: string) {
-  const profile = await apiRequest<BackendProfile>("/v1/profiles");
+  const profile = await requireProfile();
   return apiRequest<BackendApplication>("/v1/applications", {
     method: "POST",
     body: JSON.stringify({ profile_id: profile.id, job_id: jobId, analysis_id: analysisId, status: "saved" }),
@@ -824,96 +861,6 @@ export async function importCareerFile(
   body.set("use_ai", String(Boolean(options.useAi)));
   body.set("data_sharing_acknowledged", String(Boolean(options.dataSharingAcknowledged)));
   return apiRequest<ApiImportResult>(`/v1/profiles/${encodeURIComponent(profileId)}/imports`, { method: "POST", body, timeoutMs: 60_000 });
-}
-
-export async function createResumeDraft(
-  profileId: string,
-  input: { content: string; dataSharingAcknowledged: boolean },
-) {
-  return apiRequest<ApiImportResult>(`/v1/profiles/${encodeURIComponent(profileId)}/resume-drafts`, {
-    method: "POST",
-    body: JSON.stringify({
-      content: input.content,
-      data_sharing_acknowledged: input.dataSharingAcknowledged,
-    }),
-    timeoutMs: 60_000,
-  });
-}
-
-export async function createResumeQuestions(
-  profileId: string,
-  input: { language: "ar" | "en"; targetRole?: string; dataSharingAcknowledged: boolean },
-) {
-  return apiRequest<ApiResumeQuestionsResult>(
-    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/questions`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        language: input.language,
-        target_role: input.targetRole?.trim() || null,
-        data_sharing_acknowledged: input.dataSharingAcknowledged,
-      }),
-      timeoutMs: 90_000,
-    },
-  );
-}
-
-export async function generateProfessionalResume(
-  profileId: string,
-  input: {
-    language: "ar" | "en";
-    targetRole?: string;
-    answers: ApiResumeInterviewAnswer[];
-    dataSharingAcknowledged: boolean;
-  },
-) {
-  return apiRequest<ApiResumeDraft>(
-    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/generate`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        language: input.language,
-        target_role: input.targetRole?.trim() || null,
-        answers: input.answers,
-        data_sharing_acknowledged: input.dataSharingAcknowledged,
-      }),
-      timeoutMs: 120_000,
-    },
-  );
-}
-
-export async function exportProfessionalResumePdf(
-  profileId: string,
-  input: {
-    language: "ar" | "en";
-    draft: ApiResumeDraft;
-    contact: { email?: string; phone?: string; linkedin?: string };
-    reviewAcknowledged: boolean;
-  },
-) {
-  const response = await apiResponse(
-    `/v1/profiles/${encodeURIComponent(profileId)}/resume-assistant/export`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        language: input.language,
-        draft: {
-          headline: input.draft.headline,
-          professional_summary: input.draft.professional_summary,
-          summary_evidence_handles: input.draft.summary_evidence_handles,
-          sections: input.draft.sections,
-        },
-        contact: {
-          email: input.contact.email?.trim() || null,
-          phone: input.contact.phone?.trim() || null,
-          linkedin: input.contact.linkedin?.trim() || null,
-        },
-        review_acknowledged: input.reviewAcknowledged,
-      }),
-      timeoutMs: 90_000,
-    },
-  );
-  return response.blob();
 }
 
 function resumeWorkspacePath(profileId: string, suffix = "") {

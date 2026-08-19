@@ -5550,6 +5550,12 @@ class OpenAIResumeWriterProvider(_StructuredResumeWriterProvider):
             async with asyncio.timeout(request_timeout):
                 response = await request
         except Exception as exc:
+            # Only the exception class and status code are logged; bodies and prompts never are.
+            logger.warning(
+                "Resume writer provider request failed: %s (status=%s)",
+                type(exc).__name__,
+                getattr(exc, "status_code", None),
+            )
             raise ResumeWriterTransportError(
                 "Resume writer provider request failed",
                 transient=_provider_failure_is_transient(exc),
@@ -5560,7 +5566,51 @@ class OpenAIResumeWriterProvider(_StructuredResumeWriterProvider):
         return parsed
 
 
-_resume_writer_provider_cache: dict[int, tuple[Settings, ResumeWriterProvider]] = {}
+# One cached provider per process, keyed on the settings values that shape it. The lock is
+# recreated per event loop (asyncio primitives bind to the loop that first uses them, and the
+# test suite runs one loop per test).
+_resume_writer_provider: tuple[tuple[object, ...], ResumeWriterProvider] | None = None
+_resume_writer_provider_lock: asyncio.Lock | None = None
+_resume_writer_provider_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _resume_writer_cache_key(settings: Settings) -> tuple[object, ...]:
+    writer_model = getattr(settings, "resume_writer_model", None) or settings.ai_model
+    interview_model = getattr(settings, "resume_interview_model", None) or settings.ai_model
+    if settings.ai_provider == "mistral" and settings.mistral_api_key:
+        api_key = settings.mistral_api_key.get_secret_value()
+    elif settings.ai_provider == "openai" and settings.openai_api_key:
+        api_key = settings.openai_api_key.get_secret_value()
+    else:
+        api_key = None
+    return (
+        settings.ai_provider,
+        writer_model,
+        interview_model,
+        api_key,
+        settings.ai_request_timeout_seconds,
+        settings.resume_ai_max_output_tokens,
+    )
+
+
+def _resume_writer_provider_build_lock() -> asyncio.Lock:
+    global _resume_writer_provider_lock, _resume_writer_provider_lock_loop
+    loop = asyncio.get_running_loop()
+    if _resume_writer_provider_lock is None or _resume_writer_provider_lock_loop is not loop:
+        _resume_writer_provider_lock = asyncio.Lock()
+        _resume_writer_provider_lock_loop = loop
+    return _resume_writer_provider_lock
+
+
+async def _close_provider_quietly(provider: ResumeWriterProvider) -> None:
+    try:
+        await provider.aclose()
+    except Exception as exc:
+        logger.warning(
+            "Closing resume writer provider failed: provider=%s error_type=%s",
+            provider.provider_name,
+            type(exc).__name__,
+        )
 
 
 def _build_resume_writer_provider(settings: Settings) -> ResumeWriterProvider:
@@ -5585,27 +5635,36 @@ def _build_resume_writer_provider(settings: Settings) -> ResumeWriterProvider:
     return DisabledResumeWriterProvider(settings.ai_provider)
 
 
-def get_resume_writer_provider(settings: Settings) -> ResumeWriterProvider:
-    """Return one process-scoped provider so outbound HTTP connections stay warm."""
+async def get_resume_writer_provider(settings: Settings) -> ResumeWriterProvider:
+    """Return one process-scoped provider so outbound HTTP connections stay warm.
 
-    cache_key = id(settings)
-    cached = _resume_writer_provider_cache.get(cache_key)
-    if cached is not None and cached[0] is settings:
+    The cache is keyed on the settings values the provider is built from, so equivalent
+    ``Settings`` instances share one client. A key change closes the previous provider, and
+    construction is serialized so two concurrent cold requests cannot build two clients.
+    """
+
+    global _resume_writer_provider
+    cache_key = _resume_writer_cache_key(settings)
+    cached = _resume_writer_provider
+    if cached is not None and cached[0] == cache_key:
         return cached[1]
-    provider = _build_resume_writer_provider(settings)
-    _resume_writer_provider_cache[cache_key] = (settings, provider)
+    stale: ResumeWriterProvider | None = None
+    async with _resume_writer_provider_build_lock():
+        cached = _resume_writer_provider
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        if cached is not None:
+            stale = cached[1]
+        provider = _build_resume_writer_provider(settings)
+        _resume_writer_provider = (cache_key, provider)
+    if stale is not None:
+        await _close_provider_quietly(stale)
     return provider
 
 
 async def close_resume_writer_provider() -> None:
-    cached = list(_resume_writer_provider_cache.values())
-    _resume_writer_provider_cache.clear()
-    for _settings, provider in cached:
-        try:
-            await provider.aclose()
-        except Exception as exc:
-            logger.warning(
-                "Closing resume writer provider failed: provider=%s error_type=%s",
-                provider.provider_name,
-                type(exc).__name__,
-            )
+    global _resume_writer_provider
+    cached, _resume_writer_provider = _resume_writer_provider, None
+    if cached is None:
+        return
+    await _close_provider_quietly(cached[1])

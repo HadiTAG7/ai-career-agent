@@ -7,6 +7,14 @@ import type {
   ApiResumeSectionKey,
 } from "@/lib/api-client";
 
+export type ResumeCanvasSelection = {
+  targetKind: "headline" | "professional_summary" | "bullet";
+  sectionKey?: string;
+  itemId?: string;
+  bulletIndex?: number;
+  text: string;
+};
+
 export const RESUME_PRESENTATION_ORDER: readonly ApiResumeSectionKey[] = [
   "education",
   "experience",
@@ -196,9 +204,10 @@ export function factsToResumeSections(
 ): ApiResumeDraftSection[] {
   const grouped = new Map<ApiResumeSectionKey, ApiResumeDraftItem[]>();
   for (const fact of facts) {
-    // A rejected import remains in the profile for audit/history, but it must never
-    // reappear in the live resume projection after the user has excluded it.
-    if (fact.verification_status === "unconfirmed") continue;
+    // Evidence-first invariant: only user-confirmed facts may appear in the live resume
+    // projection. AI-extracted facts stay out until the user reviews them, and rejected
+    // imports remain in the profile for audit/history without reappearing here.
+    if (fact.verification_status !== "confirmed") continue;
     const sectionKey = resumeSectionForFact(fact);
     if (!sectionKey) continue;
     const items = grouped.get(sectionKey) ?? [];

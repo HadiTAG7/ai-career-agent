@@ -18,7 +18,7 @@ import type {
 } from "@/lib/api-client";
 import { buildFallbackResumeDraft } from "@/lib/resume-presentation";
 import { cn } from "@/lib/utils";
-import type { ResumeCanvasSelection } from "@/components/resume/resume-document-canvas";
+import type { ResumeCanvasSelection } from "@/lib/resume-presentation";
 
 type ResumeProofingPaperProps = {
   locale: "ar" | "en";
@@ -155,12 +155,9 @@ export function ResumeProofingPaper({
       aria-label={locale === "ar" ? "معاينة السيرة الحية" : "Live resume preview"}
     >
       <header className="hidden min-h-[44px] items-center justify-between gap-3 border-y border-border px-3 text-[11px] text-muted xl:flex">
-        <div className="inline-flex items-center gap-2 font-semibold text-foreground">
-          <FileText className="h-4 w-4 text-primary-text" aria-hidden="true" />
-          {locale === "ar" ? "ورقة التحرير" : "Proofing paper"}
-          <span className="border-s border-border ps-2 text-[10px] font-bold text-primary-text">
-            {locale === "ar" ? "ATS · هدف صفحة واحدة" : "ATS · ONE-PAGE TARGET"}
-          </span>
+        <div className="inline-flex items-center gap-2 font-semibold text-muted">
+          <FileText className="h-4 w-4" aria-hidden="true" />
+          {locale === "ar" ? "ATS · هدف صفحة واحدة" : "ATS · one-page target"}
         </div>
         <div className="inline-flex items-center">
           <button type="button" className="grid h-8 w-8 place-items-center border-s border-border hover:text-primary-text disabled:opacity-40" aria-label={locale === "ar" ? "تصغير" : "Zoom out"} disabled={zoom <= 80} onClick={() => setZoom((value) => Math.max(80, value - 10))}><Minus className="h-3.5 w-3.5" /></button>
