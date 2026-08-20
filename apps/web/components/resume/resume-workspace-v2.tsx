@@ -1537,6 +1537,7 @@ function ReviewPanel({
   onDecision: (decision: "accept" | "reject") => void;
 }) {
   const [instruction, setInstruction] = useState("");
+  const instructionInputRef = useRef<HTMLInputElement>(null);
   const suggestion = workspace.pending_suggestion;
 
   function submitInstruction(event: FormEvent<HTMLFormElement>) {
@@ -1598,14 +1599,16 @@ function ReviewPanel({
                 ["professional", locale === "ar" ? "أكثر مهنية" : "Professional"],
                 ["shorter", locale === "ar" ? "اختصرها" : "Shorten"],
                 ["custom", locale === "ar" ? "اسألني" : "Ask me"],
-              ] as const).map(([mode, label]) => <button type="button" key={mode} className="min-h-14 border-b border-e border-border px-2 text-xs font-semibold text-foreground hover:bg-primary hover:text-primary-foreground disabled:opacity-45" disabled={!selection || rewriting} onClick={() => selection && onRewrite(selection, mode, mode === "custom" ? (locale === "ar" ? "اسألني سؤالًا واحدًا يساعدك على تحسين هذا النص." : "Ask me one question that will help you improve this text.") : undefined)}><PencilLine className="mx-auto mb-1 h-4 w-4" />{label}</button>)}
+                // "Ask me" hands the user the instruction field instead of firing a
+                // preset edit: the editor must act on a change the user described.
+              ] as const).map(([mode, label]) => <button type="button" key={mode} className="min-h-14 border-b border-e border-border px-2 text-xs font-semibold text-foreground hover:bg-primary hover:text-primary-foreground disabled:opacity-45" disabled={!selection || rewriting} onClick={() => { if (!selection) return; if (mode === "custom") { instructionInputRef.current?.focus(); return; } onRewrite(selection, mode); }}><PencilLine className="mx-auto mb-1 h-4 w-4" />{label}</button>)}
             </div>
           </section>
         )}
       </div>
 
       <form className="grid grid-cols-[1fr_auto] border-t border-border" onSubmit={submitInstruction}>
-        <input className="min-h-12 min-w-0 bg-transparent px-4 text-sm text-foreground placeholder:text-muted disabled:opacity-45" value={instruction} disabled={!selection || rewriting} onChange={(event) => setInstruction(event.target.value)} placeholder={selection ? (locale === "ar" ? "اكتب تعديلًا للمحرر…" : "Ask for an edit…") : (locale === "ar" ? "حدد نصًا من السيرة أولًا" : "Select text in the resume first")} />
+        <input ref={instructionInputRef} className="min-h-12 min-w-0 bg-transparent px-4 text-sm text-foreground placeholder:text-muted disabled:opacity-45" value={instruction} disabled={!selection || rewriting} onChange={(event) => setInstruction(event.target.value)} placeholder={selection ? (locale === "ar" ? "وش التعديل المطلوب على النص المحدد؟" : "What change do you want for the selected text?") : (locale === "ar" ? "حدد نصًا من السيرة أولًا" : "Select text in the resume first")} />
         <button type="submit" className="grid h-12 w-12 place-items-center border-s border-border text-primary-text hover:bg-primary hover:text-primary-foreground disabled:opacity-45" disabled={!selection || !instruction.trim() || rewriting} aria-label={locale === "ar" ? "إرسال طلب التعديل" : "Send edit request"}>{rewriting ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 rtl:-scale-x-100" />}</button>
       </form>
     </section>
