@@ -393,7 +393,10 @@ async def test_workspace_persists_adaptive_turn_draft_rewrite_and_review(
         },
     )
     assert rewrite.status_code == 200, rewrite.text
-    suggestion = rewrite.json()
+    rewrite_turn = rewrite.json()
+    assert rewrite_turn["kind"] == "suggestion"
+    assert rewrite_turn["question"] is None
+    suggestion = rewrite_turn["suggestion"]
     assert suggestion["before_text"] == original_bullet
     assert suggestion["before_text"] != suggestion["after_text"]
 
@@ -516,13 +519,13 @@ async def test_accept_rejects_a_suggestion_based_on_an_older_draft(
         await session.commit()
 
     stale_accept = await client.post(
-        f"{base}/draft/suggestions/{rewrite.json()['suggestion_id']}/accept",
+        f"{base}/draft/suggestions/{rewrite.json()['suggestion']['suggestion_id']}/accept",
         headers=headers,
         json={"expected_draft_revision": 2},
     )
     assert stale_accept.status_code == 409
     assert stale_accept.json()["detail"]["code"] == "resume_suggestion_stale"
-    assert rewrite.json()["after_text"] not in stale_accept.text
+    assert rewrite.json()["suggestion"]["after_text"] not in stale_accept.text
 
 
 async def test_autosave_retention_preserves_semantic_versions_and_old_restore(
@@ -547,7 +550,7 @@ async def test_autosave_retention_preserves_semantic_versions_and_old_restore(
     )
     assert rewrite.status_code == 200, rewrite.text
     accepted = await client.post(
-        f"{base}/draft/suggestions/{rewrite.json()['suggestion_id']}/accept",
+        f"{base}/draft/suggestions/{rewrite.json()['suggestion']['suggestion_id']}/accept",
         headers=headers,
         json={"expected_draft_revision": 1},
     )
@@ -2301,6 +2304,187 @@ async def test_removed_rewrite_target_is_rejected_by_schema(
     assert rejected.status_code == 422
 
 
+async def test_rewrite_clarifying_question_turn_persists_nothing(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    item_id = workspace["current_draft"]["sections"][0]["items"][0]["id"]
+    question_call: dict[str, object] = {}
+
+    async def ask_first(**kwargs: object) -> SimpleNamespace:
+        question_call.update(kwargs)
+        return SimpleNamespace(
+            clarifying_question="أي مواد استثمارية تقصد تحديدًا؟",
+            candidate=None,
+        )
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", ask_first)
+    rewrite_payload = {
+        "target_kind": "bullet",
+        "section_key": "experience",
+        "item_id": item_id,
+        "bullet_index": 0,
+        "mode": "custom",
+        "instruction": "غيّر المواد إلى مواد استثمارية",
+        "expected_draft_revision": workspace["draft_revision"],
+    }
+    asked = await client.post(f"{base}/draft/rewrite", headers=headers, json=rewrite_payload)
+    assert asked.status_code == 200, asked.text
+    turn = asked.json()
+    assert turn["kind"] == "question"
+    assert turn["suggestion"] is None
+    assert turn["question"] == "أي مواد استثمارية تقصد تحديدًا؟"
+    assert question_call["conversation"] == []
+    assert question_call["conversation_language"] is PreferredLanguage.AR
+
+    # A question turn writes nothing: same revisions, same stage, no pending suggestion.
+    reloaded = await client.get(base, headers=headers)
+    assert reloaded.status_code == 200
+    assert reloaded.json()["revision"] == workspace["revision"]
+    assert reloaded.json()["draft_revision"] == workspace["draft_revision"]
+    assert reloaded.json()["stage"] == workspace["stage"]
+    assert reloaded.json()["pending_suggestion"] is None
+
+    answer_call: dict[str, object] = {}
+
+    async def answer_round(**kwargs: object) -> SimpleNamespace:
+        answer_call.update(kwargs)
+        return SimpleNamespace(
+            clarifying_question=None,
+            candidate=SimpleNamespace(
+                text="حللت مبيعات مواد المحاسبة المالية باستخدام Power BI.",
+                evidence_handles=kwargs["evidence_handles"],
+            ),
+        )
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", answer_round)
+    exchange = [
+        {"role": "assistant", "content": "أي مواد استثمارية تقصد تحديدًا؟"},
+        {"role": "user", "content": "المحاسبة المالية والاقتصاد الكلي"},
+    ]
+    answered = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={**rewrite_payload, "conversation": exchange},
+    )
+    assert answered.status_code == 200, answered.text
+    suggestion_turn = answered.json()
+    assert suggestion_turn["kind"] == "suggestion"
+    assert suggestion_turn["question"] is None
+    assert (
+        suggestion_turn["suggestion"]["after_text"]
+        == "حللت مبيعات مواد المحاسبة المالية باستخدام Power BI."
+    )
+    assert answer_call["conversation"] == exchange
+
+    after_suggestion = await client.get(base, headers=headers)
+    assert after_suggestion.json()["stage"] == "review"
+    assert after_suggestion.json()["pending_suggestion"] is not None
+
+
+async def test_rewrite_guard_rejection_becomes_a_question_until_the_cap(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    item_id = workspace["current_draft"]["sections"][0]["items"][0]["id"]
+
+    async def guard_rejects(**_: object) -> SimpleNamespace:
+        raise ResumeWriterOutputError(
+            "Resume rewrite dropped supported resume content",
+            dropped_terms=("Cost Control", "Internal Control Systems"),
+        )
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", guard_rejects)
+    rewrite_payload = {
+        "target_kind": "bullet",
+        "section_key": "experience",
+        "item_id": item_id,
+        "bullet_index": 0,
+        "mode": "shorter",
+        "expected_draft_revision": workspace["draft_revision"],
+    }
+
+    # Under the cap the rejection turns into a question in the conversation language.
+    arabic = await client.post(f"{base}/draft/rewrite", headers=headers, json=rewrite_payload)
+    assert arabic.status_code == 200, arabic.text
+    assert arabic.json()["kind"] == "question"
+    assert "Cost Control" in arabic.json()["question"]
+    assert "أعيد صياغتها" in arabic.json()["question"]
+
+    # The user's own wording controls the question language.
+    english = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={
+            **rewrite_payload,
+            "mode": "custom",
+            "instruction": "Shorten this bullet please",
+        },
+    )
+    assert english.status_code == 200, english.text
+    assert english.json()["kind"] == "question"
+    assert "Internal Control Systems" in english.json()["question"]
+    assert "reword them differently" in english.json()["question"]
+
+    # Nothing was persisted by either question turn.
+    reloaded = await client.get(base, headers=headers)
+    assert reloaded.json()["revision"] == workspace["revision"]
+    assert reloaded.json()["pending_suggestion"] is None
+
+    # Once both questions are spent, the honest 422 with the named terms returns.
+    spent_exchange = [
+        {"role": "assistant", "content": "سؤال أول؟"},
+        {"role": "user", "content": "جواب أول"},
+        {"role": "assistant", "content": "سؤال ثانٍ؟"},
+        {"role": "user", "content": "أبقها كما هي"},
+    ]
+    capped = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={**rewrite_payload, "conversation": spent_exchange},
+    )
+    assert capped.status_code == 422, capped.text
+    assert capped.json()["detail"]["code"] == "resume_rewrite_rejected"
+    assert capped.json()["detail"]["terms"] == ["Cost Control", "Internal Control Systems"]
+
+
+async def test_rewrite_rejects_malformed_clarification_exchanges(
+    client,
+    stub_provider: StubWorkspaceProvider,
+) -> None:
+    del stub_provider
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    item_id = workspace["current_draft"]["sections"][0]["items"][0]["id"]
+    rewrite_payload = {
+        "target_kind": "bullet",
+        "section_key": "experience",
+        "item_id": item_id,
+        "bullet_index": 0,
+        "mode": "stronger",
+        "expected_draft_revision": workspace["draft_revision"],
+    }
+    question = {"role": "assistant", "content": "سؤال؟"}
+    answer = {"role": "user", "content": "جواب"}
+    malformed_exchanges = [
+        [answer],
+        [question, answer, answer],
+        [question],
+        [question, answer, question, answer, question, answer],
+        [question, {"role": "user", "content": "   "}],
+    ]
+    for exchange in malformed_exchanges:
+        rejected = await client.post(
+            f"{base}/draft/rewrite",
+            headers=headers,
+            json={**rewrite_payload, "conversation": exchange},
+        )
+        assert rejected.status_code == 422, exchange
+
+
 def import_draft_docx(
     text: str = "Skills: Python and SQL\nBachelor of Computer Science",
 ) -> bytes:
@@ -4047,7 +4231,7 @@ async def test_verified_arbitrary_translation_survives_review_rewrite_and_export
     )
     assert rewrite.status_code == 200, rewrite.text
     rejected = await client.post(
-        f"{base}/draft/suggestions/{rewrite.json()['suggestion_id']}/reject",
+        f"{base}/draft/suggestions/{rewrite.json()['suggestion']['suggestion_id']}/reject",
         headers=headers,
         json={"expected_draft_revision": workspace["draft_revision"]},
     )

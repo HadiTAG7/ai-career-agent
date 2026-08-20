@@ -407,6 +407,19 @@ export type ApiResumeRewriteSuggestion = {
   evidence_handles: string[];
 };
 
+export type ApiResumeRewriteConversationTurn = {
+  role: "assistant" | "user";
+  content: string;
+};
+
+// One turn of the rewrite exchange: a before/after suggestion to review, or a
+// clarifying question the editor wants answered before it commits to a change.
+export type ApiResumeRewriteTurn = {
+  kind: "suggestion" | "question";
+  suggestion: ApiResumeRewriteSuggestion | null;
+  question: string | null;
+};
+
 export type ApiResumeMessage = {
   id: string;
   sequence: number;
@@ -1054,10 +1067,11 @@ export async function rewriteResumeDraftSelection(
     bulletIndex?: number;
     mode: ResumeRewriteMode;
     instruction?: string;
+    conversation?: ApiResumeRewriteConversationTurn[];
     expectedDraftRevision: number;
   },
 ) {
-  return apiRequest<ApiResumeRewriteSuggestion>(resumeWorkspacePath(profileId, "/draft/rewrite"), {
+  return apiRequest<ApiResumeRewriteTurn>(resumeWorkspacePath(profileId, "/draft/rewrite"), {
     method: "POST",
     body: JSON.stringify({
       target_kind: input.targetKind,
@@ -1066,6 +1080,7 @@ export async function rewriteResumeDraftSelection(
       bullet_index: input.bulletIndex ?? null,
       mode: input.mode,
       instruction: input.instruction?.trim() || null,
+      conversation: input.conversation ?? [],
       expected_draft_revision: input.expectedDraftRevision,
     }),
     timeoutMs: 120_000,

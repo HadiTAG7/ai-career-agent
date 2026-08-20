@@ -68,6 +68,7 @@ import {
   type ApiResumeDraftContent,
   type ApiResumeDraftVersion,
   type ApiResumeMessage,
+  type ApiResumeRewriteConversationTurn,
   type ApiResumeWorkspace,
   type ResumeRewriteMode,
 } from "@/lib/api-client";
@@ -75,6 +76,14 @@ import { cn } from "@/lib/utils";
 
 type SaveState = "saved" | "saving" | "error";
 type MobilePanel = "conversation" | "resume";
+// An in-flight clarify-then-rewrite exchange. The server stores nothing for it: the
+// client holds the thread and resends it whole with each answer.
+type RewriteClarification = {
+  target: ResumeCanvasSelection;
+  mode: ResumeRewriteMode;
+  instruction?: string;
+  thread: ApiResumeRewriteConversationTurn[];
+};
 type QueuedDraftSave = {
   draft: ApiResumeDraftContent;
   generation: number;
@@ -1515,6 +1524,7 @@ function ReviewPanel({
   locale,
   workspace,
   selection,
+  clarification,
   busy,
   rewriting,
   showContact,
@@ -1522,11 +1532,14 @@ function ReviewPanel({
   onShowContact,
   onContactChange,
   onRewrite,
+  onClarificationReply,
+  onClarificationCancel,
   onDecision,
 }: {
   locale: "ar" | "en";
   workspace: ApiResumeWorkspace;
   selection: ResumeCanvasSelection | null;
+  clarification: RewriteClarification | null;
   busy: boolean;
   rewriting: boolean;
   showContact: boolean;
@@ -1534,16 +1547,32 @@ function ReviewPanel({
   onShowContact: (show: boolean) => void;
   onContactChange: (contact: ApiResumeWorkspace["contact"]) => void;
   onRewrite: (selection: ResumeCanvasSelection, mode: ResumeRewriteMode, instruction?: string) => void;
+  onClarificationReply: (answer: string) => void;
+  onClarificationCancel: () => void;
   onDecision: (decision: "accept" | "reject") => void;
 }) {
   const [instruction, setInstruction] = useState("");
   const instructionInputRef = useRef<HTMLInputElement>(null);
   const suggestion = workspace.pending_suggestion;
+  const thread = clarification?.thread ?? [];
+  const awaitingAnswer = thread.length > 0 && thread[thread.length - 1].role === "assistant";
+
+  useEffect(() => {
+    // A new question from the editor puts the caret straight into the reply box.
+    if (awaitingAnswer && !rewriting) instructionInputRef.current?.focus();
+  }, [awaitingAnswer, rewriting, thread.length]);
 
   function submitInstruction(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selection || !instruction.trim()) return;
-    onRewrite(selection, "custom", instruction);
+    const trimmed = instruction.trim();
+    if (!trimmed) return;
+    if (clarification) {
+      onClarificationReply(trimmed);
+      setInstruction("");
+      return;
+    }
+    if (!selection) return;
+    onRewrite(selection, "custom", trimmed);
     setInstruction("");
   }
 
@@ -1589,7 +1618,27 @@ function ReviewPanel({
               <button type="button" className="inline-flex min-h-12 items-center justify-center gap-2 font-semibold text-danger hover:bg-danger/5 disabled:opacity-45" disabled={busy} onClick={() => onDecision("reject")}><X className="h-5 w-5" />{locale === "ar" ? "احتفظ بالأصل" : "Keep original"}</button>
             </div>
           </section>
-        ) : (
+        ) : null}
+
+        {clarification ? (
+          <section className={cn("relative border-s-2 border-primary ps-5", suggestion && "mt-8")} aria-label={locale === "ar" ? "سؤال من المحرر" : "A question from the editor"}>
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold leading-6 text-primary-text">{locale === "ar" ? "سؤال من المحرر" : "A question from the editor"}</h3>
+                <p className="mt-1 text-[11px] text-muted">{locale === "ar" ? "جاوب في الصندوق بالأسفل ليقترح التعديل" : "Answer below so the editor can propose the change"}</p>
+              </div>
+              <button type="button" className="grid h-8 w-8 shrink-0 place-items-center text-muted hover:text-danger" aria-label={locale === "ar" ? "إلغاء سؤال المحرر" : "Cancel the editor's question"} onClick={onClarificationCancel}><X className="h-4 w-4" /></button>
+            </div>
+            <div className="mt-4 space-y-2">
+              {thread.map((turn, index) => (
+                <p key={`${index}-${turn.role}`} className={cn("max-w-[88%] border px-3 py-2 text-xs leading-6", turn.role === "assistant" ? "border-primary/40 bg-primary/5 text-primary-text" : "ms-auto border-border text-foreground")}>{turn.content}</p>
+              ))}
+              {rewriting ? <p className="inline-flex items-center gap-2 text-[11px] text-muted"><LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />{locale === "ar" ? "المحرر يفكر…" : "The editor is thinking…"}</p> : null}
+            </div>
+          </section>
+        ) : null}
+
+        {suggestion || clarification ? null : (
           <section>
             <h3 className="font-bold text-foreground">{locale === "ar" ? "أوامر التحرير" : "Editing commands"}</h3>
             <p className="mt-1 text-xs leading-6 text-muted">{selection ? (locale === "ar" ? "اختر التحسين وسنعرضه قبل اعتماده." : "Choose an improvement and review it before applying.") : (locale === "ar" ? "اضغط على ملخص أو نقطة في السيرة أولًا." : "Select a summary or bullet in the resume first.")}</p>
@@ -1608,8 +1657,8 @@ function ReviewPanel({
       </div>
 
       <form className="grid grid-cols-[1fr_auto] border-t border-border" onSubmit={submitInstruction}>
-        <input ref={instructionInputRef} className="min-h-12 min-w-0 bg-transparent px-4 text-sm text-foreground placeholder:text-muted disabled:opacity-45" value={instruction} disabled={!selection || rewriting} onChange={(event) => setInstruction(event.target.value)} placeholder={selection ? (locale === "ar" ? "وش التعديل المطلوب على النص المحدد؟" : "What change do you want for the selected text?") : (locale === "ar" ? "حدد نصًا من السيرة أولًا" : "Select text in the resume first")} />
-        <button type="submit" className="grid h-12 w-12 place-items-center border-s border-border text-primary-text hover:bg-primary hover:text-primary-foreground disabled:opacity-45" disabled={!selection || !instruction.trim() || rewriting} aria-label={locale === "ar" ? "إرسال طلب التعديل" : "Send edit request"}>{rewriting ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 rtl:-scale-x-100" />}</button>
+        <input ref={instructionInputRef} className="min-h-12 min-w-0 bg-transparent px-4 text-sm text-foreground placeholder:text-muted disabled:opacity-45" value={instruction} disabled={(!selection && !clarification) || rewriting} onChange={(event) => setInstruction(event.target.value)} placeholder={clarification ? (locale === "ar" ? "جاوب سؤال المحرر…" : "Answer the editor's question…") : selection ? (locale === "ar" ? "وش التعديل المطلوب على النص المحدد؟" : "What change do you want for the selected text?") : (locale === "ar" ? "حدد نصًا من السيرة أولًا" : "Select text in the resume first")} />
+        <button type="submit" className="grid h-12 w-12 place-items-center border-s border-border text-primary-text hover:bg-primary hover:text-primary-foreground disabled:opacity-45" disabled={(!selection && !clarification) || !instruction.trim() || rewriting} aria-label={clarification ? (locale === "ar" ? "إرسال الجواب" : "Send the answer") : (locale === "ar" ? "إرسال طلب التعديل" : "Send edit request")}>{rewriting ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 rtl:-scale-x-100" />}</button>
       </form>
     </section>
   );
@@ -1668,6 +1717,7 @@ export function ResumeWorkspaceV2({
   const [error, setError] = useState<unknown>(null);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [selection, setSelection] = useState<ResumeCanvasSelection | null>(null);
+  const [clarification, setClarification] = useState<RewriteClarification | null>(null);
   const [correction, setCorrection] = useState("");
   const [correcting, setCorrecting] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("conversation");
@@ -1781,6 +1831,7 @@ export function ResumeWorkspaceV2({
     workspace.stage === "review"
     || workspace.stage === "complete"
     || workspace.pending_suggestion
+    || clarification
   ));
   const rewriteLocked = rewriting || saveState !== "saved" || persistenceIsPending();
   const displayedVersions = useMemo(
@@ -2498,6 +2549,7 @@ export function ResumeWorkspaceV2({
     target: ResumeCanvasSelection,
     mode: ResumeRewriteMode,
     instruction?: string,
+    conversation?: ApiResumeRewriteConversationTurn[],
   ) {
     const current = workspaceRef.current;
     if (!current?.current_draft || saveState !== "saved" || persistenceIsPending()) return;
@@ -2506,17 +2558,45 @@ export function ResumeWorkspaceV2({
     const operationEpoch = operationEpochRef.current;
     setRewriting(true);
     setError(null);
+    if (conversation?.length) {
+      // Show the user's answer in the thread while the editor works.
+      setClarification((active) => (active ? { ...active, thread: conversation } : active));
+    } else {
+      // A fresh command from any button abandons the active exchange.
+      setClarification(null);
+    }
     try {
-      const suggestion = await rewriteResumeDraftSelection(profile.id, {
+      const turn = await rewriteResumeDraftSelection(profile.id, {
         targetKind: target.targetKind,
         sectionKey: target.sectionKey,
         itemId: target.itemId,
         bulletIndex: target.bulletIndex,
         mode,
         instruction,
+        conversation,
         expectedDraftRevision: requestedDraftRevision,
       });
       if (!operationIsCurrent(operationEpoch)) return;
+      if (turn.kind === "question" && turn.question) {
+        // The editor wants an answer before committing to a change. Nothing was
+        // persisted server-side, so the draft revision and autosave are untouched.
+        setClarification({
+          target,
+          mode,
+          instruction,
+          thread: [...(conversation ?? []), { role: "assistant", content: turn.question }],
+        });
+        setMobilePanel("conversation");
+        return;
+      }
+      const suggestion = turn.suggestion;
+      if (!suggestion) {
+        setError(new Error(locale === "ar"
+          ? "لم يُرجِع المحرر اقتراحًا قابلًا للمراجعة. حاول مرة أخرى."
+          : "The editor returned no reviewable suggestion. Try again."));
+        return;
+      }
+      setClarification(null);
       const latest = workspaceRef.current;
       const draftStayedCurrent = Boolean(
         latest?.current_draft
@@ -2534,10 +2614,27 @@ export function ResumeWorkspaceV2({
       commitWorkspace({ ...latest, pending_suggestion: suggestion, stage: "review" });
       setMobilePanel("resume");
     } catch (nextError) {
-      if (operationIsCurrent(operationEpoch)) setError(nextError);
+      if (operationIsCurrent(operationEpoch)) {
+        setError(nextError);
+        if (conversation?.length) {
+          // Put the thread back to the unanswered question so the answer can be resent.
+          const beforeAnswer = conversation.slice(0, -1);
+          setClarification((active) => (active ? { ...active, thread: beforeAnswer } : active));
+        }
+      }
     } finally {
       if (operationIsCurrent(operationEpoch)) setRewriting(false);
     }
+  }
+
+  function handleClarificationReply(answer: string) {
+    const active = clarification;
+    const trimmed = answer.trim();
+    if (!active || !trimmed || rewriteLocked) return;
+    void handleRewrite(active.target, active.mode, active.instruction, [
+      ...active.thread,
+      { role: "user", content: trimmed },
+    ]);
   }
 
   async function handleSuggestionDecision(decision: "accept" | "reject") {
@@ -2773,7 +2870,8 @@ export function ResumeWorkspaceV2({
     }
   }
 
-  const annotationsCount = workspace?.pending_suggestion || workspace?.pending_understanding ? 1 : 0;
+  const annotationsCount = (workspace?.pending_suggestion || workspace?.pending_understanding ? 1 : 0)
+    + (clarification ? 1 : 0);
   const hasDraft = Boolean(workspace?.current_draft);
   const resetBlocked = Boolean(
     resetting
@@ -2939,6 +3037,7 @@ export function ResumeWorkspaceV2({
                 locale={locale}
                 workspace={workspace}
                 selection={selection}
+                clarification={clarification}
                 busy={busy || resetting || saveState !== "saved" || persistenceIsPending()}
                 rewriting={rewriteLocked}
                 showContact={showContact}
@@ -2948,6 +3047,8 @@ export function ResumeWorkspaceV2({
                 onShowContact={setShowContact}
                 onContactChange={handleContactChange}
                 onRewrite={(target, mode, instruction) => void handleRewrite(target, mode, instruction)}
+                onClarificationReply={handleClarificationReply}
+                onClarificationCancel={() => setClarification(null)}
                 onDecision={(decision) => void handleSuggestionDecision(decision)}
               />
             ) : (

@@ -428,6 +428,25 @@ class ResumeDraftRevisionCreate(BaseModel):
     expected_draft_revision: int = Field(ge=0)
 
 
+class ResumeRewriteConversationTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["assistant", "user"]
+    content: str = Field(min_length=1, max_length=1_000)
+
+    @field_validator("content")
+    @classmethod
+    def non_blank_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("conversation content cannot be blank")
+        return value
+
+
+# One clarify-then-rewrite exchange never needs more than question/answer twice.
+REWRITE_CLARIFYING_QUESTION_CAP = 2
+
+
 class ResumeRewriteCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -437,6 +456,9 @@ class ResumeRewriteCreate(BaseModel):
     bullet_index: int | None = Field(default=None, ge=0, le=19)
     mode: ResumeRewriteMode
     instruction: str | None = Field(default=None, max_length=1_000)
+    # The clarification exchange for this same request, held by the client and resent
+    # whole: the editor's questions and the user's answers, oldest first.
+    conversation: list[ResumeRewriteConversationTurn] = Field(default_factory=list, max_length=6)
     expected_draft_revision: int = Field(ge=0)
 
     @model_validator(mode="after")
@@ -456,6 +478,17 @@ class ResumeRewriteCreate(BaseModel):
             self.instruction = instruction
         elif self.instruction is not None:
             self.instruction = self.instruction.strip() or None
+        if self.conversation:
+            if self.conversation[0].role != "assistant":
+                raise ValueError("a clarification exchange starts with the editor's question")
+            for previous, current in zip(self.conversation, self.conversation[1:], strict=False):
+                if previous.role == current.role:
+                    raise ValueError("clarification roles must alternate")
+            if self.conversation[-1].role != "user":
+                raise ValueError("a rewrite request is sent to answer the editor's question")
+            asked = sum(1 for turn in self.conversation if turn.role == "assistant")
+            if asked > REWRITE_CLARIFYING_QUESTION_CAP:
+                raise ValueError("the clarification exchange exceeded the question cap")
         return self
 
 
@@ -508,6 +541,26 @@ class ResumeRewriteSuggestionRead(BaseModel):
     after_text: str = Field(min_length=1, max_length=10_000)
     base_draft_revision: int = Field(ge=0)
     evidence_handles: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ResumeRewriteTurnRead(BaseModel):
+    """One turn of the rewrite exchange: a suggestion to review, or a question to answer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["suggestion", "question"]
+    suggestion: ResumeRewriteSuggestionRead | None = None
+    question: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def exactly_one_outcome(self) -> "ResumeRewriteTurnRead":
+        if self.kind == "suggestion" and (self.suggestion is None or self.question is not None):
+            raise ValueError("a suggestion turn carries a suggestion and no question")
+        if self.kind == "question" and (
+            self.suggestion is not None or not (self.question or "").strip()
+        ):
+            raise ValueError("a question turn carries a non-blank question and no suggestion")
+        return self
 
 
 class ResumeReviewRead(BaseModel):

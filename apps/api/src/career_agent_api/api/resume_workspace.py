@@ -46,6 +46,7 @@ from career_agent_api.models.enums import (
     VerificationStatus,
 )
 from career_agent_api.schemas.api import (
+    REWRITE_CLARIFYING_QUESTION_CAP,
     ResumeDraftContent,
     ResumeDraftPatchCreate,
     ResumeDraftRevisionCreate,
@@ -57,6 +58,7 @@ from career_agent_api.schemas.api import (
     ResumeReviewRead,
     ResumeRewriteCreate,
     ResumeRewriteSuggestionRead,
+    ResumeRewriteTurnRead,
     ResumeUnderstandingActionCreate,
     ResumeVerifiedSupplementalTranslation,
     ResumeWorkspaceRead,
@@ -3374,14 +3376,60 @@ def _rewrite_instruction(payload: ResumeRewriteCreate) -> str:
     )
 
 
-@router.post("/draft/rewrite", response_model=ResumeRewriteSuggestionRead)
+_ARABIC_SCRIPT = re.compile(r"[\u0600-\u06ff]")
+
+
+def _clarifying_language(
+    payload: ResumeRewriteCreate,
+    conversation_language: PreferredLanguage,
+) -> PreferredLanguage:
+    """Pick the language for a deterministic clarifying question.
+
+    Match the user's own words (their latest conversation answer, or the custom
+    instruction) rather than the stored workspace language, so an Arabic speaker asking
+    in English gets an English question back.
+    """
+
+    latest_user_text = next(
+        (turn.content for turn in reversed(payload.conversation) if turn.role == "user"),
+        payload.instruction or "",
+    )
+    if not latest_user_text.strip():
+        return conversation_language
+    if _ARABIC_SCRIPT.search(latest_user_text):
+        return PreferredLanguage.AR
+    return PreferredLanguage.EN
+
+
+def _dropped_terms_clarifying_question(
+    terms: list[str],
+    language: PreferredLanguage,
+) -> str:
+    """Turn an evidence-guard rejection into a question that names what would be lost."""
+
+    if language is PreferredLanguage.AR:
+        joined = "، ".join(terms)
+        question = (
+            f"حتى لا أحذف تفاصيل مدعومة بالأدلة ({joined})، وضّح لي كيف تريد التعامل "
+            "معها: أُبقيها كما هي، أم أعيد صياغتها بشكل مختلف؟"
+        )
+    else:
+        joined = ", ".join(terms)
+        question = (
+            f"To avoid dropping evidence-backed details ({joined}), tell me how you want "
+            "them handled: keep them as they are, or reword them differently?"
+        )
+    return question[:500]
+
+
+@router.post("/draft/rewrite", response_model=ResumeRewriteTurnRead)
 async def rewrite_resume_draft(
     profile_id: UUID,
     payload: ResumeRewriteCreate,
     user: CurrentUser,
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db),
-) -> ResumeRewriteSuggestionRead:
+) -> ResumeRewriteTurnRead:
     await _owned_profile(session, profile_id, user.id)
     workspace = await _load_workspace(
         session,
@@ -3427,13 +3475,17 @@ async def rewrite_resume_draft(
         build_resume_evidence(await _workspace_facts(session, workspace)),
     )
     instruction = _rewrite_instruction(payload)
+    asked_questions = sum(1 for turn in payload.conversation if turn.role == "assistant")
     dispatch_revision = workspace.revision
     dispatch_draft_revision = workspace.draft_revision
     output_language = workspace.language
+    # Read attributes that a question turn needs before the commit expires them.
+    conv_language = _conversation_language(workspace)
+    question_language = _clarifying_language(payload, conv_language)
     # Release the row locks while the rewrite round trip runs.
     await session.commit()
     try:
-        candidate = await rewrite(
+        result = await rewrite(
             language=output_language,
             target_role=None,
             evidence=evidence,
@@ -3442,8 +3494,22 @@ async def rewrite_resume_draft(
             original_text=original_text,
             instruction=instruction,
             evidence_handles=handles,
+            conversation=[turn.model_dump() for turn in payload.conversation],
+            conversation_language=conv_language,
         )
     except ResumeWriterOutputError as exc:
+        dropped_terms = list(getattr(exc, "dropped_terms", ()) or ())
+        if dropped_terms and asked_questions < REWRITE_CLARIFYING_QUESTION_CAP:
+            # The evidence guard named what the rewrite would lose. Asking the user how
+            # to handle those details beats a dead-end rejection. A question turn
+            # persists nothing: no relock, no revision bump, no pending suggestion.
+            logger.info(
+                "Resume workspace rewrite turned a dropped-details rejection into a question"
+            )
+            return ResumeRewriteTurnRead(
+                kind="question",
+                question=_dropped_terms_clarifying_question(dropped_terms, question_language),
+            )
         # The provider answered; our evidence guard rejected the wording. Retrying the
         # same request reproduces the same rejection, so do not invite a blind retry.
         logger.warning("Resume workspace rewrite rejected by evidence checks: %s", exc)
@@ -3451,7 +3517,7 @@ async def rewrite_resume_draft(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "resume_rewrite_rejected",
             "The suggested rewrite dropped supported details, so it was not applied",
-            terms=list(getattr(exc, "dropped_terms", ()) or ()),
+            terms=dropped_terms,
         ) from exc
     except ResumeWriterError as exc:
         logger.warning("Resume workspace rewrite failed: %s", exc)
@@ -3460,6 +3526,19 @@ async def rewrite_resume_draft(
             "resume_writer_unavailable",
             "The AI resume rewrite is temporarily unavailable",
         ) from exc
+    clarifying_question = str(getattr(result, "clarifying_question", "") or "").strip()
+    if clarifying_question:
+        if asked_questions >= REWRITE_CLARIFYING_QUESTION_CAP:
+            # Defensive: the writer enforces the cap itself; never surface a third question.
+            raise _api_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "resume_rewrite_rejected",
+                "The suggested rewrite dropped supported details, so it was not applied",
+            )
+        # Answered client-side; nothing is persisted until a candidate arrives.
+        return ResumeRewriteTurnRead(kind="question", question=clarifying_question[:500])
+    # Providers return a ResumeRewriteTurnResult; test doubles may return a bare candidate.
+    candidate = getattr(result, "candidate", None) or result
     after_text = str(getattr(candidate, "text", getattr(candidate, "after_text", ""))).strip()
     candidate_handles = list(getattr(candidate, "evidence_handles", handles))
     if not after_text:
@@ -3491,7 +3570,7 @@ async def rewrite_resume_draft(
     workspace.stage = ResumeWorkspaceStage.REVIEW
     workspace.revision += 1
     await session.commit()
-    return suggestion
+    return ResumeRewriteTurnRead(kind="suggestion", suggestion=suggestion)
 
 
 def _apply_suggestion(
