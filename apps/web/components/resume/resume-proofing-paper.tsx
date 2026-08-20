@@ -3,12 +3,15 @@
 import { useMemo, useState } from "react";
 import {
   FileText,
+  LoaderCircle,
   Mail,
   MapPin,
   Minus,
   PencilLine,
   Phone,
   Plus,
+  Send,
+  X,
 } from "lucide-react";
 import type {
   ApiCareerFact,
@@ -57,24 +60,59 @@ function ProofToolbar({
   rewriting: boolean;
   onRewrite: (selection: ResumeCanvasSelection, mode: ResumeRewriteMode, instruction?: string) => void;
 }) {
-  const actions: Array<{
-    mode: ResumeRewriteMode;
-    ar: string;
-    en: string;
-    instruction?: { ar: string; en: string };
-  }> = [
+  const [asking, setAsking] = useState(false);
+  const [instruction, setInstruction] = useState("");
+  const actions: Array<{ mode: ResumeRewriteMode; ar: string; en: string }> = [
     { mode: "stronger", ar: "قوّها", en: "Strengthen" },
     { mode: "shorter", ar: "اختصرها", en: "Shorten" },
-    {
-      mode: "custom",
-      ar: "اسألني",
-      en: "Ask me",
-      instruction: {
-        ar: "اسألني سؤالًا واحدًا يساعدك على تحسين هذا النص.",
-        en: "Ask me one question that will help you improve this text.",
-      },
-    },
   ];
+
+  function submitInstruction(event: React.FormEvent) {
+    event.preventDefault();
+    const text = instruction.trim();
+    if (!text) return;
+    onRewrite(selection, "custom", text);
+    setInstruction("");
+    setAsking(false);
+  }
+
+  // "Ask me" collects the requested change first; the editor must never guess an edit
+  // the user has not described.
+  if (asking) {
+    return (
+      <form
+        className="mt-2 flex max-w-full items-center border-y border-border bg-background text-[10px] text-foreground shadow-[0_8px_18px_rgba(7,17,31,0.14)]"
+        onSubmit={submitInstruction}
+        aria-label={locale === "ar" ? "اطلب تعديلًا لهذا النص" : "Request an edit for this text"}
+      >
+        <input
+          className="min-h-9 min-w-0 flex-1 bg-transparent px-2 text-[11px] text-foreground placeholder:text-muted"
+          value={instruction}
+          onChange={(event) => setInstruction(event.target.value)}
+          placeholder={locale === "ar" ? "وش التعديل المطلوب على هذا النص؟" : "What change do you want here?"}
+          disabled={rewriting}
+          dir="auto"
+          autoFocus
+        />
+        <button
+          type="submit"
+          className="grid h-9 w-9 shrink-0 place-items-center border-s border-border text-primary-text hover:bg-primary hover:text-primary-foreground disabled:opacity-45"
+          disabled={!instruction.trim() || rewriting}
+          aria-label={locale === "ar" ? "أرسل طلب التعديل" : "Send edit request"}
+        >
+          {rewriting ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5 rtl:-scale-x-100" />}
+        </button>
+        <button
+          type="button"
+          className="grid h-9 w-9 shrink-0 place-items-center border-s border-border text-muted hover:text-foreground"
+          onClick={() => { setInstruction(""); setAsking(false); }}
+          aria-label={locale === "ar" ? "إلغاء" : "Cancel"}
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </form>
+    );
+  }
 
   return (
     <div
@@ -86,14 +124,23 @@ function ProofToolbar({
         <button
           key={action.mode}
           type="button"
-          className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 border-e border-border px-2 font-semibold transition-colors last:border-e-0 hover:bg-primary hover:text-primary-foreground disabled:opacity-45"
+          className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 border-e border-border px-2 font-semibold transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-45"
           disabled={rewriting}
-          onClick={() => onRewrite(selection, action.mode, action.instruction?.[locale])}
+          onClick={() => onRewrite(selection, action.mode)}
         >
           <PencilLine className="h-3.5 w-3.5" aria-hidden="true" />
           {locale === "ar" ? action.ar : action.en}
         </button>
       ))}
+      <button
+        type="button"
+        className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 px-2 font-semibold transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-45"
+        disabled={rewriting}
+        onClick={() => setAsking(true)}
+      >
+        <PencilLine className="h-3.5 w-3.5" aria-hidden="true" />
+        {locale === "ar" ? "اسألني" : "Ask me"}
+      </button>
     </div>
   );
 }

@@ -2113,6 +2113,40 @@ describe("resume workspace v2", () => {
     await waitFor(() => expect(summary).toHaveValue(newestSummary));
   }, 15_000);
 
+  it("asks for the requested change before running a custom rewrite", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      readiness_score: 88,
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+
+    const toolbar = within(summary.parentElement!);
+    await user.click(toolbar.getByRole("button", { name: "اسألني" }));
+
+    // Clicking "Ask me" must collect the instruction instead of firing a preset edit.
+    expect(apiMocks.rewriteResumeDraftSelection).not.toHaveBeenCalled();
+    const instructionField = toolbar.getByPlaceholderText("وش التعديل المطلوب على هذا النص؟");
+    await user.type(instructionField, "اذكر أدوات التحليل التي استخدمتها");
+    await user.click(toolbar.getByRole("button", { name: "أرسل طلب التعديل" }));
+
+    await waitFor(() => expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenCalledWith(
+      profile.id,
+      expect.objectContaining({
+        mode: "custom",
+        instruction: "اذكر أدوات التحليل التي استخدمتها",
+      }),
+    ));
+  });
+
   it("waits for autosave and merges a rewrite into the latest workspace without losing edits", async () => {
     const user = userEvent.setup();
     const writingWorkspace = makeWorkspace({
