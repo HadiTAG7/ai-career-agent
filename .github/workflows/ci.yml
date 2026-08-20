@@ -76,8 +76,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # New advisories in the transitive tree must stay visible without turning
-    # unrelated PRs red; this job is intentionally non-blocking.
-    continue-on-error: true
+    # unrelated PRs red. continue-on-error is not enough: the job still reports a
+    # failed check, and Render's checksPass auto-deploy then never fires. Keep the
+    # job itself green and surface advisories as a warning annotation instead.
     defaults:
       run:
         working-directory: apps/web
@@ -89,7 +90,9 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        run: |
+          npm audit --audit-level=high \
+            || echo "::warning title=Dependency advisories::npm audit reported high-severity advisories; review them."
 
   compose:
     name: Container smoke test
