@@ -127,11 +127,19 @@ SECTION_SUPPORT_CATEGORIES: dict[str, set[str]] = {
 }
 
 
-def _api_error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(
-        status_code=status_code,
-        detail={"code": code, "message": message, "request_id": str(uuid4())},
-    )
+def _api_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    terms: list[str] | None = None,
+) -> HTTPException:
+    detail: dict[str, Any] = {"code": code, "message": message, "request_id": str(uuid4())}
+    if terms:
+        # Echoed back so the client can name what blocked the action; these are the
+        # user's own words, never provider internals.
+        detail["terms"] = terms
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 async def _owned_profile(
@@ -3350,7 +3358,8 @@ def _rewrite_instruction(payload: ResumeRewriteCreate) -> str:
     if payload.mode == "shorter":
         return (
             f"Shorten this {target} without dropping any supported number, date, proper noun, "
-            "tool, responsibility, result, or negation."
+            "tool, responsibility, result, or negation. Keep every item of any list "
+            "(courses, skills, tools); compress the wording around them instead."
         )
     if payload.mode == "professional":
         return (
@@ -3442,6 +3451,7 @@ async def rewrite_resume_draft(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "resume_rewrite_rejected",
             "The suggested rewrite dropped supported details, so it was not applied",
+            terms=list(getattr(exc, "dropped_terms", ()) or ()),
         ) from exc
     except ResumeWriterError as exc:
         logger.warning("Resume workspace rewrite failed: %s", exc)

@@ -24,6 +24,8 @@ export class ApiHttpError extends Error {
     public readonly detail: string,
     public readonly code?: string,
     public readonly requestId?: string,
+    // Server-supplied specifics (e.g. the exact wording a guard rejected).
+    public readonly terms?: string[],
   ) {
     super(`API request failed with ${status}: ${detail}`);
     this.name = "ApiHttpError";
@@ -92,7 +94,14 @@ const API_ERROR_MESSAGES: Record<string, { ar: string; en: string }> = {
 export function apiErrorMessage(error: unknown, locale: "ar" | "en") {
   if (error instanceof ApiHttpError) {
     const known = error.code ? API_ERROR_MESSAGES[error.code] : undefined;
-    if (known) return known[locale];
+    if (known) {
+      // Naming the exact rejected wording turns a dead end into an actionable message.
+      if (error.terms?.length) {
+        const list = error.terms.join("، ");
+        return locale === "ar" ? `${known.ar} المحذوف: ${list}.` : `${known.en} Dropped: ${list}.`;
+      }
+      return known[locale];
+    }
     // Unknown codes fall through to generic copy; keep the request id visible so a
     // reported failure can be correlated with server logs.
     const reference = error.requestId
@@ -168,6 +177,7 @@ async function apiResponse(path: string, init?: ApiRequestOptions): Promise<Resp
       let detail = response.statusText || "Request failed";
       let code: string | undefined;
       let requestId: string | undefined;
+      let terms: string[] | undefined;
       try {
         const payload = await response.json() as { detail?: unknown };
         if (typeof payload.detail === "string") {
@@ -187,9 +197,12 @@ async function apiResponse(path: string, init?: ApiRequestOptions): Promise<Resp
             })
             .join("; ");
         } else if (payload.detail && typeof payload.detail === "object") {
-          const structured = payload.detail as { code?: unknown; message?: unknown; request_id?: unknown };
+          const structured = payload.detail as { code?: unknown; message?: unknown; request_id?: unknown; terms?: unknown };
           code = typeof structured.code === "string" ? structured.code : undefined;
           requestId = typeof structured.request_id === "string" ? structured.request_id : undefined;
+          terms = Array.isArray(structured.terms)
+            ? structured.terms.filter((item): item is string => typeof item === "string")
+            : undefined;
           detail = typeof structured.message === "string" ? structured.message : JSON.stringify(payload.detail);
         } else {
           detail = JSON.stringify(payload.detail ?? payload);
@@ -197,7 +210,7 @@ async function apiResponse(path: string, init?: ApiRequestOptions): Promise<Resp
       } catch {
         // Keep the status text when the API does not return JSON.
       }
-      throw new ApiHttpError(response.status, detail, code, requestId);
+      throw new ApiHttpError(response.status, detail, code, requestId, terms);
     }
     return response;
   }

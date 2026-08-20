@@ -5600,3 +5600,42 @@ def test_rewrite_rejection_is_reported_as_an_output_error() -> None:
             evidence=evidence,
             allowed_handles=["fact_1"],
         )
+
+
+def test_rejected_rewrite_names_the_dropped_terms_in_the_users_wording() -> None:
+    """A bare "it was rejected" is a dead end; the user needs to see what was lost."""
+
+    original_text = (
+        "Relevant Coursework: Auditing, Financial Accounting, Cost Control, "
+        "Internal Control Systems"
+    )
+    evidence = (
+        ResumeEvidence(
+            handle="fact_1",
+            category="education",
+            label="Bachelor degree in Finance",
+            detail=original_text,
+            verification_status="confirmed",
+        ),
+    )
+
+    with pytest.raises(resume_writer_module.ResumeWriterOutputError) as excinfo:
+        resume_writer_module._validated_rewrite_candidate(
+            resume_writer_module.ResumeRewriteCandidate(
+                section_key="education",
+                item_id="degree_1",
+                original_text=original_text,
+                proposed_text="Coursework: Auditing and Financial Accounting",
+                evidence_handles=["fact_1"],
+            ),
+            section_key="education",
+            item_id="degree_1",
+            original_text=original_text,
+            evidence=evidence,
+            allowed_handles=["fact_1"],
+        )
+
+    dropped = excinfo.value.dropped_terms
+    # Reported as the user wrote them, not as normalized tokens.
+    assert "Cost" in dropped and "Control" in dropped and "Internal" in dropped
+    assert all(term[0].isupper() for term in dropped)

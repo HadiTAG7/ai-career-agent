@@ -209,3 +209,24 @@ describe("error code coverage", () => {
     expect(detail).not.toContain("{");
   });
 });
+
+describe("rejected rewrite details", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it("names the dropped details in the rejection message", async () => {
+    const { ApiHttpError, apiErrorMessage } = await import("@/lib/api-client");
+    const error = new ApiHttpError(422, "rejected", "resume_rewrite_rejected", "req-1", [
+      "Cost",
+      "Control",
+    ]);
+    const arabic = apiErrorMessage(error, "ar");
+    const english = apiErrorMessage(error, "en");
+    expect(arabic).toContain("Cost");
+    expect(arabic).toContain("Control");
+    expect(english).toContain("Dropped: Cost، Control");
+  });
+});
