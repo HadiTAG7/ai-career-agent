@@ -56,7 +56,7 @@ describe("API authentication and HTTP errors", () => {
     const { getCareerProfile } = await import("@/lib/api-client");
 
     await expect(getCareerProfile()).resolves.toEqual(profile);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("does not retry a non-idempotent POST after a transient server failure", async () => {
