@@ -507,6 +507,12 @@ class ResumeWriterTransportError(ResumeWriterError):
 class ResumeWriterOutputError(ResumeWriterError):
     """The provider responded, but both draft attempts failed deterministic checks."""
 
+    def __init__(self, message: str, *, dropped_terms: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        # Terms the rewrite removed, in the user's own wording, so the API can name
+        # exactly what was lost instead of a vague rejection.
+        self.dropped_terms = dropped_terms
+
 
 @dataclass(frozen=True, slots=True)
 class ResumeEvidence:
@@ -4583,6 +4589,17 @@ def _validated_adaptive_turn(
     )
 
 
+def _original_spellings(original_text: str, normalized_words: set[str]) -> tuple[str, ...]:
+    """Map normalized words back to how the user actually wrote them."""
+
+    seen: dict[str, str] = {}
+    for token in re.findall(r"[^\s,;:.()\[\]/]+", original_text):
+        key = _normalized_word(token)
+        if key in normalized_words and key not in seen:
+            seen[key] = token
+    return tuple(seen[key] for key in sorted(seen))
+
+
 def _leading_meaningful_words(words: list[str]) -> list[str]:
     """Drop leading content-free qualifiers so the first real word can be compared."""
 
@@ -4625,9 +4642,11 @@ def _validated_rewrite_candidate(
         and not _word_supported(word, proposed_word_set)
     }
     if dropped_material or _numbers(original_text) - _numbers(generated.proposed_text):
-        rejected_terms = ", ".join(sorted(dropped_material)) or "supported numbers"
+        display_terms = _original_spellings(original_text, dropped_material)
+        rejected_terms = ", ".join(display_terms) or "supported numbers"
         raise ResumeWriterOutputError(
-            f"Resume writer dropped supported material from the original: {rejected_terms}"
+            f"Resume writer dropped supported material from the original: {rejected_terms}",
+            dropped_terms=display_terms,
         )
     if _contains_negation(original_text) != _contains_negation(generated.proposed_text):
         raise ResumeWriterOutputError("Resume writer changed the original negation")
