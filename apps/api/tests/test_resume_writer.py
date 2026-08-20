@@ -5531,3 +5531,72 @@ async def test_provider_cache_reuses_by_value_and_closes_replaced_provider(
 
     await resume_writer_module.close_resume_writer_provider()
     assert [provider.close_count for provider in created] == [1, 1]
+
+
+def test_rewrite_may_drop_a_content_free_qualifier() -> None:
+    """"Relevant" in "Relevant Coursework" qualifies nothing verifiable, so dropping it
+    must not be treated as losing supported material."""
+
+    original_text = (
+        "Relevant Coursework: Auditing, Financial Accounting, Risk Management, Cost Control"
+    )
+    proposed_text = (
+        "Coursework: Auditing, Financial Accounting, Risk Management, and Cost Control"
+    )
+    evidence = (
+        ResumeEvidence(
+            handle="fact_1",
+            category="education",
+            label="Bachelor degree in Finance",
+            detail=original_text,
+            verification_status="confirmed",
+        ),
+    )
+
+    candidate = resume_writer_module._validated_rewrite_candidate(
+        resume_writer_module.ResumeRewriteCandidate(
+            section_key="education",
+            item_id="degree_1",
+            original_text=original_text,
+            proposed_text=proposed_text,
+            evidence_handles=["fact_1"],
+        ),
+        section_key="education",
+        item_id="degree_1",
+        original_text=original_text,
+        evidence=evidence,
+        allowed_handles=["fact_1"],
+    )
+    assert candidate.proposed_text == proposed_text
+
+
+def test_rewrite_rejection_is_reported_as_an_output_error() -> None:
+    """A rejected rewrite is a content verdict, not a provider outage; the API layer
+    relies on the distinct type to avoid telling the user to retry pointlessly."""
+
+    original_text = "Reconciled 48 monthly reports for the finance team."
+    evidence = (
+        ResumeEvidence(
+            handle="fact_1",
+            category="experience",
+            label="Monthly reconciliations",
+            detail=original_text,
+            verification_status="confirmed",
+        ),
+    )
+
+    with pytest.raises(resume_writer_module.ResumeWriterOutputError):
+        resume_writer_module._validated_rewrite_candidate(
+            resume_writer_module.ResumeRewriteCandidate(
+                section_key="experience",
+                item_id="finance_role",
+                original_text=original_text,
+                proposed_text="Reconciled reports for the team.",
+                evidence_handles=["fact_1"],
+            ),
+            section_key="experience",
+            item_id="finance_role",
+            original_text=original_text,
+            evidence=evidence,
+            allowed_handles=["fact_1"],
+        )
