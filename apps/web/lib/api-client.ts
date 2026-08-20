@@ -81,6 +81,7 @@ const API_ERROR_MESSAGES: Record<string, { ar: string; en: string }> = {
   resume_gap_interview: { ar: "أجب عن سؤال النقص الحالي أو تخطَّه قبل المتابعة.", en: "Answer or skip the current gap question before continuing." },
   resume_draft_required: { ar: "أنشئ مسودة السيرة أولًا قبل محاولة تعديلها.", en: "Generate the resume draft before editing it." },
   resume_suggestion_stale: { ar: "انتهت صلاحية التحسين المقترح لأن المسودة تغيّرت. اطلب تحسينًا جديدًا.", en: "The suggested improvement expired because the draft changed. Request a new one." },
+  resume_rewrite_rejected: { ar: "التحسين المقترح حذف تفاصيل مدعومة بالأدلة، فلم نطبّقه. جرّب صياغة طلب أوضح أو عدّل النص يدويًا.", en: "The suggested rewrite dropped evidence-backed details, so it was not applied. Try a more specific instruction or edit the text yourself." },
   resume_rewrite_not_supported: { ar: "مزوّد الكتابة الحالي لا يدعم إعادة صياغة المقاطع.", en: "The configured writer does not support section rewrites." },
   resume_quick_action_invalid: { ar: "هذا الأمر غير مدعوم في هذه المرحلة.", en: "That command is not supported at this step." },
   resume_language_change_requires_new_version: { ar: "تغيير لغة السيرة يتطلب إنشاء نسخة جديدة بدل تعديل النسخة الحالية.", en: "Changing the resume language requires creating a new version instead of editing this one." },

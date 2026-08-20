@@ -3434,6 +3434,15 @@ async def rewrite_resume_draft(
             instruction=instruction,
             evidence_handles=handles,
         )
+    except ResumeWriterOutputError as exc:
+        # The provider answered; our evidence guard rejected the wording. Retrying the
+        # same request reproduces the same rejection, so do not invite a blind retry.
+        logger.warning("Resume workspace rewrite rejected by evidence checks: %s", exc)
+        raise _api_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "resume_rewrite_rejected",
+            "The suggested rewrite dropped supported details, so it was not applied",
+        ) from exc
     except ResumeWriterError as exc:
         logger.warning("Resume workspace rewrite failed: %s", exc)
         raise _api_error(

@@ -974,6 +974,25 @@ def _normalized_word(value: str) -> str:
 _CANONICAL_WORD_STOPWORDS = frozenset(_canonical_word(word) for word in _WORD_STOPWORDS)
 
 
+_NEUTRAL_QUALIFIER_WORDS = frozenset(
+    _normalized_word(word)
+    for word in {
+        "relevant",
+        "related",
+        "various",
+        "several",
+        "additional",
+        "ذات",
+        "صلة",
+        "متعلقة",
+        "متنوعة",
+        "عدة",
+        "إضافية",
+        "اضافية",
+    }
+)
+
+
 _SEMANTIC_PARAPHRASE_WORDS = frozenset(
     _normalized_word(word)
     for word in {
@@ -4564,6 +4583,15 @@ def _validated_adaptive_turn(
     )
 
 
+def _leading_meaningful_words(words: list[str]) -> list[str]:
+    """Drop leading content-free qualifiers so the first real word can be compared."""
+
+    index = 0
+    while index < len(words) and words[index] in _NEUTRAL_QUALIFIER_WORDS:
+        index += 1
+    return words[index:] if index < len(words) else words
+
+
 def _validated_rewrite_candidate(
     generated: ResumeRewriteCandidate,
     *,
@@ -4574,18 +4602,20 @@ def _validated_rewrite_candidate(
     allowed_handles: list[str],
 ) -> ResumeRewriteCandidate:
     if generated.section_key != section_key or generated.item_id != item_id:
-        raise ResumeWriterError("Resume writer returned a rewrite for the wrong section")
+        raise ResumeWriterOutputError("Resume writer returned a rewrite for the wrong section")
     if not set(generated.evidence_handles) <= set(allowed_handles):
-        raise ResumeWriterError("Resume writer returned unknown evidence references")
+        raise ResumeWriterOutputError("Resume writer returned unknown evidence references")
     original_units = _claim_units(original_text)
     proposed_units = _claim_units(generated.proposed_text)
     original_words = _meaningful_words(original_text)
     proposed_words = _meaningful_words(generated.proposed_text)
     if original_words == proposed_words:
-        raise ResumeWriterError("Resume writer returned no meaningful wording improvement")
+        raise ResumeWriterOutputError("Resume writer returned no meaningful wording improvement")
     proposed_word_set = set(proposed_words)
-    mutable_action_words = _SEMANTIC_PARAPHRASE_WORDS | frozenset(
-        _SCOPED_SEMANTIC_EQUIVALENTS
+    mutable_action_words = (
+        _SEMANTIC_PARAPHRASE_WORDS
+        | _NEUTRAL_QUALIFIER_WORDS
+        | frozenset(_SCOPED_SEMANTIC_EQUIVALENTS)
     )
     dropped_material = {
         word
@@ -4596,19 +4626,23 @@ def _validated_rewrite_candidate(
     }
     if dropped_material or _numbers(original_text) - _numbers(generated.proposed_text):
         rejected_terms = ", ".join(sorted(dropped_material)) or "supported numbers"
-        raise ResumeWriterError(
+        raise ResumeWriterOutputError(
             f"Resume writer dropped supported material from the original: {rejected_terms}"
         )
     if _contains_negation(original_text) != _contains_negation(generated.proposed_text):
-        raise ResumeWriterError("Resume writer changed the original negation")
+        raise ResumeWriterOutputError("Resume writer changed the original negation")
     if item_id is not None and len(proposed_units) > max(1, len(original_units)):
-        raise ResumeWriterError("Resume writer split one bullet into multiple sentences")
+        raise ResumeWriterOutputError("Resume writer split one bullet into multiple sentences")
+    # A leading qualifier ("Relevant Coursework: ...") is not the opening action, so the
+    # ownership guard compares the first word that actually carries meaning on each side.
+    original_lead = _leading_meaningful_words(original_words)
+    proposed_lead = _leading_meaningful_words(proposed_words)
     if item_id is not None and (
-        not original_words
-        or not proposed_words
-        or not _word_supported(proposed_words[0], {original_words[0]})
+        not original_lead
+        or not proposed_lead
+        or not _word_supported(proposed_lead[0], {original_lead[0]})
     ):
-        raise ResumeWriterError(
+        raise ResumeWriterOutputError(
             "Resume writer changed or removed the supported opening action"
         )
     original_word_set = set(original_words)
@@ -4624,7 +4658,7 @@ def _validated_rewrite_candidate(
     }
     if item_id is not None and unsupported_new_paraphrases:
         rejected_actions = ", ".join(sorted(unsupported_new_paraphrases))
-        raise ResumeWriterError(
+        raise ResumeWriterOutputError(
             f"Resume writer added unsupported actions: {rejected_actions}"
         )
     proposed_openings = [
@@ -4633,14 +4667,14 @@ def _validated_rewrite_candidate(
         if (words := _meaningful_words(unit))
     ]
     if len(proposed_openings) > 1 and len(set(proposed_openings)) < len(proposed_openings):
-        raise ResumeWriterError("Resume writer repeated the same sentence opening")
+        raise ResumeWriterOutputError("Resume writer repeated the same sentence opening")
     if (
         item_id is not None
         and proposed_words
         and proposed_words.count(proposed_words[0])
         > max(1, original_words.count(proposed_words[0]))
     ):
-        raise ResumeWriterError("Resume writer repeated the opening action inside one bullet")
+        raise ResumeWriterOutputError("Resume writer repeated the opening action inside one bullet")
     validate_claim_grounding(
         generated.proposed_text,
         generated.evidence_handles,
