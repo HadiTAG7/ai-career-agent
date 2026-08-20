@@ -8,7 +8,8 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "");
 // Keep each read attempt bounded, but retry one idempotent GET so the first visit does
 // not fail while the service is already spinning up.
 const REQUEST_TIMEOUT_MS = 35_000;
-const SAFE_GET_ATTEMPTS = 2;
+// Three attempts x 35s covers a Render free-tier cold start (~60-90s) on first visit.
+const SAFE_GET_ATTEMPTS = 3;
 const SAFE_GET_RETRY_DELAY_MS = 500;
 const RETRYABLE_GET_STATUSES = new Set([502, 503, 504]);
 type ApiRequestOptions = RequestInit & { timeoutMs?: number };
