@@ -19,6 +19,7 @@ from career_agent_api.schemas.api import ResumeDraftContent, ResumeExportContact
 from career_agent_api.services.resume_export import render_resume_pdf
 from career_agent_api.services.resume_writer import (
     RESUME_SECTION_ORDER,
+    REWRITE_CLARIFYING_QUESTION_CAP,
     MistralResumeWriterProvider,
     ResumeEvidence,
     ResumeWriterError,
@@ -26,6 +27,7 @@ from career_agent_api.services.resume_writer import (
     ResumeWriterTransportError,
     _adaptive_answer_category,
     _GeneratedDraft,
+    _GeneratedRewriteTurn,
     _redact_resume_text,
     _restore_open_ended_number_qualifiers,
     _sanitize_generated_draft,
@@ -4831,11 +4833,14 @@ async def test_adaptive_turn_checks_each_conversation_field_language() -> None:
 async def test_section_rewrite_is_a_grounded_candidate_and_uses_writer_model() -> None:
     provider = CapturingResumeWriter(
         {
-            "section_key": "project",
-            "item_id": "inventory_project",
-            "original_text": "provider must not replace this value",
-            "proposed_text": "Produced clear weekly inventory reports using Python.",
-            "evidence_handles": ["fact_1"],
+            "clarifying_question": None,
+            "candidate": {
+                "section_key": "project",
+                "item_id": "inventory_project",
+                "original_text": "provider must not replace this value",
+                "proposed_text": "Produced clear weekly inventory reports using Python.",
+                "evidence_handles": ["fact_1"],
+            },
         }
     )
 
@@ -4850,9 +4855,11 @@ async def test_section_rewrite_is_a_grounded_candidate_and_uses_writer_model() -
         evidence_handles=["fact_1"],
     )
 
-    assert result.original_text == "Built inventory reports using Python."
-    assert result.proposed_text == "Produced clear weekly inventory reports using Python."
-    assert result.evidence_handles == ["fact_1"]
+    assert result.clarifying_question is None
+    assert result.candidate is not None
+    assert result.candidate.original_text == "Built inventory reports using Python."
+    assert result.candidate.proposed_text == "Produced clear weekly inventory reports using Python."
+    assert result.candidate.evidence_handles == ["fact_1"]
     assert len(provider.calls) == 1
     assert provider.calls[0]["model_name"] == "writer-model"
     assert provider.calls[0]["max_tokens"] == 400
@@ -4863,18 +4870,24 @@ async def test_section_rewrite_retries_an_unsupported_candidate() -> None:
     provider = CapturingResumeWriter(
         [
             {
-                "section_key": "project",
-                "item_id": "inventory_project",
-                "original_text": "Built inventory reports using Python.",
-                "proposed_text": "Increased revenue by 50% using Python.",
-                "evidence_handles": ["fact_1"],
+                "clarifying_question": None,
+                "candidate": {
+                    "section_key": "project",
+                    "item_id": "inventory_project",
+                    "original_text": "Built inventory reports using Python.",
+                    "proposed_text": "Increased revenue by 50% using Python.",
+                    "evidence_handles": ["fact_1"],
+                },
             },
             {
-                "section_key": "project",
-                "item_id": "inventory_project",
-                "original_text": "Built inventory reports using Python.",
-                "proposed_text": "Produced weekly inventory reports using Python.",
-                "evidence_handles": ["fact_1"],
+                "clarifying_question": None,
+                "candidate": {
+                    "section_key": "project",
+                    "item_id": "inventory_project",
+                    "original_text": "Built inventory reports using Python.",
+                    "proposed_text": "Produced weekly inventory reports using Python.",
+                    "evidence_handles": ["fact_1"],
+                },
             },
         ]
     )
@@ -4890,7 +4903,8 @@ async def test_section_rewrite_retries_an_unsupported_candidate() -> None:
         evidence_handles=["fact_1"],
     )
 
-    assert result.proposed_text == "Produced weekly inventory reports using Python."
+    assert result.candidate is not None
+    assert result.candidate.proposed_text == "Produced weekly inventory reports using Python."
     assert len(provider.calls) == 2
     assert "prior candidate was rejected" in provider.calls[1]["system_instructions"].lower()
 
@@ -4911,31 +4925,37 @@ async def test_section_rewrite_retries_a_repetitive_multi_sentence_bullet() -> N
     provider = CapturingResumeWriter(
         [
             {
-                "section_key": "experience",
-                "item_id": "cost_analyst",
-                "original_text": (
-                    "Performed monthly variance analysis, cost control, and internal financial "
-                    "reviews."
-                ),
-                "proposed_text": (
-                    "Performed monthly variance analysis. "
-                    "Performed cost control. "
-                    "Performed internal financial reviews."
-                ),
-                "evidence_handles": ["fact_1"],
+                "clarifying_question": None,
+                "candidate": {
+                    "section_key": "experience",
+                    "item_id": "cost_analyst",
+                    "original_text": (
+                        "Performed monthly variance analysis, cost control, and internal "
+                        "financial reviews."
+                    ),
+                    "proposed_text": (
+                        "Performed monthly variance analysis. "
+                        "Performed cost control. "
+                        "Performed internal financial reviews."
+                    ),
+                    "evidence_handles": ["fact_1"],
+                },
             },
             {
-                "section_key": "experience",
-                "item_id": "cost_analyst",
-                "original_text": (
-                    "Performed monthly variance analysis, cost control, and internal financial "
-                    "reviews."
-                ),
-                "proposed_text": (
-                    "Conducted monthly variance analysis, cost control, and internal financial "
-                    "reviews."
-                ),
-                "evidence_handles": ["fact_1"],
+                "clarifying_question": None,
+                "candidate": {
+                    "section_key": "experience",
+                    "item_id": "cost_analyst",
+                    "original_text": (
+                        "Performed monthly variance analysis, cost control, and internal "
+                        "financial reviews."
+                    ),
+                    "proposed_text": (
+                        "Conducted monthly variance analysis, cost control, and internal "
+                        "financial reviews."
+                    ),
+                    "evidence_handles": ["fact_1"],
+                },
             },
         ]
     )
@@ -4953,7 +4973,8 @@ async def test_section_rewrite_retries_a_repetitive_multi_sentence_bullet() -> N
         evidence_handles=["fact_1"],
     )
 
-    assert result.proposed_text == (
+    assert result.candidate is not None
+    assert result.candidate.proposed_text == (
         "Conducted monthly variance analysis, cost control, and internal financial reviews."
     )
     assert len(provider.calls) == 2
@@ -5069,11 +5090,14 @@ def test_section_rewrite_rejects_dropped_material_or_repeated_inline_action(
 async def test_summary_rewrite_keeps_a_larger_output_budget() -> None:
     provider = CapturingResumeWriter(
         {
-            "section_key": "professional_summary",
-            "item_id": None,
-            "original_text": "provider must not replace this value",
-            "proposed_text": "Produced weekly inventory reports using Python.",
-            "evidence_handles": ["fact_1"],
+            "clarifying_question": None,
+            "candidate": {
+                "section_key": "professional_summary",
+                "item_id": None,
+                "original_text": "provider must not replace this value",
+                "proposed_text": "Produced weekly inventory reports using Python.",
+                "evidence_handles": ["fact_1"],
+            },
         }
     )
 
@@ -5088,8 +5112,191 @@ async def test_summary_rewrite_keeps_a_larger_output_budget() -> None:
         evidence_handles=["fact_1"],
     )
 
-    assert result.proposed_text == "Produced weekly inventory reports using Python."
+    assert result.candidate is not None
+    assert result.candidate.proposed_text == "Produced weekly inventory reports using Python."
     assert provider.calls[0]["max_tokens"] == 2_000
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_can_answer_with_a_clarifying_question() -> None:
+    provider = CapturingResumeWriter(
+        {
+            "clarifying_question": "أي مواد استثمارية تقصد تحديدًا؟",
+            "candidate": None,
+        }
+    )
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=evidence(),
+        section_key="project",
+        item_id="inventory_project",
+        original_text="Built inventory reports using Python.",
+        instruction="غيّر المواد إلى مواد استثمارية",
+        evidence_handles=["fact_1"],
+        conversation_language=PreferredLanguage.AR,
+    )
+
+    assert result.candidate is None
+    assert result.clarifying_question == "أي مواد استثمارية تقصد تحديدًا؟"
+    payload = provider.calls[0]["payload"]
+    assert payload["conversation"] == []
+    assert payload["conversation_language"] == "ar"
+    assert payload["clarifying_questions_remaining"] == REWRITE_CLARIFYING_QUESTION_CAP
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_forwards_the_sanitized_clarification_exchange() -> None:
+    provider = CapturingResumeWriter(
+        {
+            "clarifying_question": None,
+            "candidate": {
+                "section_key": "project",
+                "item_id": "inventory_project",
+                "original_text": "Built inventory reports using Python.",
+                "proposed_text": "Produced weekly inventory reports using Python.",
+                "evidence_handles": ["fact_1"],
+            },
+        }
+    )
+    overlong_exchange = [
+        {"role": "assistant", "content": "dropped: only the last six turns survive"},
+        {"role": "user", "content": "dropped too"},
+        {"role": "assistant", "content": "سؤال أول؟"},
+        {"role": "user", "content": "جواب أول reach me at someone@example.com"},
+        {"role": "assistant", "content": "سؤال ثانٍ؟"},
+        {"role": "user", "content": "   "},
+        {"role": "assistant", "content": "سؤال ثالث؟"},
+        {"role": "user", "content": "الجواب الأخير " + "طويل " * 400},
+    ]
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=evidence(),
+        section_key="project",
+        item_id="inventory_project",
+        original_text="Built inventory reports using Python.",
+        instruction="Make it stronger",
+        evidence_handles=["fact_1"],
+        conversation=overlong_exchange,
+        conversation_language=PreferredLanguage.AR,
+    )
+
+    assert result.candidate is not None
+    payload = provider.calls[0]["payload"]
+    forwarded = payload["conversation"]
+    # The first two turns fall outside the six-turn window, the blank answer is
+    # dropped, and the overlong final answer is truncated rather than dropped.
+    assert [turn["role"] for turn in forwarded] == [
+        "assistant",
+        "user",
+        "assistant",
+        "assistant",
+        "user",
+    ]
+    assert forwarded[0]["content"] == "سؤال أول؟"
+    assert "someone@example.com" not in forwarded[1]["content"]
+    assert "جواب أول" in forwarded[1]["content"]
+    assert all(len(turn["content"]) <= 1_000 for turn in forwarded)
+    assert payload["clarifying_questions_remaining"] == 0
+    assert "`clarifying_question` MUST be null" in provider.calls[0]["system_instructions"]
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_rejects_a_question_after_the_cap() -> None:
+    provider = CapturingResumeWriter(
+        [
+            {"clarifying_question": "سؤال ثالث؟", "candidate": None},
+            {"clarifying_question": "سؤال رابع؟", "candidate": None},
+        ]
+    )
+    spent_exchange = [
+        {"role": "assistant", "content": "سؤال أول؟"},
+        {"role": "user", "content": "جواب أول"},
+        {"role": "assistant", "content": "سؤال ثانٍ؟"},
+        {"role": "user", "content": "جواب ثانٍ"},
+    ]
+
+    with pytest.raises(ResumeWriterOutputError):
+        await provider.rewrite_section(
+            language=PreferredLanguage.EN,
+            target_role="Data Analyst",
+            evidence=evidence(),
+            section_key="project",
+            item_id="inventory_project",
+            original_text="Built inventory reports using Python.",
+            instruction="Make it stronger",
+            evidence_handles=["fact_1"],
+            conversation=spent_exchange,
+            conversation_language=PreferredLanguage.AR,
+        )
+
+    assert len(provider.calls) == 2
+    assert "prior candidate was rejected" in provider.calls[1]["system_instructions"].lower()
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_retries_a_turn_with_no_usable_outcome() -> None:
+    # A turn with neither outcome fails _GeneratedRewriteTurn validation, which the
+    # real _structured_response wraps into a ResumeWriterError; the stub raises the
+    # same wrapped error so the retry-with-feedback path is exercised end to end.
+    provider = CapturingResumeWriter(
+        [
+            ResumeWriterError(
+                "Resume writer returned invalid structured output (clarifying_question:value_error)"
+            ),
+            {
+                "clarifying_question": None,
+                "candidate": {
+                    "section_key": "project",
+                    "item_id": "inventory_project",
+                    "original_text": "Built inventory reports using Python.",
+                    "proposed_text": "Produced weekly inventory reports using Python.",
+                    "evidence_handles": ["fact_1"],
+                },
+            },
+        ]
+    )
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=evidence(),
+        section_key="project",
+        item_id="inventory_project",
+        original_text="Built inventory reports using Python.",
+        instruction="Make it stronger",
+        evidence_handles=["fact_1"],
+    )
+
+    assert result.candidate is not None
+    assert result.candidate.proposed_text == "Produced weekly inventory reports using Python."
+    assert len(provider.calls) == 2
+    assert "prior candidate was rejected" in provider.calls[1]["system_instructions"].lower()
+
+
+def test_generated_rewrite_turn_requires_exactly_one_outcome() -> None:
+    candidate = {
+        "section_key": "project",
+        "item_id": "inventory_project",
+        "original_text": "Built inventory reports using Python.",
+        "proposed_text": "Produced weekly inventory reports using Python.",
+        "evidence_handles": ["fact_1"],
+    }
+    with pytest.raises(ValidationError):
+        _GeneratedRewriteTurn.model_validate({"clarifying_question": None, "candidate": None})
+    with pytest.raises(ValidationError):
+        _GeneratedRewriteTurn.model_validate(
+            {"clarifying_question": "سؤال؟", "candidate": candidate}
+        )
+    with pytest.raises(ValidationError):
+        _GeneratedRewriteTurn.model_validate({"clarifying_question": "   ", "candidate": None})
+    turn = _GeneratedRewriteTurn.model_validate(
+        {"clarifying_question": "  سؤال؟  ", "candidate": None}
+    )
+    assert turn.clarifying_question == "سؤال؟"
 
 
 @pytest.mark.asyncio

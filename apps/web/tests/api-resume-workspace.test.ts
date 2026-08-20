@@ -226,6 +226,7 @@ describe("resume workspace API client", () => {
       bullet_index: null,
       mode: "stronger",
       instruction: null,
+      conversation: [],
       expected_draft_revision: 6,
     });
     expect(JSON.parse(String(calls[2].init?.body))).toEqual({

@@ -27,6 +27,8 @@ from career_agent_api.schemas.api import (
     ResumeDraftRevisionCreate,
     ResumeMessageCreate,
     ResumeRewriteCreate,
+    ResumeRewriteSuggestionRead,
+    ResumeRewriteTurnRead,
     ResumeWorkspaceRead,
     ResumeWorkspaceStartCreate,
 )
@@ -256,6 +258,74 @@ def test_resume_workspace_request_schemas_enforce_revisions_and_rewrite_targets(
     patch = ResumeDraftPatchCreate(draft=_draft(), expected_draft_revision=4)
     assert patch.draft.sections[0].key == "experience"
     assert ResumeDraftRevisionCreate(expected_draft_revision=4).expected_draft_revision == 4
+
+
+def _rewrite_request(conversation: list[dict[str, str]]) -> ResumeRewriteCreate:
+    return ResumeRewriteCreate(
+        target_kind="bullet",
+        section_key="experience",
+        item_id="experience_1",
+        bullet_index=0,
+        mode="custom",
+        instruction="غيّر المواد إلى مواد استثمارية",
+        expected_draft_revision=1,
+        conversation=conversation,
+    )
+
+
+def test_rewrite_conversation_must_be_an_alternating_capped_exchange() -> None:
+    exchange = _rewrite_request(
+        [
+            {"role": "assistant", "content": "أي مواد استثمارية تقصد تحديدًا؟"},
+            {"role": "user", "content": "  المحاسبة المالية والاقتصاد الكلي  "},
+        ]
+    )
+    assert exchange.conversation[0].role == "assistant"
+    assert exchange.conversation[1].content == "المحاسبة المالية والاقتصاد الكلي"
+
+    question = {"role": "assistant", "content": "سؤال؟"}
+    answer = {"role": "user", "content": "جواب"}
+    invalid_conversations = [
+        [answer],  # must start with the editor's question
+        [question, answer, answer],  # roles must alternate
+        [question],  # must end with the user's answer
+        [question, answer] * 3 + [question, answer],  # over both cap and length
+        [question, answer, question, answer, question, answer],  # a third question
+        [question, {"role": "user", "content": "   "}],  # blank answer
+        [question, {"role": "user", "content": "a" * 1_001}],  # oversized answer
+    ]
+    for conversation in invalid_conversations:
+        with pytest.raises(ValidationError):
+            _rewrite_request(conversation)
+
+
+def test_rewrite_turn_read_carries_exactly_one_outcome() -> None:
+    suggestion = ResumeRewriteSuggestionRead(
+        suggestion_id=uuid4(),
+        target_kind="bullet",
+        section_key="experience",
+        item_id="experience_1",
+        bullet_index=0,
+        mode="stronger",
+        before_text="قبل",
+        after_text="بعد",
+        base_draft_revision=1,
+        evidence_handles=["fact_1"],
+    )
+
+    suggestion_turn = ResumeRewriteTurnRead(kind="suggestion", suggestion=suggestion)
+    assert suggestion_turn.question is None
+    question_turn = ResumeRewriteTurnRead(kind="question", question="أي مواد تقصد؟")
+    assert question_turn.suggestion is None
+
+    with pytest.raises(ValidationError):
+        ResumeRewriteTurnRead(kind="suggestion", suggestion=None)
+    with pytest.raises(ValidationError):
+        ResumeRewriteTurnRead(kind="suggestion", suggestion=suggestion, question="سؤال؟")
+    with pytest.raises(ValidationError):
+        ResumeRewriteTurnRead(kind="question", question="   ")
+    with pytest.raises(ValidationError):
+        ResumeRewriteTurnRead(kind="question", question="سؤال؟", suggestion=suggestion)
 
 
 @pytest.mark.asyncio

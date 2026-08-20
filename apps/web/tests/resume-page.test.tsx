@@ -2147,6 +2147,106 @@ describe("resume workspace v2", () => {
     ));
   });
 
+  it("holds the editor's clarifying question in the notes panel and rewrites after the answer", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      readiness_score: 88,
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const question = "أي مواد استثمارية تقصد تحديدًا؟";
+    const suggestion = {
+      suggestion_id: "suggestion-clarified",
+      target_kind: "professional_summary" as const,
+      section_key: null,
+      item_id: null,
+      bullet_index: null,
+      mode: "custom" as const,
+      instruction: "غيّر المواد إلى مواد استثمارية",
+      before_text: draft.professional_summary,
+      after_text: "ملخص مهني يبرز مواد المحاسبة المالية والاقتصاد الكلي.",
+      base_draft_revision: 1,
+      evidence_handles: ["fact:fact-1"],
+    };
+    apiMocks.rewriteResumeDraftSelection
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question })
+      .mockResolvedValueOnce({ kind: "suggestion", suggestion, question: null });
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+    const toolbar = within(summary.parentElement!);
+    await user.click(toolbar.getByRole("button", { name: "اسألني" }));
+    await user.type(
+      toolbar.getByPlaceholderText("وش التعديل المطلوب على هذا النص؟"),
+      "غيّر المواد إلى مواد استثمارية",
+    );
+    await user.click(toolbar.getByRole("button", { name: "أرسل طلب التعديل" }));
+
+    // The question lands in the notes panel; nothing is applied and nothing persisted.
+    expect(await screen.findByText(question)).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "المحادثة" })).toHaveTextContent("· 1");
+    const reply = screen.getByPlaceholderText("جاوب سؤال المحرر…");
+    await user.type(reply, "المحاسبة المالية والاقتصاد الكلي");
+    await user.click(screen.getByRole("button", { name: "إرسال الجواب" }));
+
+    // The answer resends the whole exchange against the latest draft revision.
+    await waitFor(() => expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenLastCalledWith(
+      profile.id,
+      expect.objectContaining({
+        mode: "custom",
+        instruction: "غيّر المواد إلى مواد استثمارية",
+        conversation: [
+          { role: "assistant", content: question },
+          { role: "user", content: "المحاسبة المالية والاقتصاد الكلي" },
+        ],
+        expectedDraftRevision: 1,
+      }),
+    ));
+
+    // The finished exchange yields the usual before/after suggestion card.
+    expect(await screen.findByText(suggestion.after_text)).toBeInTheDocument();
+    expect(screen.queryByText(question)).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("جاوب سؤال المحرر…")).not.toBeInTheDocument();
+  }, 15_000);
+
+  it("cancels the editor's question and returns to normal editing", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      readiness_score: 88,
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const question = "أي مواد استثمارية تقصد تحديدًا؟";
+    apiMocks.rewriteResumeDraftSelection
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question });
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+    const toolbar = within(summary.parentElement!);
+    await user.click(toolbar.getByRole("button", { name: "اسألني" }));
+    await user.type(
+      toolbar.getByPlaceholderText("وش التعديل المطلوب على هذا النص؟"),
+      "غيّر المواد إلى مواد استثمارية",
+    );
+    await user.click(toolbar.getByRole("button", { name: "أرسل طلب التعديل" }));
+    expect(await screen.findByText(question)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "إلغاء سؤال المحرر" }));
+    expect(screen.queryByText(question)).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("جاوب سؤال المحرر…")).not.toBeInTheDocument();
+    expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenCalledTimes(1);
+  });
+
   it("waits for autosave and merges a rewrite into the latest workspace without losing edits", async () => {
     const user = userEvent.setup();
     const writingWorkspace = makeWorkspace({
@@ -2222,7 +2322,7 @@ describe("resume workspace v2", () => {
       evidence_handles: ["fact:fact-1"],
     };
     await act(async () => {
-      resolveRewrite(suggestion);
+      resolveRewrite({ kind: "suggestion", suggestion, question: null });
       await rewriteRequest;
     });
 
