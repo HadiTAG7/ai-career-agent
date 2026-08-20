@@ -32,7 +32,7 @@ describe("API authentication and HTTP errors", () => {
     const { getJob } = await import("@/lib/api-client");
 
     await expect(getJob("11111111-1111-4111-8111-111111111111")).rejects.toThrow("network unavailable");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("retries one transient GET failure while Render is warming up", async () => {
@@ -56,7 +56,7 @@ describe("API authentication and HTTP errors", () => {
     const { getCareerProfile } = await import("@/lib/api-client");
 
     await expect(getCareerProfile()).resolves.toEqual(profile);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("does not retry a non-idempotent POST after a transient server failure", async () => {

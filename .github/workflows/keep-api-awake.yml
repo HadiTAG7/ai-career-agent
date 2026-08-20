@@ -1,0 +1,19 @@
+name: Keep API awake
+
+# Render's free tier suspends the service after ~15 idle minutes and cold starts
+# exceed the web client's first-load patience. A tiny scheduled ping keeps the
+# staging API responsive; the free 750 instance-hours/month cover a full month.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping API health endpoint
+        run: |
+          curl --silent --show-error --max-time 120 --retry 2 \
+            https://ai-career-agent-api-odop.onrender.com/health/ready
