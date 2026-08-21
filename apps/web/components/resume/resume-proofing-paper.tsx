@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   FileText,
   LoaderCircle,
@@ -80,6 +80,15 @@ function ProofToolbar({
   const [asking, setAsking] = useState(false);
   const [instruction, setInstruction] = useState("");
   const [answer, setAnswer] = useState("");
+  const answerInputRef = useRef<HTMLInputElement>(null);
+  const latestTurn = clarification?.thread[clarification.thread.length - 1];
+  const awaitingAnswer = latestTurn?.role === "assistant";
+
+  useEffect(() => {
+    // autoFocus only fires on mount, and the input is blurred while an answer is in
+    // flight, so a second question would otherwise leave the caret in the side column.
+    if (awaitingAnswer && !rewriting) answerInputRef.current?.focus();
+  }, [awaitingAnswer, rewriting, clarification]);
   const actions: Array<{ mode: ResumeRewriteMode; ar: string; en: string }> = [
     { mode: "stronger", ar: "قوّها", en: "Strengthen" },
     { mode: "shorter", ar: "اختصرها", en: "Shorten" },
@@ -105,8 +114,7 @@ function ProofToolbar({
   // The editor's question belongs where the user clicked, not in a side panel they are
   // not looking at.
   if (clarification) {
-    const lastTurn = clarification.thread[clarification.thread.length - 1];
-    const question = lastTurn?.role === "assistant" ? lastTurn.content : "";
+    const question = awaitingAnswer ? latestTurn.content : "";
     return (
       <div
         className="mt-2 max-w-full border-y border-border bg-background text-[11px] text-foreground shadow-[0_8px_18px_rgba(7,17,31,0.14)]"
@@ -132,6 +140,7 @@ function ProofToolbar({
         </div>
         <form className="mt-2 flex items-center border-t border-border" onSubmit={submitAnswer}>
           <input
+            ref={answerInputRef}
             className="min-h-9 min-w-0 flex-1 bg-transparent px-2 text-[11px] text-foreground placeholder:text-muted"
             value={answer}
             onChange={(event) => setAnswer(event.target.value)}

@@ -2321,8 +2321,10 @@ describe("resume workspace v2", () => {
     apiMocks.getResumeWorkspace.mockResolvedValue(englishWorkspace);
     apiMocks.getCareerFacts.mockResolvedValue([fact]);
     const question = "Which detail should lead?";
+    const secondQuestion = "Should the tool names stay in English?";
     apiMocks.rewriteResumeDraftSelection
       .mockResolvedValueOnce({ kind: "question", suggestion: null, question })
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question: secondQuestion })
       .mockResolvedValueOnce({
         kind: "suggestion",
         question: null,
@@ -2352,12 +2354,21 @@ describe("resume workspace v2", () => {
     // The reply box the user is looking at keeps the caret; the notes copy must not steal it.
     expect(toolbar.getByPlaceholderText("جاوب المحرر…")).toHaveFocus();
 
+    // A second question must not hand the caret to the other column either: autoFocus
+    // fires only on mount, and the box is blurred while the answer is in flight.
+    await user.type(toolbar.getByPlaceholderText("جاوب المحرر…"), "the tools");
+    await user.click(toolbar.getByRole("button", { name: "إرسال الجواب للمحرر" }));
+    expect(await screen.findAllByText(secondQuestion)).toHaveLength(2);
+    expect(toolbar.getByPlaceholderText("جاوب المحرر…")).toHaveFocus();
+
     await user.click(screen.getAllByRole("button", { name: "نفّذ مباشرة بدون سؤال" })[0]);
     await waitFor(() => expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenLastCalledWith(
       profile.id,
       expect.objectContaining({
         conversation: [
           { role: "assistant", content: question },
+          { role: "user", content: "the tools" },
+          { role: "assistant", content: secondQuestion },
           {
             role: "user",
             content: "Go ahead with the best wording you can from the details you already have.",
