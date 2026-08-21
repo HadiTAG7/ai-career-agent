@@ -2452,6 +2452,227 @@ async def test_rewrite_guard_rejection_becomes_a_question_until_the_cap(
     assert capped.json()["detail"]["terms"] == ["Cost Control", "Internal Control Systems"]
 
 
+async def test_rewrite_asks_when_the_request_needs_unsupported_facts(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer echoes the original text back when the request needs a fact it lacks.
+
+    That is what "change the courses to investment courses" produces: no term is dropped,
+    so the guard rejects with no named terms. The user must get a question, not a 422.
+    """
+
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    item_id = workspace["current_draft"]["sections"][0]["items"][0]["id"]
+
+    async def guard_rejects_without_terms(**_: object) -> SimpleNamespace:
+        raise ResumeWriterOutputError("Resume writer returned no meaningful wording improvement")
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", guard_rejects_without_terms)
+    rewrite_payload = {
+        "target_kind": "bullet",
+        "section_key": "experience",
+        "item_id": item_id,
+        "bullet_index": 0,
+        "mode": "custom",
+        "instruction": "غيّر المواد إلى مواد استثمارية",
+        "expected_draft_revision": workspace["draft_revision"],
+    }
+
+    arabic = await client.post(f"{base}/draft/rewrite", headers=headers, json=rewrite_payload)
+    assert arabic.status_code == 200, arabic.text
+    assert arabic.json()["kind"] == "question"
+    assert arabic.json()["suggestion"] is None
+    assert "حقائقك المؤكدة" in arabic.json()["question"]
+
+    english = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={**rewrite_payload, "instruction": "Change the courses to investment courses"},
+    )
+    assert english.status_code == 200, english.text
+    assert english.json()["kind"] == "question"
+    assert "confirmed facts do not support" in english.json()["question"]
+
+    # Neither question turn touched the workspace.
+    reloaded = await client.get(base, headers=headers)
+    assert reloaded.json()["revision"] == workspace["revision"]
+    assert reloaded.json()["draft_revision"] == workspace["draft_revision"]
+    assert reloaded.json()["pending_suggestion"] is None
+
+    # After the cap the honest rejection returns, with no terms to name.
+    capped = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={
+            **rewrite_payload,
+            "conversation": [
+                {"role": "assistant", "content": "سؤال أول؟"},
+                {"role": "user", "content": "جواب أول"},
+                {"role": "assistant", "content": "سؤال ثانٍ؟"},
+                {"role": "user", "content": "جواب ثانٍ"},
+            ],
+        },
+    )
+    assert capped.status_code == 422, capped.text
+    assert capped.json()["detail"]["code"] == "resume_rewrite_rejected"
+    assert "terms" not in capped.json()["detail"]
+
+
+async def test_rewrite_opens_a_dialogue_on_every_fresh_request(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every mode opens with a question; the answers, not a guess, drive the candidate."""
+
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    item_id = workspace["current_draft"]["sections"][0]["items"][0]["id"]
+    calls: list[dict[str, object]] = []
+
+    async def record(**kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+        if kwargs.get("require_clarifying_question"):
+            return SimpleNamespace(
+                clarifying_question="تبيني أبرز الأدوات أم النتائج؟",
+                candidate=None,
+            )
+        return SimpleNamespace(
+            clarifying_question=None,
+            candidate=SimpleNamespace(
+                text="حللت المبيعات باستخدام Power BI بدقة.",
+                evidence_handles=kwargs["evidence_handles"],
+            ),
+        )
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", record)
+    for mode in ("stronger", "shorter", "professional"):
+        opened = await client.post(
+            f"{base}/draft/rewrite",
+            headers=headers,
+            json={
+                "target_kind": "bullet",
+                "section_key": "experience",
+                "item_id": item_id,
+                "bullet_index": 0,
+                "mode": mode,
+                "expected_draft_revision": workspace["draft_revision"],
+            },
+        )
+        assert opened.status_code == 200, opened.text
+        assert opened.json()["kind"] == "question", mode
+    assert [call["require_clarifying_question"] for call in calls] == [True, True, True]
+
+    # Answering the question turns off the forced ask and produces the suggestion.
+    answered = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={
+            "target_kind": "bullet",
+            "section_key": "experience",
+            "item_id": item_id,
+            "bullet_index": 0,
+            "mode": "stronger",
+            "expected_draft_revision": workspace["draft_revision"],
+            "conversation": [
+                {"role": "assistant", "content": "تبيني أبرز الأدوات أم النتائج؟"},
+                {"role": "user", "content": "الأدوات"},
+            ],
+        },
+    )
+    assert answered.status_code == 200, answered.text
+    assert answered.json()["kind"] == "suggestion"
+    assert calls[-1]["require_clarifying_question"] is False
+
+
+async def test_rewrite_asks_when_the_writer_output_fails_a_check(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deterministic output failure is steerable, so it must ask, not report an outage.
+
+    Live logs showed "returned a named entity absent from evidence: coursework" reaching the
+    user as a 503 "temporarily unavailable", which is both wrong and a dead end.
+    """
+
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    item_id = workspace["current_draft"]["sections"][0]["items"][0]["id"]
+
+    async def writer_output_fails(**_: object) -> SimpleNamespace:
+        raise resume_writer_module.ResumeWriterError(
+            "Resume writer returned a named entity absent from evidence: coursework"
+        )
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", writer_output_fails)
+    rewrite_payload = {
+        "target_kind": "bullet",
+        "section_key": "experience",
+        "item_id": item_id,
+        "bullet_index": 0,
+        "mode": "custom",
+        "instruction": "غيّر المواد إلى مواد استثمارية",
+        "expected_draft_revision": workspace["draft_revision"],
+    }
+
+    asked = await client.post(f"{base}/draft/rewrite", headers=headers, json=rewrite_payload)
+    assert asked.status_code == 200, asked.text
+    assert asked.json()["kind"] == "question"
+    assert "حقائقك المؤكدة" in asked.json()["question"]
+
+    reloaded = await client.get(base, headers=headers)
+    assert reloaded.json()["revision"] == workspace["revision"]
+    assert reloaded.json()["pending_suggestion"] is None
+
+    # Only after the budget is spent does the honest outage message return.
+    capped = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={
+            **rewrite_payload,
+            "conversation": [
+                {"role": "assistant", "content": "سؤال أول؟"},
+                {"role": "user", "content": "جواب أول"},
+                {"role": "assistant", "content": "سؤال ثانٍ؟"},
+                {"role": "user", "content": "جواب ثانٍ"},
+            ],
+        },
+    )
+    assert capped.status_code == 503, capped.text
+    assert capped.json()["detail"]["code"] == "resume_writer_unavailable"
+
+
+async def test_rewrite_transport_failure_stays_a_retryable_outage(
+    client,
+    stub_provider: StubWorkspaceProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider that never answered cannot be steered by a question."""
+
+    _profile, base, headers, workspace = await create_generated_workspace(client)
+    item_id = workspace["current_draft"]["sections"][0]["items"][0]["id"]
+
+    async def transport_fails(**_: object) -> SimpleNamespace:
+        raise ResumeWriterTransportError("provider request timed out", transient=True)
+
+    monkeypatch.setattr(stub_provider, "rewrite_section", transport_fails)
+    failed = await client.post(
+        f"{base}/draft/rewrite",
+        headers=headers,
+        json={
+            "target_kind": "bullet",
+            "section_key": "experience",
+            "item_id": item_id,
+            "bullet_index": 0,
+            "mode": "stronger",
+            "expected_draft_revision": workspace["draft_revision"],
+        },
+    )
+    assert failed.status_code == 503, failed.text
+    assert failed.json()["detail"]["code"] == "resume_writer_unavailable"
+
+
 async def test_rewrite_rejects_malformed_clarification_exchanges(
     client,
     stub_provider: StubWorkspaceProvider,

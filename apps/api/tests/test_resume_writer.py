@@ -26,6 +26,7 @@ from career_agent_api.services.resume_writer import (
     ResumeWriterOutputError,
     ResumeWriterTransportError,
     _adaptive_answer_category,
+    _GeneratedClarifyingQuestion,
     _GeneratedDraft,
     _GeneratedRewriteTurn,
     _redact_resume_text,
@@ -5115,6 +5116,137 @@ async def test_summary_rewrite_keeps_a_larger_output_budget() -> None:
     assert result.candidate is not None
     assert result.candidate.proposed_text == "Produced weekly inventory reports using Python."
     assert provider.calls[0]["max_tokens"] == 2_000
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_opens_a_fresh_request_with_a_question() -> None:
+    """A fresh request must start a dialogue, not a guess: ask before any candidate exists."""
+
+    provider = CapturingResumeWriter({"clarifying_question": "تبيني أبرز الأدوات أم النتائج؟"})
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=evidence(),
+        section_key="project",
+        item_id="inventory_project",
+        original_text="Built inventory reports using Python.",
+        instruction="Make it stronger",
+        evidence_handles=["fact_1"],
+        conversation_language=PreferredLanguage.AR,
+        require_clarifying_question=True,
+    )
+
+    assert result.candidate is None
+    assert result.clarifying_question == "تبيني أبرز الأدوات أم النتائج؟"
+    # One cheap question-only call: the provider cannot answer this turn with a candidate.
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["schema"] is _GeneratedClarifyingQuestion
+    assert provider.calls[0]["schema_name"] == "resume_section_rewrite_candidate"
+    assert provider.calls[0]["max_tokens"] == 250
+    assert "ask the single most useful clarifying" in provider.calls[0]["system_instructions"]
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_still_edits_when_the_opening_question_fails() -> None:
+    """A hiccup while opening the dialogue must never block the edit itself."""
+
+    provider = CapturingResumeWriter(
+        [
+            ResumeWriterError(
+                "Resume writer returned invalid structured output (clarifying_question:missing)"
+            ),
+            {
+                "clarifying_question": None,
+                "candidate": {
+                    "section_key": "project",
+                    "item_id": "inventory_project",
+                    "original_text": "Built inventory reports using Python.",
+                    "proposed_text": "Produced weekly inventory reports using Python.",
+                    "evidence_handles": ["fact_1"],
+                },
+            },
+        ]
+    )
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=evidence(),
+        section_key="project",
+        item_id="inventory_project",
+        original_text="Built inventory reports using Python.",
+        instruction="Make it stronger",
+        evidence_handles=["fact_1"],
+        require_clarifying_question=True,
+    )
+
+    assert result.clarifying_question is None
+    assert result.candidate is not None
+    assert result.candidate.proposed_text == "Produced weekly inventory reports using Python."
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_opening_question_transport_failure_is_not_swallowed() -> None:
+    provider = CapturingResumeWriter(
+        [ResumeWriterTransportError("provider request timed out", transient=True)]
+    )
+
+    with pytest.raises(ResumeWriterTransportError):
+        await provider.rewrite_section(
+            language=PreferredLanguage.EN,
+            target_role="Data Analyst",
+            evidence=evidence(),
+            section_key="project",
+            item_id="inventory_project",
+            original_text="Built inventory reports using Python.",
+            instruction="Make it stronger",
+            evidence_handles=["fact_1"],
+            require_clarifying_question=True,
+        )
+
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_section_rewrite_does_not_reopen_the_dialogue_after_the_cap() -> None:
+    """With the budget spent, a forced question is skipped and a candidate is produced."""
+
+    provider = CapturingResumeWriter(
+        {
+            "clarifying_question": None,
+            "candidate": {
+                "section_key": "project",
+                "item_id": "inventory_project",
+                "original_text": "Built inventory reports using Python.",
+                "proposed_text": "Produced weekly inventory reports using Python.",
+                "evidence_handles": ["fact_1"],
+            },
+        }
+    )
+
+    result = await provider.rewrite_section(
+        language=PreferredLanguage.EN,
+        target_role="Data Analyst",
+        evidence=evidence(),
+        section_key="project",
+        item_id="inventory_project",
+        original_text="Built inventory reports using Python.",
+        instruction="Make it stronger",
+        evidence_handles=["fact_1"],
+        conversation=[
+            {"role": "assistant", "content": "سؤال أول؟"},
+            {"role": "user", "content": "جواب أول"},
+            {"role": "assistant", "content": "سؤال ثانٍ؟"},
+            {"role": "user", "content": "جواب ثانٍ"},
+        ],
+        require_clarifying_question=True,
+    )
+
+    assert result.candidate is not None
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["schema"] is not _GeneratedClarifyingQuestion
 
 
 @pytest.mark.asyncio

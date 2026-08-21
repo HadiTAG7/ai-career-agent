@@ -2187,8 +2187,11 @@ describe("resume workspace v2", () => {
     );
     await user.click(toolbar.getByRole("button", { name: "أرسل طلب التعديل" }));
 
-    // The question lands in the notes panel; nothing is applied and nothing persisted.
-    expect(await screen.findByText(question)).toBeInTheDocument();
+    // The question appears twice on purpose: inline where the user clicked, and in the
+    // editorial notes thread. Nothing is applied and nothing is persisted.
+    expect(await screen.findAllByText(question)).toHaveLength(2);
+    expect(within(summary.parentElement!).getByText("المحرر يسأل:")).toBeVisible();
+    expect(toolbar.getByPlaceholderText("جاوب المحرر…")).toBeEnabled();
     expect(screen.getByRole("tab", { name: "المحادثة" })).toHaveTextContent("· 1");
     const reply = screen.getByPlaceholderText("جاوب سؤال المحرر…");
     await user.type(reply, "المحاسبة المالية والاقتصاد الكلي");
@@ -2210,8 +2213,9 @@ describe("resume workspace v2", () => {
 
     // The finished exchange yields the usual before/after suggestion card.
     expect(await screen.findByText(suggestion.after_text)).toBeInTheDocument();
-    expect(screen.queryByText(question)).not.toBeInTheDocument();
+    expect(screen.queryAllByText(question)).toHaveLength(0);
     expect(screen.queryByPlaceholderText("جاوب سؤال المحرر…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("جاوب المحرر…")).not.toBeInTheDocument();
   }, 15_000);
 
   it("cancels the editor's question and returns to normal editing", async () => {
@@ -2239,13 +2243,71 @@ describe("resume workspace v2", () => {
       "غيّر المواد إلى مواد استثمارية",
     );
     await user.click(toolbar.getByRole("button", { name: "أرسل طلب التعديل" }));
-    expect(await screen.findByText(question)).toBeInTheDocument();
+    expect(await screen.findAllByText(question)).toHaveLength(2);
 
-    await user.click(screen.getByRole("button", { name: "إلغاء سؤال المحرر" }));
-    expect(screen.queryByText(question)).not.toBeInTheDocument();
+    // Cancelling from either copy of the question clears the whole exchange.
+    await user.click(screen.getAllByRole("button", { name: "إلغاء سؤال المحرر" })[0]);
+    expect(screen.queryAllByText(question)).toHaveLength(0);
     expect(screen.queryByPlaceholderText("جاوب سؤال المحرر…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("جاوب المحرر…")).not.toBeInTheDocument();
     expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenCalledTimes(1);
   });
+
+  it("skips the dialogue with one click and still applies the edit", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      readiness_score: 88,
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const question = "تفضّل أُبرز الأدوات أم النتائج؟";
+    const suggestion = {
+      suggestion_id: "suggestion-skipped",
+      target_kind: "professional_summary" as const,
+      section_key: null,
+      item_id: null,
+      bullet_index: null,
+      mode: "stronger" as const,
+      instruction: null,
+      before_text: draft.professional_summary,
+      after_text: "ملخص مهني محسّن بعد تخطي الحوار.",
+      base_draft_revision: 1,
+      evidence_handles: ["fact:fact-1"],
+    };
+    apiMocks.rewriteResumeDraftSelection
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question })
+      .mockResolvedValueOnce({ kind: "suggestion", suggestion, question: null });
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+    const toolbar = within(summary.parentElement!);
+
+    // A preset button opens the dialogue too, so the escape hatch matters.
+    await user.click(toolbar.getByRole("button", { name: "قوّها" }));
+    expect(await screen.findAllByText(question)).toHaveLength(2);
+
+    await user.click(screen.getAllByRole("button", { name: "نفّذ مباشرة بدون سؤال" })[0]);
+
+    await waitFor(() => expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenLastCalledWith(
+      profile.id,
+      expect.objectContaining({
+        mode: "stronger",
+        conversation: [
+          { role: "assistant", content: question },
+          {
+            role: "user",
+            content: "نفّذ التعديل بأفضل صياغة تراها مناسبة بالمعلومات المتوفرة.",
+          },
+        ],
+      }),
+    ));
+    expect(await screen.findByText(suggestion.after_text)).toBeInTheDocument();
+  }, 15_000);
 
   it("waits for autosave and merges a rewrite into the latest workspace without losing edits", async () => {
     const user = userEvent.setup();

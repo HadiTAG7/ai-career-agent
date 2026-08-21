@@ -76,6 +76,13 @@ import { cn } from "@/lib/utils";
 
 type SaveState = "saved" | "saving" | "error";
 type MobilePanel = "conversation" | "resume";
+// Sent as the user's answer when they would rather not discuss the edit. It reads as
+// guidance so the editor produces a candidate from the evidence it already has.
+const SKIP_CLARIFICATION_ANSWER = {
+  ar: "نفّذ التعديل بأفضل صياغة تراها مناسبة بالمعلومات المتوفرة.",
+  en: "Go ahead with the best wording you can from the details you already have.",
+} as const;
+
 // An in-flight clarify-then-rewrite exchange. The server stores nothing for it: the
 // client holds the thread and resends it whole with each answer.
 type RewriteClarification = {
@@ -1533,6 +1540,7 @@ function ReviewPanel({
   onContactChange,
   onRewrite,
   onClarificationReply,
+  onClarificationSkip,
   onClarificationCancel,
   onDecision,
 }: {
@@ -1548,6 +1556,7 @@ function ReviewPanel({
   onContactChange: (contact: ApiResumeWorkspace["contact"]) => void;
   onRewrite: (selection: ResumeCanvasSelection, mode: ResumeRewriteMode, instruction?: string) => void;
   onClarificationReply: (answer: string) => void;
+  onClarificationSkip: () => void;
   onClarificationCancel: () => void;
   onDecision: (decision: "accept" | "reject") => void;
 }) {
@@ -1635,6 +1644,7 @@ function ReviewPanel({
               ))}
               {rewriting ? <p className="inline-flex items-center gap-2 text-[11px] text-muted"><LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />{locale === "ar" ? "المحرر يفكر…" : "The editor is thinking…"}</p> : null}
             </div>
+            <button type="button" className="mt-3 inline-flex min-h-9 items-center text-[11px] font-semibold text-muted hover:text-primary-text disabled:opacity-45" disabled={rewriting} onClick={onClarificationSkip}>{locale === "ar" ? "نفّذ مباشرة بدون سؤال" : "Just make the edit"}</button>
           </section>
         ) : null}
 
@@ -2637,6 +2647,10 @@ export function ResumeWorkspaceV2({
     ]);
   }
 
+  function handleClarificationSkip() {
+    handleClarificationReply(SKIP_CLARIFICATION_ANSWER[locale]);
+  }
+
   async function handleSuggestionDecision(decision: "accept" | "reject") {
     const current = workspaceRef.current;
     if (!current) return;
@@ -3000,9 +3014,13 @@ export function ResumeWorkspaceV2({
               editingLocked={busy || rewriting || resetting}
               selection={selection}
               rewriting={rewriteLocked}
+              clarification={clarification}
               onSelect={setSelection}
               onDraftChange={handleDraftChange}
               onRewrite={(target, mode, instruction) => void handleRewrite(target, mode, instruction)}
+              onClarificationReply={handleClarificationReply}
+              onClarificationSkip={handleClarificationSkip}
+              onClarificationCancel={() => setClarification(null)}
             />
           </div>
 
@@ -3048,6 +3066,7 @@ export function ResumeWorkspaceV2({
                 onContactChange={handleContactChange}
                 onRewrite={(target, mode, instruction) => void handleRewrite(target, mode, instruction)}
                 onClarificationReply={handleClarificationReply}
+                onClarificationSkip={handleClarificationSkip}
                 onClarificationCancel={() => setClarification(null)}
                 onDecision={(decision) => void handleSuggestionDecision(decision)}
               />
