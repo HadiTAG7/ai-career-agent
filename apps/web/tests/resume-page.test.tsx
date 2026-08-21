@@ -2309,6 +2309,64 @@ describe("resume workspace v2", () => {
     expect(await screen.findByText(suggestion.after_text)).toBeInTheDocument();
   }, 15_000);
 
+  it("keeps the caret in the inline reply box and skips in the conversation language", async () => {
+    const user = userEvent.setup();
+    const englishWorkspace = makeWorkspace({
+      stage: "writing",
+      conversation_language: "en",
+      language: "en",
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(englishWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const question = "Which detail should lead?";
+    apiMocks.rewriteResumeDraftSelection
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question })
+      .mockResolvedValueOnce({
+        kind: "suggestion",
+        question: null,
+        suggestion: {
+          suggestion_id: "suggestion-en",
+          target_kind: "professional_summary" as const,
+          section_key: null,
+          item_id: null,
+          bullet_index: null,
+          mode: "stronger" as const,
+          instruction: null,
+          before_text: draft.professional_summary,
+          after_text: "A sharper professional summary.",
+          base_draft_revision: 1,
+          evidence_handles: ["fact:fact-1"],
+        },
+      });
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+    const toolbar = within(summary.parentElement!);
+    await user.click(toolbar.getByRole("button", { name: "قوّها" }));
+    expect(await screen.findAllByText(question)).toHaveLength(2);
+
+    // The reply box the user is looking at keeps the caret; the notes copy must not steal it.
+    expect(toolbar.getByPlaceholderText("جاوب المحرر…")).toHaveFocus();
+
+    await user.click(screen.getAllByRole("button", { name: "نفّذ مباشرة بدون سؤال" })[0]);
+    await waitFor(() => expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenLastCalledWith(
+      profile.id,
+      expect.objectContaining({
+        conversation: [
+          { role: "assistant", content: question },
+          {
+            role: "user",
+            content: "Go ahead with the best wording you can from the details you already have.",
+          },
+        ],
+      }),
+    ));
+  }, 15_000);
+
   it("waits for autosave and merges a rewrite into the latest workspace without losing edits", async () => {
     const user = userEvent.setup();
     const writingWorkspace = makeWorkspace({

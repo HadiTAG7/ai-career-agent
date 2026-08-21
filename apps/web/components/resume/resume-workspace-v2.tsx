@@ -1567,8 +1567,13 @@ function ReviewPanel({
   const awaitingAnswer = thread.length > 0 && thread[thread.length - 1].role === "assistant";
 
   useEffect(() => {
-    // A new question from the editor puts the caret straight into the reply box.
-    if (awaitingAnswer && !rewriting) instructionInputRef.current?.focus();
+    if (!awaitingAnswer || rewriting) return;
+    // A new question puts the caret in the reply box — unless a field already holds it.
+    // The paper's inline reply box sits where the user clicked and autofocuses first, so
+    // stealing focus here would drag them to the other column mid-question.
+    const focused = typeof document === "undefined" ? null : document.activeElement;
+    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) return;
+    instructionInputRef.current?.focus();
   }, [awaitingAnswer, rewriting, thread.length]);
 
   function submitInstruction(event: FormEvent<HTMLFormElement>) {
@@ -2648,7 +2653,10 @@ export function ResumeWorkspaceV2({
   }
 
   function handleClarificationSkip() {
-    handleClarificationReply(SKIP_CLARIFICATION_ANSWER[locale]);
+    // The button label is chrome, but this sentence is content the editor reads, so it
+    // follows the workspace's conversation language like every other authored turn.
+    const language = workspace ? workspaceConversationLanguage(workspace) : locale;
+    handleClarificationReply(SKIP_CLARIFICATION_ANSWER[language]);
   }
 
   async function handleSuggestionDecision(decision: "accept" | "reject") {
