@@ -23,6 +23,11 @@ import { buildFallbackResumeDraft } from "@/lib/resume-presentation";
 import { cn } from "@/lib/utils";
 import type { ResumeCanvasSelection } from "@/lib/resume-presentation";
 
+export type ProofingClarification = {
+  target: ResumeCanvasSelection;
+  thread: Array<{ role: "assistant" | "user"; content: string }>;
+};
+
 type ResumeProofingPaperProps = {
   locale: "ar" | "en";
   documentLanguage: "ar" | "en";
@@ -34,9 +39,13 @@ type ResumeProofingPaperProps = {
   editingLocked?: boolean;
   selection: ResumeCanvasSelection | null;
   rewriting?: boolean;
+  clarification?: ProofingClarification | null;
   onSelect: (selection: ResumeCanvasSelection) => void;
   onDraftChange: (draft: ApiResumeDraftContent) => void;
   onRewrite: (selection: ResumeCanvasSelection, mode: ResumeRewriteMode, instruction?: string) => void;
+  onClarificationReply?: (answer: string) => void;
+  onClarificationSkip?: () => void;
+  onClarificationCancel?: () => void;
 };
 
 function selectionMatches(
@@ -53,15 +62,24 @@ function ProofToolbar({
   locale,
   selection,
   rewriting,
+  clarification,
   onRewrite,
+  onClarificationReply,
+  onClarificationSkip,
+  onClarificationCancel,
 }: {
   locale: "ar" | "en";
   selection: ResumeCanvasSelection;
   rewriting: boolean;
+  clarification?: ProofingClarification | null;
   onRewrite: (selection: ResumeCanvasSelection, mode: ResumeRewriteMode, instruction?: string) => void;
+  onClarificationReply?: (answer: string) => void;
+  onClarificationSkip?: () => void;
+  onClarificationCancel?: () => void;
 }) {
   const [asking, setAsking] = useState(false);
   const [instruction, setInstruction] = useState("");
+  const [answer, setAnswer] = useState("");
   const actions: Array<{ mode: ResumeRewriteMode; ar: string; en: string }> = [
     { mode: "stronger", ar: "قوّها", en: "Strengthen" },
     { mode: "shorter", ar: "اختصرها", en: "Shorten" },
@@ -74,6 +92,75 @@ function ProofToolbar({
     onRewrite(selection, "custom", text);
     setInstruction("");
     setAsking(false);
+  }
+
+  function submitAnswer(event: React.FormEvent) {
+    event.preventDefault();
+    const text = answer.trim();
+    if (!text || !onClarificationReply) return;
+    onClarificationReply(text);
+    setAnswer("");
+  }
+
+  // The editor's question belongs where the user clicked, not in a side panel they are
+  // not looking at.
+  if (clarification) {
+    const lastTurn = clarification.thread[clarification.thread.length - 1];
+    const question = lastTurn?.role === "assistant" ? lastTurn.content : "";
+    return (
+      <div
+        className="mt-2 max-w-full border-y border-border bg-background text-[11px] text-foreground shadow-[0_8px_18px_rgba(7,17,31,0.14)]"
+        aria-label={locale === "ar" ? "سؤال من المحرر" : "A question from the editor"}
+      >
+        <div className="flex items-start gap-2 px-2 pt-2">
+          <p className="flex-1 leading-5" dir="auto">
+            <span className="me-1 font-bold text-primary-text">
+              {locale === "ar" ? "المحرر يسأل:" : "The editor asks:"}
+            </span>
+            {question}
+          </p>
+          {onClarificationCancel ? (
+            <button
+              type="button"
+              className="grid h-6 w-6 shrink-0 place-items-center text-muted hover:text-danger"
+              onClick={onClarificationCancel}
+              aria-label={locale === "ar" ? "إلغاء سؤال المحرر" : "Cancel the editor's question"}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+        </div>
+        <form className="mt-2 flex items-center border-t border-border" onSubmit={submitAnswer}>
+          <input
+            className="min-h-9 min-w-0 flex-1 bg-transparent px-2 text-[11px] text-foreground placeholder:text-muted"
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value)}
+            placeholder={locale === "ar" ? "جاوب المحرر…" : "Answer the editor…"}
+            disabled={rewriting}
+            dir="auto"
+            autoFocus
+          />
+          <button
+            type="submit"
+            className="grid h-9 w-9 shrink-0 place-items-center border-s border-border text-primary-text hover:bg-primary hover:text-primary-foreground disabled:opacity-45"
+            disabled={!answer.trim() || rewriting}
+            aria-label={locale === "ar" ? "إرسال الجواب للمحرر" : "Send the answer to the editor"}
+          >
+            {rewriting ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5 rtl:-scale-x-100" />}
+          </button>
+        </form>
+        {onClarificationSkip ? (
+          <button
+            type="button"
+            className="min-h-9 w-full border-t border-border px-2 text-[10px] font-semibold text-muted hover:text-primary-text disabled:opacity-45"
+            disabled={rewriting}
+            onClick={onClarificationSkip}
+          >
+            {locale === "ar" ? "نفّذ مباشرة بدون سؤال" : "Just make the edit"}
+          </button>
+        ) : null}
+      </div>
+    );
   }
 
   // "Ask me" collects the requested change first; the editor must never guess an edit
@@ -156,9 +243,13 @@ export function ResumeProofingPaper({
   editingLocked = false,
   selection,
   rewriting = false,
+  clarification = null,
   onSelect,
   onDraftChange,
   onRewrite,
+  onClarificationReply,
+  onClarificationSkip,
+  onClarificationCancel,
 }: ResumeProofingPaperProps) {
   const [zoom, setZoom] = useState(100);
   const displayedDraft = useMemo(
@@ -166,6 +257,26 @@ export function ResumeProofingPaper({
     [documentLanguage, draft, facts, profile],
   );
   const canEdit = editable && Boolean(draft);
+  const activeClarification = clarification
+    && selection
+    && selectionMatches(selection, clarification.target)
+    ? clarification
+    : null;
+
+  function toolbarFor(current: ResumeCanvasSelection) {
+    return (
+      <ProofToolbar
+        locale={locale}
+        selection={current}
+        rewriting={rewriting}
+        clarification={activeClarification}
+        onRewrite={onRewrite}
+        onClarificationReply={onClarificationReply}
+        onClarificationSkip={onClarificationSkip}
+        onClarificationCancel={onClarificationCancel}
+      />
+    );
+  }
 
   function commit(next: ApiResumeDraftContent) {
     if (canEdit && !editingLocked) onDraftChange(next);
@@ -257,7 +368,7 @@ export function ResumeProofingPaper({
                   onFocus={() => onSelect({ targetKind: "professional_summary", text: displayedDraft.professional_summary })}
                   onChange={(event) => commit({ ...displayedDraft, professional_summary: event.target.value })}
                 />
-                {selectionMatches(selection, { targetKind: "professional_summary" }) && selection ? <ProofToolbar locale={locale} selection={selection} rewriting={rewriting} onRewrite={onRewrite} /> : null}
+                {selectionMatches(selection, { targetKind: "professional_summary" }) && selection ? toolbarFor(selection) : null}
               </div>
             ) : <p className="mt-1 whitespace-pre-wrap text-[#344054]">{displayedDraft.professional_summary}</p>}
           </section>
@@ -294,7 +405,7 @@ export function ResumeProofingPaper({
                                   onChange={(event) => updateItemBullet(sectionIndex, itemIndex, bulletIndex, event.target.value)}
                                 />
                               ) : bullet}
-                              {selected && selection ? <ProofToolbar locale={locale} selection={selection} rewriting={rewriting} onRewrite={onRewrite} /> : null}
+                              {selected && selection ? toolbarFor(selection) : null}
                             </li>
                           );
                         })}

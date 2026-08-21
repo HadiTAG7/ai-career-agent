@@ -3520,7 +3520,18 @@ async def rewrite_resume_draft(
             evidence_handles=handles,
             conversation=[turn.model_dump() for turn in payload.conversation],
             conversation_language=conv_language,
+            # A fresh request opens with a question so the user steers the edit; once the
+            # exchange has turns, the answers drive the candidate instead.
+            require_clarifying_question=not payload.conversation,
         )
+    except ResumeWriterTransportError as exc:
+        # The provider never answered. A question cannot help, so stay honest and retryable.
+        logger.warning("Resume workspace rewrite could not reach the provider: %s", exc)
+        raise _api_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "resume_writer_unavailable",
+            "The AI resume rewrite is temporarily unavailable",
+        ) from exc
     except ResumeWriterOutputError as exc:
         dropped_terms = list(getattr(exc, "dropped_terms", ()) or ())
         if asked_questions < REWRITE_CLARIFYING_QUESTION_CAP:
@@ -3550,6 +3561,18 @@ async def rewrite_resume_draft(
             terms=dropped_terms,
         ) from exc
     except ResumeWriterError as exc:
+        if asked_questions < REWRITE_CLARIFYING_QUESTION_CAP:
+            # The provider answered but its output failed a deterministic check — a named
+            # entity absent from the evidence, for instance. That is a request the user can
+            # still steer, so ask rather than report an outage.
+            logger.info(
+                "Resume workspace rewrite turned a writer failure into a question: %s",
+                exc,
+            )
+            return ResumeRewriteTurnRead(
+                kind="question",
+                question=_unsupported_rewrite_clarifying_question(question_language),
+            )
         logger.warning("Resume workspace rewrite failed: %s", exc)
         raise _api_error(
             status.HTTP_503_SERVICE_UNAVAILABLE,
