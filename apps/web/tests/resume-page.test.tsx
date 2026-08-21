@@ -2187,15 +2187,20 @@ describe("resume workspace v2", () => {
     );
     await user.click(toolbar.getByRole("button", { name: "أرسل طلب التعديل" }));
 
-    // The question appears twice on purpose: inline where the user clicked, and in the
-    // editorial notes thread. Nothing is applied and nothing is persisted.
+    // The question text shows in both places, but exactly ONE of them is interactive:
+    // the reply box beside the line the user clicked. Nothing is persisted yet.
     expect(await screen.findAllByText(question)).toHaveLength(2);
     expect(within(summary.parentElement!).getByText("المحرر يسأل:")).toBeVisible();
-    expect(toolbar.getByPlaceholderText("جاوب المحرر…")).toBeEnabled();
+    const reply = toolbar.getByPlaceholderText("جاوب المحرر…");
+    expect(reply).toBeEnabled();
+    expect(screen.queryAllByPlaceholderText("جاوب سؤال المحرر…")).toHaveLength(0);
+    expect(screen.getAllByRole("button", { name: "نفّذ مباشرة بدون سؤال" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "إلغاء سؤال المحرر" })).toHaveLength(2);
+    // The resume tab stays selected so that one reply box is never hidden behind a tab.
+    expect(screen.getByRole("tab", { name: "السيرة" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "المحادثة" })).toHaveTextContent("· 1");
-    const reply = screen.getByPlaceholderText("جاوب سؤال المحرر…");
     await user.type(reply, "المحاسبة المالية والاقتصاد الكلي");
-    await user.click(screen.getByRole("button", { name: "إرسال الجواب" }));
+    await user.click(toolbar.getByRole("button", { name: "إرسال الجواب للمحرر" }));
 
     // The answer resends the whole exchange against the latest draft revision.
     await waitFor(() => expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenLastCalledWith(
@@ -2211,11 +2216,12 @@ describe("resume workspace v2", () => {
       }),
     ));
 
-    // The finished exchange yields the usual before/after suggestion card.
+    // The finished exchange yields the usual before/after suggestion card, and the tab
+    // flips to the notes column where accept/reject live.
     expect(await screen.findByText(suggestion.after_text)).toBeInTheDocument();
     expect(screen.queryAllByText(question)).toHaveLength(0);
-    expect(screen.queryByPlaceholderText("جاوب سؤال المحرر…")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText("جاوب المحرر…")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "المحادثة" })).toHaveAttribute("aria-selected", "true");
   }, 15_000);
 
   it("cancels the editor's question and returns to normal editing", async () => {
@@ -2252,6 +2258,103 @@ describe("resume workspace v2", () => {
     expect(screen.queryByPlaceholderText("جاوب المحرر…")).not.toBeInTheDocument();
     expect(apiMocks.rewriteResumeDraftSelection).toHaveBeenCalledTimes(1);
   });
+
+  it("ends the exchange instead of looping when the editor refuses at the cap", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const question = "أي مواد تقصد؟";
+    apiMocks.rewriteResumeDraftSelection
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question })
+      .mockRejectedValueOnce(new ApiHttpError(422, "rejected", "resume_rewrite_rejected"));
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+    const toolbar = within(summary.parentElement!);
+    await user.click(toolbar.getByRole("button", { name: "قوّها" }));
+    expect(await screen.findAllByText(question)).toHaveLength(2);
+
+    await user.type(toolbar.getByPlaceholderText("جاوب المحرر…"), "المحاسبة");
+    await user.click(toolbar.getByRole("button", { name: "إرسال الجواب للمحرر" }));
+
+    // A spent budget must not leave the same question on screen inviting the identical
+    // rejection forever; the exchange ends and the reason is shown.
+    await waitFor(() => expect(screen.queryAllByText(question)).toHaveLength(0));
+    expect(screen.queryByPlaceholderText("جاوب المحرر…")).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+  }, 15_000);
+
+  it("does not resurrect a cancelled exchange when the reply lands late", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const question = "أي تفصيل أُبرز؟";
+    const lateQuestion = "وسؤال متأخر لا يجب أن يظهر";
+    let resolveLate!: (turn: { kind: string; suggestion: null; question: string }) => void;
+    const lateReply = new Promise<{ kind: string; suggestion: null; question: string }>((resolve) => {
+      resolveLate = resolve;
+    });
+    apiMocks.rewriteResumeDraftSelection
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question })
+      .mockReturnValueOnce(lateReply);
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const summary = screen.getByDisplayValue(draft.professional_summary);
+    await user.click(summary);
+    const toolbar = within(summary.parentElement!);
+    await user.click(toolbar.getByRole("button", { name: "قوّها" }));
+    expect(await screen.findAllByText(question)).toHaveLength(2);
+
+    await user.type(toolbar.getByPlaceholderText("جاوب المحرر…"), "الأدوات");
+    await user.click(toolbar.getByRole("button", { name: "إرسال الجواب للمحرر" }));
+    await user.click(screen.getAllByRole("button", { name: "إلغاء سؤال المحرر" })[0]);
+    expect(screen.queryAllByText(question)).toHaveLength(0);
+
+    await act(async () => {
+      resolveLate({ kind: "question", suggestion: null, question: lateQuestion });
+      await lateReply;
+    });
+
+    expect(screen.queryAllByText(lateQuestion)).toHaveLength(0);
+    expect(screen.queryByPlaceholderText("جاوب المحرر…")).not.toBeInTheDocument();
+  }, 15_000);
+
+  it("gives the headline its own reply box so its question is answerable", async () => {
+    const user = userEvent.setup();
+    const writingWorkspace = makeWorkspace({
+      stage: "writing",
+      current_draft: draft,
+      draft_revision: 1,
+    });
+    apiMocks.getResumeWorkspace.mockResolvedValue(writingWorkspace);
+    apiMocks.getCareerFacts.mockResolvedValue([fact]);
+    const question = "تبي العنوان يذكر التخصص أم الأدوات؟";
+    apiMocks.rewriteResumeDraftSelection
+      .mockResolvedValueOnce({ kind: "question", suggestion: null, question });
+    await renderResumePage();
+
+    await user.click(await screen.findByRole("tab", { name: "السيرة" }));
+    const headline = screen.getByLabelText("العنوان المهني");
+    await user.click(headline);
+    const headlineArea = within(headline.parentElement!);
+    await user.click(headlineArea.getByRole("button", { name: "قوّها" }));
+
+    expect(await screen.findAllByText(question)).toHaveLength(2);
+    expect(headlineArea.getByPlaceholderText("جاوب المحرر…")).toBeEnabled();
+  }, 15_000);
 
   it("skips the dialogue with one click and still applies the edit", async () => {
     const user = userEvent.setup();

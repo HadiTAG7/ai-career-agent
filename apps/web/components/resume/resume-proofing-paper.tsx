@@ -81,14 +81,20 @@ function ProofToolbar({
   const [instruction, setInstruction] = useState("");
   const [answer, setAnswer] = useState("");
   const answerInputRef = useRef<HTMLInputElement>(null);
-  const latestTurn = clarification?.thread[clarification.thread.length - 1];
-  const awaitingAnswer = latestTurn?.role === "assistant";
+  const thread = clarification?.thread ?? [];
+  const openQuestion = [...thread].reverse().find((turn) => turn.role === "assistant")?.content ?? "";
+  const awaitingAnswer = thread[thread.length - 1]?.role === "assistant";
 
   useEffect(() => {
+    if (!clarification) return;
     // autoFocus only fires on mount, and the input is blurred while an answer is in
-    // flight, so a second question would otherwise leave the caret in the side column.
+    // flight, so a second question would otherwise leave the caret nowhere. Bring the
+    // block into view too: the fixed action bar can otherwise cover it.
     if (awaitingAnswer && !rewriting) answerInputRef.current?.focus();
+    // Optional call: jsdom and older engines do not implement scrollIntoView.
+    answerInputRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [awaitingAnswer, rewriting, clarification]);
+
   const actions: Array<{ mode: ResumeRewriteMode; ar: string; en: string }> = [
     { mode: "stronger", ar: "قوّها", en: "Strengthen" },
     { mode: "shorter", ar: "اختصرها", en: "Shorten" },
@@ -114,10 +120,9 @@ function ProofToolbar({
   // The editor's question belongs where the user clicked, not in a side panel they are
   // not looking at.
   if (clarification) {
-    const question = awaitingAnswer ? latestTurn.content : "";
     return (
       <div
-        className="mt-2 max-w-full border-y border-border bg-background text-[11px] text-foreground shadow-[0_8px_18px_rgba(7,17,31,0.14)]"
+        className="relative z-40 mt-2 max-w-full border-y border-border bg-background text-[11px] text-foreground shadow-[0_8px_18px_rgba(7,17,31,0.14)]"
         aria-label={locale === "ar" ? "سؤال من المحرر" : "A question from the editor"}
       >
         <div className="flex items-start gap-2 px-2 pt-2">
@@ -125,7 +130,7 @@ function ProofToolbar({
             <span className="me-1 font-bold text-primary-text">
               {locale === "ar" ? "المحرر يسأل:" : "The editor asks:"}
             </span>
-            {question}
+            {openQuestion}
           </p>
           {onClarificationCancel ? (
             <button
@@ -138,6 +143,12 @@ function ProofToolbar({
             </button>
           ) : null}
         </div>
+        {rewriting ? (
+          <p className="mt-1 inline-flex items-center gap-1.5 px-2 pb-1 text-[10px] text-muted">
+            <LoaderCircle className="h-3 w-3 animate-spin" aria-hidden="true" />
+            {locale === "ar" ? "المحرر يفكر…" : "The editor is thinking…"}
+          </p>
+        ) : null}
         <form className="mt-2 flex items-center border-t border-border" onSubmit={submitAnswer}>
           <input
             ref={answerInputRef}
@@ -275,6 +286,7 @@ export function ResumeProofingPaper({
   function toolbarFor(current: ResumeCanvasSelection) {
     return (
       <ProofToolbar
+        key={activeClarification ? "clarifying" : "idle"}
         locale={locale}
         selection={current}
         rewriting={rewriting}
@@ -356,6 +368,7 @@ export function ResumeProofingPaper({
                 onChange={(event) => commit({ ...displayedDraft, headline: event.target.value })}
               />
             ) : <p className="mt-2 text-[14px] font-medium text-[#344054]">{displayedDraft.headline}</p>}
+            {selectionMatches(selection, { targetKind: "headline" }) && selection ? toolbarFor(selection) : null}
             <div className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[8px] text-[#475467]">
               {contact.email ? <span className="inline-flex items-center gap-1"><Mail className="h-2.5 w-2.5" />{contact.email}</span> : null}
               {contact.phone ? <span className="inline-flex items-center gap-1"><Phone className="h-2.5 w-2.5" />{contact.phone}</span> : null}
