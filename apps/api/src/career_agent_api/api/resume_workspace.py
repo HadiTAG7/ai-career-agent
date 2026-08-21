@@ -3422,6 +3422,30 @@ def _dropped_terms_clarifying_question(
     return question[:500]
 
 
+def _unsupported_rewrite_clarifying_question(language: PreferredLanguage) -> str:
+    """Ask how to proceed when the request cannot be met from the confirmed facts.
+
+    The writer hits this when the instruction needs a detail the evidence does not carry:
+    it returns the original text untouched rather than inventing one, and the guard
+    rejects that. Asking keeps the request alive instead of dead-ending on a rejection.
+    """
+
+    if language is PreferredLanguage.AR:
+        question = (
+            "ما قدرت أنفّذ طلبك على هذا النص دون إضافة معلومة لا تدعمها حقائقك المؤكدة. "
+            "وضّح لي كيف أتعامل معه: أعيد صياغته بالمعلومات الحالية فقط، أم عندك تفاصيل "
+            "تريد إبرازها؟ (التفاصيل الجديدة تحتاج تأكيدها في المحادثة أولًا حتى أستخدمها.)"
+        )
+    else:
+        question = (
+            "I could not apply your request to this text without adding something your "
+            "confirmed facts do not support. Tell me how to handle it: reword it using only "
+            "the current details, or is there a detail you want highlighted? (New details "
+            "need confirming in the conversation first before I can use them.)"
+        )
+    return question[:500]
+
+
 @router.post("/draft/rewrite", response_model=ResumeRewriteTurnRead)
 async def rewrite_resume_draft(
     profile_id: UUID,
@@ -3499,19 +3523,25 @@ async def rewrite_resume_draft(
         )
     except ResumeWriterOutputError as exc:
         dropped_terms = list(getattr(exc, "dropped_terms", ()) or ())
-        if dropped_terms and asked_questions < REWRITE_CLARIFYING_QUESTION_CAP:
-            # The evidence guard named what the rewrite would lose. Asking the user how
-            # to handle those details beats a dead-end rejection. A question turn
-            # persists nothing: no relock, no revision bump, no pending suggestion.
+        if asked_questions < REWRITE_CLARIFYING_QUESTION_CAP:
+            # The guard rejected the wording, which means the request as phrased cannot be
+            # met from the confirmed facts. Ask instead of dead-ending: name the details at
+            # risk when the guard identified them, otherwise ask how to proceed. A question
+            # turn persists nothing: no relock, no revision bump, no pending suggestion.
             logger.info(
-                "Resume workspace rewrite turned a dropped-details rejection into a question"
+                "Resume workspace rewrite turned an evidence rejection into a question: %s",
+                exc,
             )
             return ResumeRewriteTurnRead(
                 kind="question",
-                question=_dropped_terms_clarifying_question(dropped_terms, question_language),
+                question=(
+                    _dropped_terms_clarifying_question(dropped_terms, question_language)
+                    if dropped_terms
+                    else _unsupported_rewrite_clarifying_question(question_language)
+                ),
             )
-        # The provider answered; our evidence guard rejected the wording. Retrying the
-        # same request reproduces the same rejection, so do not invite a blind retry.
+        # The clarification budget is spent and the wording still fails the guard.
+        # Retrying the same request reproduces the same rejection, so be honest instead.
         logger.warning("Resume workspace rewrite rejected by evidence checks: %s", exc)
         raise _api_error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

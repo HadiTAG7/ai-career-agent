@@ -492,9 +492,13 @@ Rules:
    meaningful wording improvement while preserving every supported fact.
 9. Never describe a rewrite as measurable or impact-focused unless the cited evidence already
    contains the supporting number or result.
-10. Ask a clarifying question only when the instruction is ambiguous, needs information that
-    neither the original text nor the cited evidence contains, or could only be satisfied by
-    dropping supported material. When you can act faithfully, act without asking.
+10. Asking is required, not optional, when the instruction needs a detail that neither the
+    original text nor the cited evidence contains — for example "change the courses to
+    investment courses" when no such course appears in the evidence. Return
+    `clarifying_question` there: echoing the original text back unchanged, or inventing the
+    missing detail, are both violations. Ask as well when the instruction is ambiguous or
+    could only be satisfied by dropping supported material. When you can act faithfully on
+    the evidence you have, act without asking.
 11. `conversation` holds the earlier clarifying turns of this same request. Treat the user's
     answers there as the authoritative refinement of `instruction`; never re-ask a question the
     user already answered.
